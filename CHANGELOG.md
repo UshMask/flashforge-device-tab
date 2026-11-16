@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.4.0
+
+Settings for the two things users asked about: what is read from profiles, and
+whether the extra tab exists.
+
+### Added
+
+- **“Read CheckCode from printer profiles”** (on by default). Turning it off keeps
+  the plugin from reading `printhost_apikey`; a code typed in the panel is then
+  stored in the plugin config instead.
+- **“Show the Printers tab”** (on by default). Turning it off leaves the tab in
+  place with a short note instead of the dashboard.
+- Both switches are in the panel's Settings and in the dashboard's Settings.
+
+### Fixed
+
+- The Device tab no longer stays broken after an upgrade: a `print_host_webui`
+  that points at an older plugin port (18765/18769) is rewritten to the current
+  page on plugin load, and the previous value is kept for the “back to native
+  page” action.
+
 ## 1.3.1
 
 Fixes the empty Printers tab.

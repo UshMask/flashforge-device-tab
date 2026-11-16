@@ -289,7 +289,9 @@ class DiscoveryTests(unittest.TestCase):
                 return selected
 
         orca.host = SimpleNamespace(preset_bundle=lambda: SimpleNamespace(printers=Collection()))
-        return plugin.FlashForgeService()
+        service = plugin.FlashForgeService()
+        service.get_config = lambda: "{}"
+        return service
 
     def test_discovers_flashforge_profiles(self):
         service = self.make_service([
@@ -330,10 +332,15 @@ class PageBridgeTests(unittest.TestCase):
         class Service:
             _server = self.server
 
-            def set_mode(self, mode):
-                if mode not in ("panel", "device", "dashboard"):
+            def __init__(self):
+                self.calls = []
+
+            def apply_settings(self, host, code, mode, read_check_code=None, tab_enabled=None):
+                if mode and mode not in ("panel", "device", "dashboard"):
                     raise ValueError("Unknown display mode.")
-                self._server.mode = lambda: ("device" if mode == "dashboard" else mode)
+                self.calls.append((host, code, mode, read_check_code, tab_enabled))
+                if mode:
+                    self._server.mode = lambda: ("device" if mode == "dashboard" else mode)
 
         self.service = Service()
         plugin.FlashForgeService.instance = self.service
@@ -384,11 +391,11 @@ class ServerTests(unittest.TestCase):
         self.server.configure(lambda: dict(self.config), Path(self.folder.name))
         self.server.restore_page = None
 
-        def apply_settings(host, check_code, mode=""):
+        def apply_settings(host, check_code, mode="", read_check_code=None, tab_enabled=None):
             host = plugin.local_address(host)
             if len(check_code) > 32 or any(not 33 <= ord(c) <= 126 for c in check_code):
                 raise ValueError("bad code")
-            self.applied.append((host, check_code, mode))
+            self.applied.append((host, check_code, mode, read_check_code, tab_enabled))
             return host
 
         self.server.apply_settings = apply_settings
@@ -539,7 +546,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["endpoint"], "127.0.0.1")
         self.assertFalse(data["moved"])
-        self.assertEqual(self.applied, [("127.0.0.1", "newcode", "")])
+        self.assertEqual(self.applied, [("127.0.0.1", "newcode", "", None, None)])
 
     def test_native_post_requires_action_header(self):
         status, _, _ = request(plugin.WEB_PORT, self.url("native"), method="POST",
@@ -637,34 +644,37 @@ class SwitchViewTests(unittest.TestCase):
         self.service.save_config = lambda value: (self.saved_config.append(json.loads(value)),
                                                   self.fake_server.data.update(json.loads(value)))
         self.preset.values["print_host_webui"] = plugin.monitor_url("127.0.0.1")
-        endpoint = self.service.apply_settings("192.168.1.99", "newcode", "")
+        endpoint = self.service.apply_settings("192.168.1.99", "newcode", "", None, None)
         self.assertEqual(endpoint, "192.168.1.99")
         self.assertEqual(self.preset.values["print_host"], "192.168.1.99")
         self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("192.168.1.99"))
-        self.assertEqual(self.saved_config,
-                         [{"mode": "profile", "flashforge_host": "192.168.1.99", "check_code": "newcode"}])
+        saved = self.saved_config[0]
+        self.assertEqual(saved["flashforge_host"], "192.168.1.99")
+        self.assertEqual(saved["check_code"], "newcode")
 
     def test_apply_settings_mode_only(self):
         self.saved_config = []
         self.service.save_config = lambda value: (self.saved_config.append(json.loads(value)),
                                                   self.fake_server.data.update(json.loads(value)))
-        endpoint = self.service.apply_settings("", "", "dashboard")
+        endpoint = self.service.apply_settings("", "", "dashboard", None, None)
         self.assertEqual(endpoint, "127.0.0.1")
-        self.assertEqual(self.saved_config, [{"mode": "device", "flashforge_host": "127.0.0.1",
-                                              "check_code": "code"}])
+        saved = self.saved_config[0]
+        self.assertEqual(saved["mode"], "device")
+        self.assertEqual(saved["flashforge_host"], "127.0.0.1")
+        self.assertEqual(saved["check_code"], "code")
         self.assertEqual(self.fake_server.mode(), "device")
 
     def test_apply_settings_rejects_unknown_mode(self):
         with self.assertRaises(ValueError):
-            self.service.apply_settings("", "", "carousel")
+            self.service.apply_settings("", "", "carousel", None, None)
 
     def test_apply_settings_rejects_public_address(self):
         with self.assertRaises(ValueError):
-            self.service.apply_settings("1.1.1.1", "code", "")
+            self.service.apply_settings("1.1.1.1", "code", "", None, None)
 
     def test_apply_settings_rejects_bad_check_code(self):
         with self.assertRaises(ValueError):
-            self.service.apply_settings("127.0.0.1", "код", "")
+            self.service.apply_settings("127.0.0.1", "код", "", None, None)
 
     def test_switch_rejects_foreign_profile(self):
         self.preset.values["host_type"] = "prusalink"

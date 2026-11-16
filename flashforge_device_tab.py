@@ -4,7 +4,7 @@
 # name = "FlashForge Device Tab"
 # description = "Read-only FlashForge monitoring inside OrcaSlicer's Device tab."
 # author = "Max"
-# version = "1.3.1"
+# version = "1.4.0"
 # ///
 import hashlib
 import http.client
@@ -176,6 +176,8 @@ dialog.settings form { display: flex; flex-direction: column; gap: 6px; padding:
 dialog.settings h2 { margin-bottom: 6px; }
 dialog.settings label { margin-top: 8px; font-size: 12px; color: var(--muted); }
 dialog.settings input, dialog.settings select { width: 100%; }
+dialog.settings input[type="checkbox"] { width: auto; margin: 0; }
+dialog.settings label.check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); margin-top: 10px; }
 dialog.settings .caption { margin-top: 2px; }
 .settings-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .settings-actions button[type="submit"] { background: var(--blue); border-color: var(--blue); color: #fff; }
@@ -284,6 +286,8 @@ dialog.settings .caption { margin-top: 2px; }
       <option value="profile">This printer (active profile)</option>
       <option value="dashboard">All printers at once</option>
     </select>
+    <label class="check"><input type="checkbox" id="settingReadCode"> Read CheckCode from the printer profile</label>
+    <label class="check"><input type="checkbox" id="settingTab"> Show the Printers tab</label>
     <label for="settingHost">Adventurer IPv4 address</label>
     <input id="settingHost" type="text" maxlength="15" autocomplete="off" spellcheck="false" placeholder="192.168.1.51">
     <label for="settingCode">CheckCode</label>
@@ -687,7 +691,9 @@ el('settingsButton').onclick = async () => {
   settingsDialog.showModal();
   try {
     const data = await getJson('/settings');
-    el('settingMode').value = data.mode === 'dashboard' ? 'dashboard' : 'profile';
+    el('settingMode').value = data.mode === 'device' ? 'device' : 'panel';
+    el('settingReadCode').checked = data.read_check_code !== false;
+    el('settingTab').checked = data.tab_enabled !== false;
     el('settingHost').value = data.host || '';
     el('settingCode').value = data.check_code || '';
     el('settingHost').focus();
@@ -708,7 +714,9 @@ el('settingsForm').onsubmit = async event => {
       headers: {'Content-Type': 'application/json', 'X-FlashForge-Tab-Action': 'settings'},
       body: JSON.stringify({mode: el('settingMode').value,
                             host: el('settingHost').value.trim(),
-                            check_code: el('settingCode').value.trim()}),
+                            check_code: el('settingCode').value.trim(),
+                            read_check_code: el('settingReadCode').checked,
+                            tab_enabled: el('settingTab').checked}),
       signal: AbortSignal.timeout(12000),
     });
     const data = await response.json();
@@ -825,6 +833,8 @@ dialog { width: min(460px, calc(100vw - 32px)); padding: 0; border: 1px solid va
 dialog::backdrop { background: rgba(10, 14, 16, .55); }
 dialog form { display: flex; flex-direction: column; gap: 8px; padding: 18px 20px 16px; }
 dialog label { font-size: 12px; color: var(--muted); }
+dialog label.check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); }
+dialog input[type="checkbox"] { width: auto; margin: 0; }
 dialog ul { margin: 4px 0 0; padding-left: 18px; font-size: 13px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 .dialog-actions button[type="submit"] { background: var(--blue); border-color: var(--blue); color: #fff; }
@@ -862,6 +872,8 @@ dialog ul { margin: 4px 0 0; padding-left: 18px; font-size: 13px; }
       <option value="panel">Printer panel (recommended)</option>
       <option value="device">All printers dashboard</option>
     </select>
+    <label class="check"><input type="checkbox" id="settingReadCode"> Read CheckCode from printer profiles</label>
+    <label class="check"><input type="checkbox" id="settingTab"> Show this Printers tab</label>
     <p class="muted">The dashboard is always available in this tab. Choosing “All printers
       dashboard” additionally replaces the Device tab page for FlashForge profiles.</p>
     <p class="muted" id="settingsStatus" role="status"></p>
@@ -1033,6 +1045,8 @@ async function loadSettings() {
 function applySettings(data) {
   if (!data) return;
   el('settingMode').value = data.mode === 'device' ? 'device' : 'panel';
+  el('settingReadCode').checked = data.read_check_code !== false;
+  el('settingTab').checked = data.tab_enabled !== false;
   const items = (data.printers || []).map(printer => {
     const item = document.createElement('li');
     const kind = printer.kind === 'flashforge' ? 'monitored'
@@ -1074,11 +1088,13 @@ el('settingsForm').onsubmit = async event => {
   const status = el('settingsStatus');
   const save = el('settingsSave');
   const mode = el('settingMode').value;
+  const options = {read_check_code: el('settingReadCode').checked,
+                   tab_enabled: el('settingTab').checked};
   save.disabled = true;
   status.textContent = 'Saving…';
   try {
     if (bridge) {
-      bridge.postMessage({action: 'mode', mode});
+      bridge.postMessage({action: 'options', mode, ...options});
       status.textContent = 'Saved.';
       el('settingsDialog').close();
       setTimeout(load, 300);
@@ -1086,7 +1102,7 @@ el('settingsForm').onsubmit = async event => {
       const response = await fetch('settings', {
         method: 'POST',
         headers: {'Content-Type': 'application/json', 'X-FlashForge-Tab-Action': 'settings'},
-        body: JSON.stringify({mode}),
+        body: JSON.stringify({mode, ...options}),
         signal: AbortSignal.timeout(12000),
       });
       const data = await response.json();
@@ -1571,6 +1587,8 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
         self.stopping = threading.Event()
         self.poller = None
         self.next_discovery = 0.0
+        self.heal_device_tab = None
+        self.heal_attempts = 0
 
     # ---- configuration -------------------------------------------------
 
@@ -1611,8 +1629,11 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
             printers = [{"host": item["host"], "name": item.get("name", ""),
                          "kind": item.get("kind", "flashforge"),
                          "active": bool(item.get("active"))} for item in self.printers]
+        config = self.config()
         return {"host": entry.get("host", ""), "check_code": entry.get("code", ""),
-                "endpoint": entry.get("host", ""), "mode": self.mode(), "printers": printers}
+                "endpoint": entry.get("host", ""), "mode": self.mode(), "printers": printers,
+                "read_check_code": config.get("read_check_code", True),
+                "tab_enabled": config.get("tab_enabled", True)}
 
     def refresh_printers(self):
         entries = []
@@ -1716,6 +1737,13 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
                     if mono >= self.next_discovery:
                         self.refresh_printers()
                         self.next_discovery = mono + DISCOVERY_INTERVAL
+                        if self.heal_device_tab is not None and self.heal_attempts < 6:
+                            self.heal_attempts += 1
+                            try:
+                                if self.heal_device_tab():
+                                    self.heal_device_tab = None
+                            except Exception:
+                                pass
                     active = (self.active_printer() or {}).get("host")
                     for host, monitor in list(self.monitors.items()):
                         if mono < getattr(monitor, "next_due", 0.0):
@@ -1766,6 +1794,41 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
         connection, address = super().get_request()
         connection.settimeout(2)
         return connection, address
+
+
+class AliasServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+
+
+class AliasRedirectHandler(BaseHTTPRequestHandler):
+    """Answers on the ports older plugin releases used and redirects to the panel."""
+
+    def do_GET(self):
+        service = FlashForgeService.instance
+        server = service._server if service is not None else None
+        parts = [part for part in self.path.partition("?")[0].split("/") if part]
+        host = ""
+        for part in parts:
+            try:
+                host = local_address(part)
+                break
+            except ValueError:
+                continue
+        if server is not None:
+            if server.mode() == "device":
+                target = dashboard_url()
+            else:
+                active = server.active_printer() or {}
+                target = monitor_url(host or active.get("host", ""))
+        else:
+            target = monitor_url(host) if host else dashboard_url()
+        self.send_response(308)
+        self.send_header("Location", target)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
 
 
 class MonitorHandler(BaseHTTPRequestHandler):
@@ -1824,7 +1887,8 @@ class MonitorHandler(BaseHTTPRequestHandler):
         try:
             previous = self.server.mode()
             result = apply(str(payload.get("host") or ""), str(payload.get("check_code") or ""),
-                           str(payload.get("mode") or ""))
+                           str(payload.get("mode") or ""), payload.get("read_check_code"),
+                           payload.get("tab_enabled"))
         except ValueError as error:
             self.reply_json({"error": str(error)}, 400)
             return
@@ -1991,7 +2055,8 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         return 'FlashForge Device Tab'
 
     def get_default_config(self):
-        return {"mode": "profile", "flashforge_host": "", "check_code": ""}
+        return {"mode": "panel", "flashforge_host": "", "check_code": "",
+                "read_check_code": True, "tab_enabled": True, "codes": {}}
 
     def has_config_ui(self):
         return True
@@ -2006,9 +2071,14 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             return self.get_default_config()
         if not isinstance(config, dict):
             return self.get_default_config()
-        fields = ("mode", "flashforge_host", "check_code")
-        return {name: config[name].strip() if isinstance(config.get(name), str) else ""
-                for name in fields}
+        result = {name: config[name].strip() if isinstance(config.get(name), str) else ""
+                  for name in ("mode", "flashforge_host", "check_code")}
+        result["read_check_code"] = config.get("read_check_code", True) is not False
+        result["tab_enabled"] = config.get("tab_enabled", True) is not False
+        codes = config.get("codes")
+        result["codes"] = {str(key): str(value) for key, value in codes.items()
+                           if isinstance(value, str)} if isinstance(codes, dict) else {}
+        return result
 
     def discover_printers(self):
         """Printer profiles from OrcaSlicer, classified by how they can be reached."""
@@ -2040,9 +2110,14 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             except ValueError:
                 return
             if host_type == "flashforge":
-                add("flashforge", name, host, code, "", active)
+                add("flashforge", name, host, code if read_codes else stored_codes.get(host, ""),
+                    "", active)
             else:
                 add("web", name, host, "", url or f"http://{host}", active)
+
+        settings = self.config()
+        read_codes = settings.get("read_check_code", True)
+        stored_codes = settings.get("codes") or {}
 
         try:
             bundle = orca.host.preset_bundle()
@@ -2153,14 +2228,32 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             server.check_view = self.check_view
             server.apply_settings = self.apply_settings
             server.debug_payload = self.discovery_debug
+            server.heal_device_tab = self.heal_device_tab
             worker.start()
         except Exception:
             server.server_close()
             raise
+        for port in (18769, 18765):
+            try:
+                alias = AliasServer((WEB_HOST, port), AliasRedirectHandler)
+            except OSError:
+                continue
+            threading.Thread(target=alias.serve_forever, kwargs={'poll_interval': 0.5},
+                             name=f'FlashForge Device Tab alias {port}', daemon=True).start()
+            self._aliases = getattr(self, "_aliases", [])
+            self._aliases.append(alias)
         self._server = server
         FlashForgeService.instance = self
+        try:
+            self.heal_device_tab()
+        except Exception:
+            pass
 
     def on_unload(self):
+        for alias in getattr(self, "_aliases", []):
+            alias.shutdown()
+            alias.server_close()
+        self._aliases = []
         if self._server is not None:
             self._stopping.set()
             self._server.shutdown()
@@ -2189,7 +2282,7 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             raise ValueError("The printer address changed. Reopen FlashForge Device Tab for the current printer.")
         return current
 
-    def apply_settings(self, host, check_code, mode):
+    def apply_settings(self, host, check_code, mode, read_check_code=None, tab_enabled=None):
         server = self._server
         host = local_address(host) if host else ""
         if len(check_code) > 32 or any(not 33 <= ord(c) <= 126 for c in check_code):
@@ -2202,20 +2295,31 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             raise ValueError("Unknown display mode.")
         current_host, current_code = server.active_printer() and \
             (server.active_printer()["host"], server.active_printer().get("code", "")) or server.legacy_settings()
+        config = dict(server.config())
+        read_codes = config.get("read_check_code", True) if read_check_code is None else bool(read_check_code)
         if host and (host != current_host or (check_code and check_code != current_code)):
-            transaction = orca.host.preset.printer.begin_update()
-            preset = orca.host.preset_bundle().printers.edited_preset()
-            if preset.name != transaction.target_name:
-                raise ValueError("The active printer profile changed. Try again.")
-            if preset.config_value("host_type") != "flashforge":
-                raise ValueError("Select a printer profile that uses the FlashForge host.")
-            transaction.set("print_host", host)
-            transaction.set("printhost_apikey", check_code)
-            transaction.commit()
+            if read_codes is False and host == current_host:
+                # Codes are not read from profiles: keep them in the plugin config.
+                codes = dict(config.get("codes") or {})
+                codes[host] = check_code
+                config["codes"] = codes
+            else:
+                transaction = orca.host.preset.printer.begin_update()
+                preset = orca.host.preset_bundle().printers.edited_preset()
+                if preset.name != transaction.target_name:
+                    raise ValueError("The active printer profile changed. Try again.")
+                if preset.config_value("host_type") != "flashforge":
+                    raise ValueError("Select a printer profile that uses the FlashForge host.")
+                transaction.set("print_host", host)
+                if read_codes:
+                    transaction.set("printhost_apikey", check_code)
+                transaction.commit()
             current_host, current_code = host, check_code
         wanted_mode = mode or server.mode()
-        config = dict(server.config())
         config["mode"] = wanted_mode
+        config["read_check_code"] = read_codes
+        if tab_enabled is not None:
+            config["tab_enabled"] = bool(tab_enabled)
         if host:
             config["flashforge_host"] = host
             config["check_code"] = check_code
@@ -2264,6 +2368,38 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         host, _ = self._server.settings_for()
         self._point_device_tab(host, mode)
         return mode
+
+    def heal_device_tab(self):
+        """Point a stale plugin URL in the active profile at the current server."""
+        try:
+            transaction = orca.host.preset.printer.begin_update()
+            preset = orca.host.preset_bundle().printers.edited_preset()
+            if preset.name != transaction.target_name:
+                return False
+            if preset.config_value("host_type") != "flashforge":
+                return True
+            current = preset.config_value(DEVICE_UI_KEY) or ""
+            prefixes = tuple(f"http://{WEB_HOST}:{port}" for port in (18765, 18769, WEB_PORT))
+            if not current.startswith(prefixes):
+                return True
+            host = printer_endpoint(preset.config_value("print_host") or "")
+            target = dashboard_url() if self._server.mode() == "device" else monitor_url(host)
+            if current == target:
+                return True
+            if not current.startswith(f"http://{WEB_HOST}:{WEB_PORT}"):
+                try:
+                    pages = self.saved_pages()
+                except (OSError, ValueError):
+                    pages = {}
+                pages.setdefault(preset.name, "")
+                pending = self._page_store.with_suffix(".tmp")
+                pending.write_text(json.dumps(pages, ensure_ascii=False), encoding="utf-8")
+                os.replace(pending, self._page_store)
+            transaction.set(DEVICE_UI_KEY, target)
+            transaction.commit()
+            return True
+        except (OSError, RuntimeError, ValueError):
+            return False
 
     def saved_pages(self):
         try:
@@ -2358,6 +2494,18 @@ class PrintersPageService(orca.pages.PagesPluginCapabilityBase):
         return orca.PluginType.Pages
 
     def get_ui(self):
+        service = FlashForgeService.instance
+        if service is not None and service._server is not None:
+            if not service._server.config().get("tab_enabled", True):
+                return (
+                    "<!doctype html><html><head><meta charset='utf-8'>"
+                    "<style>html,body{margin:0;height:100%;background:#242829;color:#cdd6db;"
+                    "font:14px 'Segoe UI',sans-serif}div{padding:28px 32px;max-width:560px}"
+                    "h2{font-size:16px;margin:0 0 8px}p{margin:0;color:#93a1a9}</style></head>"
+                    "<body><div><h2>Printers tab is turned off</h2>"
+                    "<p>Enable it in the Device tab → FlashForge Device Tab → Settings.</p>"
+                    "</div></body></html>"
+                )
         # The dashboard is served by the plugin's loopback server, so the tab and
         # the Device tab share one implementation and one data path.
         return (
@@ -2385,8 +2533,10 @@ class PrintersPageService(orca.pages.PagesPluginCapabilityBase):
                 self.post_message(service._server.dashboard_payload())
             elif action == "settings":
                 self.post_message(service._server.settings_payload())
-            elif action == "mode":
-                service.set_mode(str(payload.get("mode") or ""))
+            elif action in ("mode", "options"):
+                service.apply_settings("", "", str(payload.get("mode") or ""),
+                                       payload.get("read_check_code"),
+                                       payload.get("tab_enabled"))
                 self.post_message({"mode": service._server.mode()})
         except ValueError as error:
             self.post_message({"error": str(error)})
