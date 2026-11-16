@@ -73,6 +73,17 @@ The tests start a fake FlashForge printer (TCP 8899 + HTTP 8898) and exercise th
 protocol client, the history file, the loopback server's guards, the settings
 endpoint and the page bridge.
 
+## Releasing
+
+1. Bump `# version` in `flashforge_device_tab.py` and add a `CHANGELOG.md` entry.
+2. Commit, tag `vX.Y.Z`, push the tag.
+3. Publish a GitHub release for the tag. `.github/workflows/publish-orcacloud.yml`
+   uploads the plugin to the OrcaSlicer catalogue through GitHub OIDC — the tag
+   becomes the published version and the release notes become the changelog.
+
+The catalogue requires a platform suffix in the uploaded file name, so the
+workflow sends `flashforge_device_tab_win_x86_64.py`.
+
 ## License
 
 MIT. Community plugin, not affiliated with FlashForge or OrcaSlicer.
