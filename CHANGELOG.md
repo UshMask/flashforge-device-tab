@@ -1,5 +1,20 @@
 ﻿# Changelog
 
+## 1.7.0
+
+Monitoring grows up, and the panel can now stop a job.
+
+### Added
+
+- **Pause, resume and cancel** from the panel header (FlashForge `/control`
+  API). Cancel asks for a second click before it sends anything.
+- **Printer card** — model, firmware, serial number, MAC, build volume and the
+  light state, straight from `M115`/`M119`.
+- **Totals** — jobs, print time and success rate from the local print history.
+- **Save snapshot** — one JPEG frame from the camera, saved by the browser.
+- **Host notifications** — “Print finished”, “Print cancelled” and “Printer
+  error” in the 3D view, so a finished job is visible without watching the tab.
+
 ## 1.6.6
 
 The release workflow uploads the plugin with the platform suffix the catalogue

@@ -2,9 +2,9 @@
 # dependencies = []
 # [tool.orcaslicer.plugin]
 # name = "FlashForge Device Tab"
-# description = "Read-only FlashForge monitoring inside OrcaSlicer's Device tab."
+# description = "FlashForge printer panel inside OrcaSlicer's Device tab: monitoring, files, camera, pause and cancel."
 # author = "Max"
-# version = "1.6.6"
+# version = "1.7.0"
 # ///
 import hashlib
 import http.client
@@ -179,6 +179,8 @@ dialog.settings input, dialog.settings textarea { width: 100%; }
 dialog.settings textarea { font: 13px "Segoe UI", sans-serif; resize: vertical; min-height: 96px; }
 .fleet-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; white-space: nowrap; }
 .fleet-toggle input { margin: 0; }
+button.danger { border-color: #a4443f; color: #ffb4ae; }
+button.danger.armed { background: #a4443f; color: #fff; }
 .setup ol { margin: 6px 0 10px; padding-left: 20px; line-height: 1.55; }
 .setup code { background: var(--header); border-radius: 4px; padding: 1px 5px; font-size: 12px; }
 .fleet-list { display: flex; flex-direction: column; gap: 8px; }
@@ -200,6 +202,9 @@ dialog.settings .caption { margin-top: 2px; }
     <div class="device-actions">
       <span class="connection" id="connection" role="status">Connecting…</span>
       <label class="fleet-toggle"><input type="checkbox" id="fleetToggle"> All printers</label>
+      <button id="pausePrint" type="button" hidden>Pause</button>
+      <button id="resumePrint" type="button" hidden>Resume</button>
+      <button id="cancelPrint" type="button" class="danger" hidden>Cancel</button>
       <button id="settingsButton" type="button" aria-haspopup="dialog">Settings</button>
       <button id="nativePage" type="button">Printer Web Interface</button>
     </div>
@@ -215,8 +220,8 @@ dialog.settings .caption { margin-top: 2px; }
             address | CheckCode | name. The CheckCode is in the printer's network settings.</li>
         <li>Save and wait a few seconds: temperatures and progress appear here.</li>
       </ol>
-      <p class="caption">Only FlashForge printers on the local network are supported. The plugin is read-only:
-        it never starts, pauses or cancels a job.</p>
+      <p class="caption">Only FlashForge printers on the local network are supported. The panel never starts a
+        print or deletes files; it can only pause, resume or cancel the running job.</p>
     </div>
   </section>
   <section class="panel" id="fleet" hidden>
@@ -256,6 +261,31 @@ dialog.settings .caption { margin-top: 2px; }
     </section>
   </div>
   <div class="dashboard monitor-tools">
+    <section class="panel" aria-labelledby="printer-title">
+      <h2 class="panel-title" id="printer-title">Printer</h2>
+      <div class="tool-body">
+        <dl class="readouts">
+          <div class="readout"><dt>Model</dt><dd id="printerModel"></dd></div>
+          <div class="readout"><dt>Firmware</dt><dd id="printerFirmware"></dd></div>
+          <div class="readout"><dt>Serial</dt><dd id="printerSerial"></dd></div>
+          <div class="readout"><dt>MAC</dt><dd id="printerMac"></dd></div>
+          <div class="readout"><dt>Build volume</dt><dd id="printerVolume"></dd></div>
+          <div class="readout"><dt>Light</dt><dd id="printerLight"></dd></div>
+        </dl>
+        <p class="caption" id="printerSensors"></p>
+      </div>
+    </section>
+    <section class="panel" aria-labelledby="totals-title">
+      <h2 class="panel-title" id="totals-title">Totals</h2>
+      <div class="tool-body">
+        <dl class="readouts">
+          <div class="readout"><dt>Jobs</dt><dd id="statJobs"></dd></div>
+          <div class="readout"><dt>Print time</dt><dd id="statHours"></dd></div>
+          <div class="readout"><dt>Finished cleanly</dt><dd id="statSuccess"></dd></div>
+        </dl>
+        <p class="caption">Counted from the print history on this computer.</p>
+      </div>
+    </section>
     <section class="panel" aria-labelledby="chart-title">
       <h2 class="panel-title" id="chart-title">Temperatures · Last 30 Minutes</h2>
       <div class="tool-body">
@@ -276,6 +306,7 @@ dialog.settings .caption { margin-top: 2px; }
           <button id="cameraStop" type="button" hidden>Disconnect</button>
         </form>
         <p class="caption" id="cameraStatus" role="status"></p>
+        <button id="cameraSnapshot" type="button" hidden>Save snapshot</button>
         <img class="camera-image" id="cameraImage" alt="Printer camera feed" referrerpolicy="no-referrer" hidden>
       </div>
     </details>
@@ -455,6 +486,12 @@ async function updateTools() {
       fleetPrinters = data.printers;
       applyView();
     }
+    if (data.stats) {
+      el('statJobs').textContent = String(data.stats.jobs || 0);
+      el('statHours').textContent = data.stats.seconds ? duration(data.stats.seconds) : '0 min';
+      el('statSuccess').textContent = data.stats.successRate == null
+        ? '—' : data.stats.successRate + ' %';
+    }
     drawChart();
     if (data.cameraUrl && !el('cameraUrl').value && !el('cameraUrl').matches(':focus')) {
       el('cameraUrl').value = data.cameraUrl;
@@ -500,6 +537,7 @@ function stopCamera(message = '') {
   clearTimeout(cameraTimeout);
   cameraImage.removeAttribute('src');
   cameraImage.hidden = true;
+  el('cameraSnapshot').hidden = true;
   el('cameraStop').hidden = true;
   el('cameraStart').disabled = false;
   cameraStatus.textContent = message;
@@ -516,6 +554,7 @@ el('cameraForm').onsubmit = event => {
   try { localStorage.setItem(cameraStorageKey, url.href); } catch {}
   cameraImage.src = url.href;
   cameraImage.hidden = false;
+  el('cameraSnapshot').hidden = false;
   el('cameraStart').disabled = true;
   el('cameraStop').hidden = false;
   cameraStatus.textContent = 'Connecting…';
@@ -613,6 +652,8 @@ async function updateStatus() {
       el(key).textContent = data[key] == null ? '' : data[key] + ' %';
     }
     updateJob(data);
+    updatePrinter(data);
+    updateActions(data);
     if (!catalogLoaded) refreshFiles();
   } catch (error) {
     connection.className = 'connection disconnected';
@@ -635,6 +676,71 @@ async function updateStatus() {
     polling = false;
   }
   updateTools();
+}
+
+function updatePrinter(data) {
+  const info = data.info || {};
+  const sensors = data.sensors || {};
+  const set = (id, value) => { const node = el(id); if (node) node.textContent = value || ''; };
+  set('printerModel', info.model);
+  set('printerFirmware', info.firmware);
+  set('printerSerial', info.serial);
+  set('printerMac', info.mac);
+  set('printerVolume', info.volume ? info.volume.join(' x ') + ' mm' : '');
+  set('printerLight', sensors.led == null ? '' : sensors.led ? 'On' : 'Off');
+  const ends = sensors.endstops || {};
+  const parts = Object.entries(ends).map(([axis, value]) => axis.toUpperCase() + ' ' + value);
+  set('printerSensors', parts.length ? 'Endstops: ' + parts.join('  ') : '');
+}
+
+function updateActions(data) {
+  const state = data.state || '';
+  const paused = state === 'PAUSED';
+  const running = data.active && !paused;
+  el('pausePrint').hidden = !running;
+  el('resumePrint').hidden = !paused;
+  el('cancelPrint').hidden = !(data.active || paused);
+  const cancel = el('cancelPrint');
+  if (cancel.classList.contains('armed')) {
+    cancel.classList.remove('armed');
+    cancel.textContent = 'Cancel';
+  }
+}
+
+async function runAction(action) {
+  const connection = el('connection');
+  try {
+    const response = await fetch(endpoint('/action'), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-FlashForge-Tab-Action': 'action'},
+      body: JSON.stringify({action}),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || 'The printer did not accept the command.');
+    connection.className = 'connection connected';
+    connection.textContent = 'Connected';
+    await updateStatus();
+  } catch (error) {
+    connection.className = 'connection disconnected';
+    connection.textContent = error.message || 'Command failed';
+  }
+}
+
+function downloadSnapshot() {
+  const url = endpoint('/snapshot');
+  fetch(url).then(async response => {
+    if (!response.ok) throw new Error('No snapshot');
+    const blob = await response.blob();
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'printer-snapshot.jpg';
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+  }).catch(() => {
+    el('cameraStatus').textContent = 'Could not read a snapshot from the printer.';
+  });
 }
 
 function fileCard(file) {
@@ -783,6 +889,26 @@ fleetToggle.onchange = () => {
   applyView();
 };
 el('fleetRefresh').onclick = () => updateStatus();
+el('pausePrint').onclick = () => runAction('pause');
+el('resumePrint').onclick = () => runAction('resume');
+el('cancelPrint').onclick = () => {
+  const button = el('cancelPrint');
+  if (!button.classList.contains('armed')) {
+    button.classList.add('armed');
+    button.textContent = 'Cancel print?';
+    setTimeout(() => {
+      if (button.classList.contains('armed')) {
+        button.classList.remove('armed');
+        button.textContent = 'Cancel';
+      }
+    }, 5000);
+    return;
+  }
+  button.classList.remove('armed');
+  button.textContent = 'Cancel';
+  runAction('cancel');
+};
+el('cameraSnapshot').onclick = downloadSnapshot;
 
 el('settingsButton').onclick = async () => {
   el('settingsStatus').textContent = '';
@@ -987,6 +1113,83 @@ def read_preview(host, path):
     return None
 
 
+def history_stats(jobs, now):
+    finished = [job for job in jobs
+                if job.get("result") in ("complete", "cancelled", "error")]
+    seconds = 0
+    for job in jobs:
+        elapsed = job.get("elapsed")
+        if not isinstance(elapsed, int) or elapsed < 0:
+            continue
+        seconds += elapsed if job.get("result") != "active" else max(0, now - job.get("started", now))
+    complete = sum(1 for job in finished if job.get("result") == "complete")
+    return {
+        "jobs": len(jobs),
+        "finished": len(finished),
+        "complete": complete,
+        "successRate": round(complete * 100 / len(finished)) if finished else None,
+        "seconds": seconds,
+        "last": jobs[0].get("file", "") if jobs else "",
+    }
+
+
+def control_job(host, serial, check_code, action):
+    """Pause, resume or cancel the running job through the printer's HTTP API."""
+    body = json.dumps({"serialNumber": serial, "checkCode": check_code,
+                       "payload": {"cmd": "jobCtl_cmd",
+                                   "args": {"jobID": "", "action": action}}})
+    connection = http.client.HTTPConnection(host, API_PORT, timeout=3)
+    try:
+        connection.request("POST", "/control", body, {"Content-Type": "application/json"})
+        response = connection.getresponse()
+        raw = response.read(8192)
+        if response.status != 200:
+            raise ValueError("The printer did not accept the command")
+        result = json.loads(raw)
+        if result.get("code") != 0:
+            raise ValueError(result.get("message") or "The printer did not accept the command")
+    except (OSError, ValueError, TypeError, http.client.HTTPException) as error:
+        if isinstance(error, ValueError):
+            raise
+        raise ValueError("The printer did not respond to the command") from error
+    finally:
+        connection.close()
+
+
+def read_snapshot(camera_url, limit=2_000_000):
+    """One JPEG frame from the printer's MJPEG stream."""
+    parts = urlsplit(camera_url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return None
+    connection = http.client.HTTPConnection(parts.hostname, parts.port or 80, timeout=3)
+    try:
+        path = parts.path or "/"
+        if parts.query:
+            path += "?" + parts.query
+        connection.request("GET", path)
+        response = connection.getresponse()
+        if response.status != 200:
+            return None
+        buffer = b""
+        while len(buffer) < limit:
+            block = response.read(8192)
+            if not block:
+                break
+            buffer += block
+            start = buffer.find(b"\xff\xd8")
+            if start < 0:
+                buffer = buffer[-2:]
+                continue
+            end = buffer.find(b"\xff\xd9", start + 2)
+            if end > 0:
+                return buffer[start:end + 2]
+    except (OSError, ValueError, http.client.HTTPException):
+        return None
+    finally:
+        connection.close()
+    return None
+
+
 def read_job_detail(serial, check_code, host):
     body = json.dumps({"serialNumber": serial, "checkCode": check_code})
     connection = http.client.HTTPConnection(host, API_PORT, timeout=1.5)
@@ -1027,11 +1230,13 @@ def read_status(host, check_code, include_details=False):
             raise ValueError("Unexpected response from the printer")
         state = state_match[1]
         serial = None
-        if check_code and (include_details or state in ACTIVE_JOB):
-            try:
-                serial = re.search(r"^SN:[ \t]*([\w-]+)", command(sock, "M115", deadline), re.M)
-            except (OSError, ValueError):
-                pass
+        machine = ""
+        try:
+            machine = command(sock, "M115", deadline)
+        except (OSError, ValueError):
+            pass
+        if machine:
+            serial = re.search(r"^SN:[ \t]*([\w-]+)", machine, re.M)
 
     def temperature(key):
         match = re.search(r"\b" + key + r":\s*(-?\d+(?:\.\d+)?)\s*/\s*(-?\d+(?:\.\d+)?)", temp)
@@ -1065,6 +1270,35 @@ def read_status(host, check_code, include_details=False):
     if not raw_name and isinstance(detail_name, str):
         raw_name = detail_name.strip()
     camera = detail.get("cameraStreamUrl")
+    info = {}
+    if machine:
+        fields = {}
+        for line in machine.splitlines():
+            if ":" in line:
+                key, _, value = line.partition(":")
+                fields[key.strip().lower()] = value.strip()
+        build = re.search(r"^X:[ \t]*(\d+)\s*Y:\s*(\d+)\s*Z:\s*(\d+)", machine, re.M)
+        info = {
+            "model": fields.get("machine type", ""),
+            "name": fields.get("machine name", ""),
+            "firmware": fields.get("firmware", ""),
+            "serial": fields.get("sn", ""),
+            "mac": fields.get("mac address", ""),
+            "tools": detail_number({"tools": fields.get("tool count")}, "tools", 0, 16),
+            "volume": [int(build[1]), int(build[2]), int(build[3])] if build else None,
+        }
+    endstops = {}
+    endstop_match = re.search(r"^Endstop:[ \t]*(.+)$", status, re.M)
+    if endstop_match:
+        for axis, key in (("x", "X-max"), ("y", "Y-max"), ("z", "Z-min")):
+            match = re.search(key + r":\s*(-?\d+)", endstop_match[1], re.I)
+            if match:
+                endstops[axis] = int(match[1])
+    led = re.search(r"^LED:[ \t]*(\d+)", status, re.M)
+    move = re.search(r"^MoveMode:[ \t]*(\S+)", status, re.M)
+    sensors = {"endstops": endstops,
+               "led": bool(int(led[1])) if led else None,
+               "moveMode": move[1] if move else ""}
     return {
         "status": STATES.get(state, state),
         "state": state,
@@ -1085,6 +1319,8 @@ def read_status(host, check_code, include_details=False):
         "fan": detail_number(detail, "coolingFanSpeed", 0, 100),
         "speed": detail_number(detail, "printSpeedAdjust", 1, 1000),
         "cameraUrl": camera if isinstance(camera, str) and camera.startswith(("http://", "https://")) else "",
+        "info": info,
+        "sensors": sensors,
     }
 
 
@@ -1304,6 +1540,7 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
         self.state_lock = threading.Lock()
         self.printer_lock = threading.Lock()
         self.apply_settings = None
+        self.notify = None
         self.uploading = threading.Event()
         self.uploaded_at = 0.0
         self.stopping = threading.Event()
@@ -1425,6 +1662,11 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
                         monitor.next_due = mono + interval
                         with self.printer_io():
                             monitor.sample(now)
+                        if self.notify is not None:
+                            try:
+                                self.notify(monitor)
+                            except Exception:
+                                pass
                 except UploadInProgress:
                     pass
                 except Exception:
@@ -1510,12 +1752,15 @@ class MonitorHandler(BaseHTTPRequestHandler):
         if (self.headers.get("Host") != authority
                 or self.headers.get("Origin") != f"http://{authority}"
                 or self.headers.get("Sec-Fetch-Site") not in (None, "same-origin")
-                or action not in ("restore", "settings")):
+                or action not in ("restore", "settings", "action")):
             self.reply_json({"error": "Open the monitor from the Device tab."}, 403)
             return
         endpoint, route = self.request_route()
         if route == "settings" and action == "settings":
             self.save_settings()
+            return
+        if route == "action" and action == "action":
+            self.run_action(endpoint)
             return
         if route != "native" or action != "restore" or self.server.restore_page is None:
             self.reply_json({"error": "The printer web interface is unavailable."}, 404)
@@ -1526,6 +1771,34 @@ class MonitorHandler(BaseHTTPRequestHandler):
             self.reply_json({"error": str(error)}, 409)
         else:
             self.reply_json({})
+
+    def run_action(self, endpoint):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if not 0 < length <= 1024:
+            self.reply_json({"error": "Invalid request."}, 400)
+            return
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (ValueError, UnicodeError):
+            self.reply_json({"error": "Invalid request."}, 400)
+            return
+        command = payload.get("action") if isinstance(payload, dict) else None
+        act = getattr(self.server, "act", None)
+        if act is None:
+            self.reply_json({"error": "Printer control is unavailable."}, 503)
+            return
+        try:
+            state = act(endpoint, str(command or ""))
+        except ValueError as error:
+            self.reply_json({"error": str(error)}, 400)
+            return
+        except (OSError, RuntimeError) as error:
+            self.reply_json({"error": str(error)}, 503)
+            return
+        self.reply_json({"state": state})
 
     def save_settings(self):
         try:
@@ -1616,6 +1889,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
                             "history": monitor.history_snapshot,
                             "historyError": monitor.history_error,
                             "cameraUrl": monitor.camera_url}
+                data["stats"] = history_stats(monitor.history_snapshot, int(time.time()))
                 data["printers"] = self.server.fleet_payload(endpoint)
                 self.reply_json(data)
                 return
@@ -1636,6 +1910,25 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 with monitor.state_lock:
                     monitor.files = files
                 self.reply_json({"files": [{"id": key, "name": name} for key, (name, _) in files.items()]})
+                return
+            if route == "snapshot":
+                camera = monitor.camera_url
+                if not camera:
+                    self.reply_json({"error": "This printer has no camera."}, 404)
+                    return
+                with self.server.printer_io():
+                    image = read_snapshot(camera)
+                if not image:
+                    self.reply_json({"error": "Could not read the camera."}, 503)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(image)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Disposition", 'inline; filename="snapshot.jpg"')
+                self.end_headers()
+                self.wfile.write(image)
                 return
             if route.startswith("preview/"):
                 key = route.removeprefix("preview/")
@@ -1724,6 +2017,8 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         try:
             server.configure(self.config, storage)
             server.restore_page = self.restore_page
+            server.act = self.act
+            server.notify = self.notify
             server.check_view = self.check_view
             server.apply_settings = self.apply_settings
             worker.start()
@@ -1902,6 +2197,63 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             transaction.commit()
         except (OSError, RuntimeError, ValueError):
             pass
+
+    def notify(self, monitor):
+        """Show a host notification when a job ends."""
+        with monitor.state_lock:
+            data = monitor.latest
+        if not data:
+            return
+        state = data.get("state")
+        previous = getattr(monitor, "last_state", None)
+        monitor.last_state = state
+        if previous == state:
+            return
+        if state in ("COMPLETED", "BUILDING_COMPLETED"):
+            message = "Print finished"
+        elif state in ("CANCELLED", "CANCELED", "STOPPED"):
+            message = "Print cancelled"
+        elif state == "ERROR":
+            message = "Printer error"
+        else:
+            return
+        name = getattr(monitor, "name", "") or "Printer"
+        file = data.get("file") or ""
+        try:
+            ui = orca.host.ui
+            levels = ui.NotificationLevel
+            level = getattr(levels, "WarningNotificationLevel" if state == "ERROR"
+                            else "RegularNotificationLevel")
+            ui.push_notification(level, f"{name}: {message}" + (f" — {file}" if file else ""))
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+
+    ACTIONS = {"pause": "pause", "resume": "continue", "cancel": "cancel"}
+
+    def act(self, host, action):
+        target = self.ACTIONS.get(action)
+        if target is None:
+            raise ValueError("Unknown printer command.")
+        printers = self._server.printers()
+        entry = next((item for item in printers if item["host"] == host), None)
+        if entry is None:
+            raise ValueError("This printer is not in the plugin settings.")
+        monitor = self._server.monitors.get(host)
+        if monitor is None:
+            raise ValueError("The printer is not connected yet.")
+        with monitor.state_lock:
+            data = monitor.latest
+        serial = ((data or {}).get("info") or {}).get("serial") or ""
+        if not serial:
+            raise ValueError("The printer did not report its serial number.")
+        control_job(host, serial, entry["code"], target)
+        try:
+            with self._server.printer_io():
+                monitor.sample(int(time.time()))
+        except (OSError, ValueError, RuntimeError):
+            pass
+        with monitor.state_lock:
+            return (monitor.latest or {}).get("state", "")
 
     def restore_page(self, view):
         # Request threads are not joined during unload. They can wait for the

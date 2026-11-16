@@ -308,6 +308,15 @@ class ServerTests(unittest.TestCase):
             return clean[0]["host"]
 
         self.server.apply_settings = apply_settings
+        self.acted = []
+
+        def act(host, action):
+            if action not in ("pause", "resume", "cancel"):
+                raise ValueError("Unknown printer command.")
+            self.acted.append((host, action))
+            return "PAUSED"
+
+        self.server.act = act
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05},
                                        daemon=True)
         self.thread.start()
@@ -442,6 +451,44 @@ class ServerTests(unittest.TestCase):
         self.assertFalse(data["moved"])
         self.assertEqual(self.applied,
                          [[{"host": "127.0.0.1", "code": "newcode", "name": "Fixture"}]])
+
+    def test_action_requires_action_header(self):
+        status, _, _ = request(plugin.WEB_PORT, self.url("action"), method="POST",
+                               headers={"Origin": f"http://{plugin.WEB_HOST}:{plugin.WEB_PORT}",
+                                        "Content-Type": "application/json"},
+                               body=json.dumps({"action": "pause"}))
+        self.assertEqual(status, 403)
+        self.assertEqual(self.acted, [])
+
+    def test_action_rejects_unknown(self):
+        status, body, _ = request(plugin.WEB_PORT, self.url("action"), method="POST",
+                                  headers={"Origin": f"http://{plugin.WEB_HOST}:{plugin.WEB_PORT}",
+                                           "Content-Type": "application/json",
+                                           "X-FlashForge-Tab-Action": "action"},
+                                  body=json.dumps({"action": "boom"}))
+        self.assertEqual(status, 400)
+        self.assertEqual(self.acted, [])
+
+    def test_action_pauses(self):
+        status, body, _ = request(plugin.WEB_PORT, self.url("action"), method="POST",
+                                  headers={"Origin": f"http://{plugin.WEB_HOST}:{plugin.WEB_PORT}",
+                                           "Content-Type": "application/json",
+                                           "X-FlashForge-Tab-Action": "action"},
+                                  body=json.dumps({"action": "pause"}))
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["state"], "PAUSED")
+        self.assertEqual(self.acted, [("127.0.0.1", "pause")])
+
+    def test_telemetry_has_stats(self):
+        status, body, _ = request(plugin.WEB_PORT, self.url("telemetry"))
+        data = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertIn("stats", data)
+        self.assertIn("jobs", data["stats"])
+
+    def test_snapshot_without_camera(self):
+        status, body, _ = request(plugin.WEB_PORT, self.url("snapshot"))
+        self.assertEqual(status, 404)
 
     def test_native_post_requires_action_header(self):
         status, _, _ = request(plugin.WEB_PORT, self.url("native"), method="POST",

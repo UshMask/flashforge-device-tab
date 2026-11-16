@@ -2,8 +2,8 @@
 
 A single-file OrcaSlicer plugin that fills the empty **Device tab** for FlashForge
 printers: job progress, temperatures, the printer's file list with previews, the
-camera stream, a 30-minute temperature chart and a print history that survives
-restarts. Read-only — it never starts, pauses or cancels a job.
+camera stream, a 30-minute temperature chart, a print history that survives
+restarts — plus pause, resume and cancel when a job needs you.
 
 ![The Device tab with the printer panel](docs/panel.png)
 
@@ -20,6 +20,14 @@ restarts. Read-only — it never starts, pauses or cancels a job.
 - **Several printers** — every printer in the plugin settings is monitored; tick
   **All printers** in the panel header to see them side by side, click one to open
   its full panel.
+- **Pause, resume, cancel** — from the panel header. Cancel asks for a second
+  click; nothing is sent until you confirm.
+- **Printer card** — model, firmware, serial number, MAC, build volume and light,
+  read from the printer itself (`M115`/`M119`).
+- **Totals** — jobs, print time and success rate from the local history.
+- **Save snapshot** — one camera frame, saved by the browser.
+- **Host notifications** — “Print finished”, “Print cancelled”, “Printer error”
+  appear in the 3D view, so you notice without watching the tab.
 
 ## Install
 
@@ -56,6 +64,10 @@ Python file that ships its own HTML, CSS and JavaScript.
 
 ## Security
 
+- The plugin talks to the printers you configured and to OrcaSlicer's UI. It
+  never starts a print, never deletes files and never changes printer settings;
+  the only write commands are pause, resume and cancel, and each one needs a
+  click in the panel.
 - Reads **only its own configuration** from OrcaSlicer; printer profiles are
   never read for credentials.
 - Talks to the local network: the printers you configure, nothing else.
