@@ -2044,6 +2044,9 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             current_url = preset.config_value(DEVICE_UI_KEY) or ""
             print_host = preset.config_value("print_host") or ""
             endpoint = printer_endpoint(print_host)
+            if not self._server.printers:
+                # First click after install: profiles have not been scanned yet.
+                self._server.refresh_printers()
             if restore_view is not None and restore_view != endpoint:
                 raise ValueError("This monitor page is not open for the current OrcaSlicer profile.")
             if restore_view is not None:

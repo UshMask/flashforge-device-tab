@@ -535,6 +535,11 @@ class SwitchViewTests(unittest.TestCase):
                 self.data = {"mode": "profile", "flashforge_host": "127.0.0.1", "check_code": "code"}
                 self.next_discovery = 0.0
                 self.monitors = {}
+                self.printers = [{"host": "127.0.0.1", "code": "code",
+                                  "name": "Printer", "active": True}]
+
+            def refresh_printers(self):
+                pass
 
             def settings_for(self):
                 return self.settings
