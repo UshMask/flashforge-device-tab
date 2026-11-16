@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.3.0
+
+The dashboard becomes its own OrcaSlicer tab, and coexistence with other printers
+is explicit.
+
+### Added
+
+- **A separate “Printers” tab** (plugin `Pages` capability) that is always
+  available, whatever printer profile is active. The Device tab keeps its
+  per-profile page.
+- **A setting for the Device tab**: keep the printer panel (default) or replace it
+  with the dashboard for FlashForge profiles.
+- The dashboard lists **every printer profile**: FlashForge printers with live
+  data, printers with their own web interface (link to it), and printers without
+  one (marked as not monitored), plus a short note about the limitation.
+
+### Changed
+
+- Display mode values are now `panel` (default) and `device`; the previous
+  `profile`/`dashboard` values are still accepted.
+- Only FlashForge profiles are ever rewritten; other vendors keep their own
+  Device tab page untouched.
+
 ## 1.2.0
 
 Two display modes, chosen by the user, and real multi-printer support.

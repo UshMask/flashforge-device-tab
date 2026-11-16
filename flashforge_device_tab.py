@@ -4,7 +4,7 @@
 # name = "FlashForge Device Tab"
 # description = "Read-only FlashForge monitoring inside OrcaSlicer's Device tab."
 # author = "Max"
-# version = "1.2.0"
+# version = "1.3.0"
 # ///
 import hashlib
 import http.client
@@ -789,9 +789,10 @@ body { margin: 0; background: var(--bg); color: var(--text); font: 14px "Segoe U
 main { max-width: 1280px; margin: auto; padding: 20px 24px 28px; }
 h1 { font-size: 17px; font-weight: 600; margin: 0; }
 h2 { font-size: 14px; font-weight: 600; margin: 0; }
-.device { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; padding: 0 0 10px; margin-bottom: 14px; border-bottom: 2px solid var(--panel); }
+.device { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; padding: 0 0 10px; margin-bottom: 10px; border-bottom: 2px solid var(--panel); }
 .identity, .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
 .muted { color: var(--muted); }
+.note { margin: 0 0 14px; font-size: 12px; color: var(--muted); max-width: 900px; }
 .connection { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
 .connection::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .connection.connected { color: var(--ok); }
@@ -801,6 +802,7 @@ button:hover:enabled { border-color: var(--blue); }
 input, select { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 6px 9px; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 10px; min-height: 190px; }
+.card.foreign { opacity: .82; }
 .card header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .card .name { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
 .card .host { font-size: 12px; color: var(--muted); }
@@ -842,22 +844,26 @@ dialog ul { margin: 4px 0 0; padding-left: 18px; font-size: 13px; }
       <button id="settingsButton" type="button" aria-haspopup="dialog">Settings</button>
     </div>
   </header>
+  <p class="note">
+    Live data is read over the local network and only FlashForge printers are supported.
+    Other printers are listed with their own web interface; printers without one cannot be
+    monitored by this plugin.
+  </p>
   <div class="grid" id="grid"></div>
   <p class="empty" id="empty" hidden>
-    No FlashForge printer profiles yet. Add printers in OrcaSlicer (Physical Printer, host type
-    FlashForge), then reopen this tab.
+    No printer profiles yet. Add printers in OrcaSlicer, then reopen this tab.
   </p>
 </main>
 <dialog id="settingsDialog" aria-labelledby="settingsTitle">
   <form id="settingsForm">
-    <h2 id="settingsTitle">Display mode</h2>
-    <label for="settingMode">What the Device tab shows</label>
+    <h2 id="settingsTitle">Device tab</h2>
+    <label for="settingMode">What the Device tab shows for FlashForge printers</label>
     <select id="settingMode">
-      <option value="profile">One printer: the active OrcaSlicer profile</option>
-      <option value="dashboard">All printers at once</option>
+      <option value="panel">Printer panel (recommended)</option>
+      <option value="device">All printers dashboard</option>
     </select>
-    <p class="muted">Printer addresses and CheckCodes come from the printer profiles in
-      OrcaSlicer, so each printer keeps its own settings.</p>
+    <p class="muted">The dashboard is always available in this tab. Choosing “All printers
+      dashboard” additionally replaces the Device tab page for FlashForge profiles.</p>
     <p class="muted" id="settingsStatus" role="status"></p>
     <ul id="printerList"></ul>
     <div class="dialog-actions">
@@ -868,13 +874,7 @@ dialog ul { margin: 4px 0 0; padding-left: 18px; font-size: 13px; }
 </dialog>
 <script>
 const el = id => document.getElementById(id);
-const results = {};
-
-function stateOf(printer) {
-  if (printer.complete) return 'complete';
-  if (printer.printing) return 'active';
-  return '';
-}
+const bridge = window.orca && typeof window.orca.postMessage === 'function' ? window.orca : null;
 
 function duration(seconds) {
   const hours = Math.floor(seconds / 3600);
@@ -884,24 +884,60 @@ function duration(seconds) {
   return pad(hours) + ':' + pad(minutes) + ':' + pad(rest);
 }
 
-function card(printer) {
-  const article = document.createElement('article');
-  article.className = 'card';
+function stateOf(printer) {
+  if (printer.complete) return 'complete';
+  if (printer.printing) return 'active';
+  return '';
+}
 
-  const header = document.createElement('header');
+function header(printer, label) {
+  const head = document.createElement('header');
   const left = document.createElement('div');
   const name = document.createElement('div');
   name.className = 'name';
   name.textContent = printer.name;
   const host = document.createElement('div');
   host.className = 'host';
-  host.textContent = printer.host;
+  host.textContent = printer.host || '';
   left.append(name, host);
   const state = document.createElement('span');
   state.className = 'state';
-  state.dataset.state = stateOf(printer);
-  state.textContent = printer.status || (printer.error ? 'No answer' : 'Waiting…');
-  header.append(left, state);
+  state.dataset.state = label ? '' : stateOf(printer);
+  state.textContent = label || printer.status || (printer.error ? 'No answer' : 'Waiting…');
+  head.append(left, state);
+  return head;
+}
+
+function foreignCard(printer, text, linkText, href) {
+  const article = document.createElement('article');
+  article.className = 'card foreign';
+  article.append(header(printer, text));
+  const footer = document.createElement('div');
+  footer.className = 'footer';
+  const spacer = document.createElement('span');
+  const link = document.createElement('a');
+  link.href = href;
+  link.textContent = linkText;
+  if (/^https?:/i.test(href)) {
+    link.target = '_blank';
+    link.rel = 'noreferrer';
+  }
+  if (href) {
+    footer.append(spacer, link);
+  } else {
+    const note = document.createElement('span');
+    note.className = 'muted';
+    note.textContent = 'not monitored';
+    footer.append(spacer, note);
+  }
+  article.append(footer);
+  return article;
+}
+
+function meteorCard(printer) {
+  const article = document.createElement('article');
+  article.className = 'card';
+  article.append(header(printer));
 
   const file = document.createElement('div');
   file.className = 'file';
@@ -941,47 +977,94 @@ function card(printer) {
   link.textContent = 'Open panel';
   footer.append(remaining, link);
 
-  article.append(header, file, line, readouts, footer);
+  article.append(file, line, readouts, footer);
   return article;
 }
 
+function card(printer) {
+  if (printer.kind === 'web') {
+    return foreignCard(printer, 'Web interface', 'Open', printer.url || ('http://' + printer.host));
+  }
+  if (printer.kind === 'local') {
+    return foreignCard(printer, 'No web interface', '', '');
+  }
+  return meteorCard(printer);
+}
+
+function render(data) {
+  const printers = data.printers || [];
+  el('connection').className = 'connection connected';
+  el('connection').textContent = 'Connected';
+  el('modeLabel').textContent = data.mode === 'device' ? 'Device tab: dashboard' : 'Device tab: panel';
+  el('count').textContent = printers.length
+    ? printers.length + (printers.length === 1 ? ' printer' : ' printers') : '';
+  el('empty').hidden = printers.length > 0;
+  el('grid').replaceChildren(...printers.map(card));
+}
+
 async function load() {
-  const connection = el('connection');
+  if (bridge) {
+    bridge.postMessage({action: 'dashboard'});
+    return;
+  }
   try {
     const response = await fetch('data', {cache: 'no-store', signal: AbortSignal.timeout(12000)});
     if (!response.ok) throw Error('No response');
-    const data = await response.json();
-    connection.className = 'connection connected';
-    connection.textContent = 'Connected';
-    el('modeLabel').textContent = data.mode === 'dashboard' ? 'All printers' : 'Active profile';
-    const printers = data.printers || [];
-    el('count').textContent = printers.length ? printers.length + (printers.length === 1 ? ' printer' : ' printers') : '';
-    el('empty').hidden = printers.length > 0;
-    el('grid').replaceChildren(...printers.map(card));
+    render(await response.json());
   } catch {
-    connection.className = 'connection disconnected';
-    connection.textContent = 'No response';
+    el('connection').className = 'connection disconnected';
+    el('connection').textContent = 'No response';
   }
+}
+
+async function loadSettings() {
+  if (bridge) {
+    bridge.postMessage({action: 'settings'});
+    return;
+  }
+  try {
+    const response = await fetch('settings', {cache: 'no-store', signal: AbortSignal.timeout(12000)});
+    applySettings(await response.json());
+  } catch {
+    el('settingsStatus').textContent = 'Could not read the settings.';
+  }
+}
+
+function applySettings(data) {
+  if (!data) return;
+  el('settingMode').value = data.mode === 'device' ? 'device' : 'panel';
+  const items = (data.printers || []).map(printer => {
+    const item = document.createElement('li');
+    const kind = printer.kind === 'flashforge' ? 'monitored'
+      : printer.kind === 'web' ? 'web interface' : 'no web interface';
+    item.textContent = printer.name + ' · ' + (printer.host || 'local') + ' — ' + kind
+      + (printer.active ? ' (active profile)' : '');
+    return item;
+  });
+  el('printerList').replaceChildren(...items);
+}
+
+if (bridge) {
+  bridge.onMessage(payload => {
+    if (!payload) return;
+    if (payload.error) {
+      el('settingsStatus').textContent = payload.error;
+      return;
+    }
+    if (payload.printers) {
+      render(payload);
+      if (el('settingsDialog').open) applySettings(payload);
+    }
+    if (payload.mode) el('settingMode').value = payload.mode === 'device' ? 'device' : 'panel';
+  });
 }
 
 el('refresh').onclick = load;
 
-el('settingsButton').onclick = async () => {
+el('settingsButton').onclick = () => {
   el('settingsStatus').textContent = '';
   el('settingsDialog').showModal();
-  try {
-    const response = await fetch('settings', {cache: 'no-store', signal: AbortSignal.timeout(12000)});
-    const data = await response.json();
-    el('settingMode').value = data.mode === 'dashboard' ? 'dashboard' : 'profile';
-    const items = (data.printers || []).map(printer => {
-      const item = document.createElement('li');
-      item.textContent = printer.name + ' · ' + printer.host + (printer.active ? ' (active profile)' : '');
-      return item;
-    });
-    el('printerList').replaceChildren(...items);
-  } catch {
-    el('settingsStatus').textContent = 'Could not read the settings.';
-  }
+  loadSettings();
 };
 
 el('settingsCancel').onclick = () => el('settingsDialog').close();
@@ -990,18 +1073,27 @@ el('settingsForm').onsubmit = async event => {
   event.preventDefault();
   const status = el('settingsStatus');
   const save = el('settingsSave');
+  const mode = el('settingMode').value;
   save.disabled = true;
   status.textContent = 'Saving…';
   try {
-    const response = await fetch('settings', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json', 'X-FlashForge-Tab-Action': 'settings'},
-      body: JSON.stringify({mode: el('settingMode').value}),
-      signal: AbortSignal.timeout(12000),
-    });
-    const data = await response.json();
-    if (!response.ok) throw Error(data.error || 'Could not save the settings.');
-    window.location.href = '/';
+    if (bridge) {
+      bridge.postMessage({action: 'mode', mode});
+      status.textContent = 'Saved.';
+      el('settingsDialog').close();
+      setTimeout(load, 300);
+    } else {
+      const response = await fetch('settings', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-FlashForge-Tab-Action': 'settings'},
+        body: JSON.stringify({mode}),
+        signal: AbortSignal.timeout(12000),
+      });
+      const data = await response.json();
+      if (!response.ok) throw Error(data.error || 'Could not save the settings.');
+      el('settingsDialog').close();
+      window.location.reload();
+    }
   } catch (error) {
     status.textContent = error.message || 'Could not save the settings.';
   } finally {
@@ -1489,7 +1581,10 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
         return value if isinstance(value, dict) else {}
 
     def mode(self):
-        return "dashboard" if self.config().get("mode") == "dashboard" else "profile"
+        value = self.config().get("mode")
+        if value in ("device", "dashboard"):
+            return "device"
+        return "panel"
 
     def legacy_settings(self):
         config = self.config()
@@ -1497,10 +1592,11 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
 
     def active_printer(self):
         with self.state_lock:
-            for entry in self.printers:
+            flash = [entry for entry in self.printers if entry.get("kind", "flashforge") == "flashforge"]
+            for entry in flash:
                 if entry.get("active"):
                     return entry
-            return self.printers[0] if self.printers else None
+            return flash[0] if flash else None
 
     def settings_for(self):
         entry = self.active_printer()
@@ -1512,6 +1608,7 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
         entry = self.active_printer() or {}
         with self.state_lock:
             printers = [{"host": item["host"], "name": item.get("name", ""),
+                         "kind": item.get("kind", "flashforge"),
                          "active": bool(item.get("active"))} for item in self.printers]
         return {"host": entry.get("host", ""), "check_code": entry.get("code", ""),
                 "endpoint": entry.get("host", ""), "mode": self.mode(), "printers": printers}
@@ -1527,7 +1624,8 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
             # No FlashForge preset yet: fall back to the address from the old config.
             host, code = self.legacy_settings()
             if host:
-                entries = [{"host": host, "code": code, "name": "Printer", "active": True}]
+                entries = [{"kind": "flashforge", "host": host, "code": code,
+                            "name": "Printer", "active": True}]
         with self.state_lock:
             self.printers = entries
             known = {entry["host"] for entry in entries}
@@ -1535,6 +1633,8 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
                 self.monitors.pop(host).history.save(int(time.time()))
                 self.errors.pop(host, None)
             for entry in entries:
+                if entry.get("kind", "flashforge") != "flashforge":
+                    continue
                 monitor = self.monitors.get(entry["host"])
                 if monitor is None:
                     try:
@@ -1550,6 +1650,9 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
                     self.errors.pop(entry["host"], None)
                 else:
                     monitor.adapter.check_code = entry.get("code", "")
+            for host in [name for name in self.monitors
+                         if name not in {entry["host"] for entry in entries}]:
+                self.monitors.pop(host).history.save(int(time.time()))
 
     def dashboard_payload(self):
         printers = []
@@ -1561,6 +1664,7 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
                     data = monitor.latest
                     error = monitor.error or error
             item = {"host": entry["host"], "name": entry.get("name") or entry["host"],
+                    "kind": entry.get("kind", "flashforge"), "url": entry.get("url", ""),
                     "activeProfile": bool(entry.get("active")), "error": error,
                     "status": None, "percent": None, "remaining": None, "file": "",
                     "nozzle": None, "bed": None, "printing": False, "complete": False}
@@ -1747,7 +1851,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
             return
         if not endpoint:
             target = self.server.active_printer()
-            if self.server.mode() == "dashboard" or not target:
+            if self.server.mode() == "device" or not target:
                 self.redirect(dashboard_url())
                 return
             self.redirect(monitor_url(target["host"]))
@@ -1871,6 +1975,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
 
 class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
     _server = None
+    instance = None
 
     def get_name(self):
         return 'FlashForge Device Tab'
@@ -1904,18 +2009,26 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             selected = collection.selected_preset_name()
             for name in collection.preset_names():
                 preset = collection.find_preset(name)
-                if preset is None or preset.config_value("host_type") != "flashforge":
+                if preset is None:
                     continue
+                host_type = preset.config_value("host_type") or ""
                 print_host = preset.config_value("print_host") or ""
                 if not print_host:
+                    printers.append({"kind": "local", "host": "", "name": name,
+                                     "active": name == selected})
                     continue
                 try:
                     host = printer_endpoint(print_host)
                 except ValueError:
                     continue
-                printers.append({"host": host, "name": name,
-                                 "code": preset.config_value("printhost_apikey") or "",
-                                 "active": name == selected})
+                if host_type == "flashforge":
+                    printers.append({"kind": "flashforge", "host": host, "name": name,
+                                     "code": preset.config_value("printhost_apikey") or "",
+                                     "active": name == selected})
+                else:
+                    url = preset.config_value(DEVICE_UI_KEY) or f"http://{host}"
+                    printers.append({"kind": "web", "host": host, "name": name, "url": url,
+                                     "active": name == selected})
         except Exception:
             return []
         return printers
@@ -1941,6 +2054,7 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             server.server_close()
             raise
         self._server = server
+        FlashForgeService.instance = self
 
     def on_unload(self):
         if self._server is not None:
@@ -1961,7 +2075,7 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             server.next_discovery = 0.0
 
     def check_view(self, endpoint):
-        if self._server is not None and self._server.mode() == "dashboard":
+        if self._server is not None and self._server.mode() == "device":
             return endpoint
         preset = orca.host.preset_bundle().current_printer_preset()
         if preset.config_value("host_type") != "flashforge":
@@ -1976,7 +2090,11 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         host = local_address(host) if host else ""
         if len(check_code) > 32 or any(not 33 <= ord(c) <= 126 for c in check_code):
             raise ValueError("The CheckCode must be printable ASCII, up to 32 characters.")
-        if mode and mode not in ("profile", "dashboard"):
+        if mode in ("profile",):
+            mode = "panel"
+        elif mode in ("dashboard",):
+            mode = "device"
+        if mode and mode not in ("panel", "device"):
             raise ValueError("Unknown display mode.")
         current_host, current_code = server.active_printer() and \
             (server.active_printer()["host"], server.active_printer().get("code", "")) or server.legacy_settings()
@@ -2009,15 +2127,39 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             preset = orca.host.preset_bundle().printers.edited_preset()
             if preset.name != transaction.target_name:
                 return
-            current = preset.config_value(DEVICE_UI_KEY) or ""
-            ours = monitor_identity(current) is not None or dashboard_identity(current)
-            if not ours and current:
+            if preset.config_value("host_type") != "flashforge":
                 return
-            target = dashboard_url() if mode == "dashboard" else monitor_url(host)
+            current = preset.config_value(DEVICE_UI_KEY) or ""
+            target = dashboard_url() if mode == "device" else monitor_url(host)
+            if current == target:
+                return
+            if current and not (monitor_identity(current) or dashboard_identity(current)):
+                try:
+                    pages = self.saved_pages()
+                except (OSError, ValueError):
+                    pages = {}
+                pages[preset.name] = current
+                pending = self._page_store.with_suffix(".tmp")
+                pending.write_text(json.dumps(pages, ensure_ascii=False), encoding="utf-8")
+                os.replace(pending, self._page_store)
             transaction.set(DEVICE_UI_KEY, target)
             transaction.commit()
         except (OSError, RuntimeError, ValueError):
             pass
+
+    def set_mode(self, mode):
+        if mode in ("profile",):
+            mode = "panel"
+        elif mode in ("dashboard",):
+            mode = "device"
+        if mode not in ("panel", "device"):
+            raise ValueError("Unknown display mode.")
+        config = dict(self._server.config())
+        config["mode"] = mode
+        self.save_config(json.dumps(config, ensure_ascii=False))
+        host, _ = self._server.settings_for()
+        self._point_device_tab(host, mode)
+        return mode
 
     def saved_pages(self):
         try:
@@ -2078,7 +2220,7 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                 pending = self._page_store.with_suffix(".tmp")
                 pending.write_text(json.dumps(pages, ensure_ascii=False), encoding="utf-8")
                 os.replace(pending, self._page_store)
-                target = dashboard_url() if self._server.mode() == "dashboard" else monitor_url(endpoint)
+                target = dashboard_url() if self._server.mode() == "device" else monitor_url(endpoint)
                 message = "Opened FlashForge Device Tab in the Device tab."
 
             if self._stopping.is_set():
@@ -2102,6 +2244,43 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         return orca.ExecutionResult.success(message)
 
 
+class PrintersPageService(orca.pages.PagesPluginCapabilityBase):
+    """Dashboard as its own OrcaSlicer tab."""
+
+    def get_name(self):
+        return "Printers"
+
+    def get_type(self):
+        return orca.PluginType.Pages
+
+    def get_ui(self):
+        return DASHBOARD_PAGE.replace("{{title}}", DASHBOARD_TITLE)
+
+    def on_message(self, message):
+        service = FlashForgeService.instance
+        if service is None or service._server is None:
+            return
+        try:
+            payload = json.loads(message)
+        except (TypeError, ValueError):
+            return
+        if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+            payload = payload["data"]
+        if not isinstance(payload, dict):
+            return
+        try:
+            action = payload.get("action")
+            if action == "dashboard":
+                self.post_message(service._server.dashboard_payload())
+            elif action == "settings":
+                self.post_message(service._server.settings_payload())
+            elif action == "mode":
+                service.set_mode(str(payload.get("mode") or ""))
+                self.post_message({"mode": service._server.mode()})
+        except ValueError as error:
+            self.post_message({"error": str(error)})
+
+
 @orca.plugin
 class FlashForgeDeviceTab(orca.base):
     def register_capabilities(self):
@@ -2110,3 +2289,4 @@ class FlashForgeDeviceTab(orca.base):
         # connects to a new address.
         orca.request_permissions(network_socket=[f"('{WEB_HOST}', {WEB_PORT})"], threading=True)
         orca.register_capability(FlashForgeService)
+        orca.register_capability(PrintersPageService)
