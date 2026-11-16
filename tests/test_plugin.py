@@ -286,18 +286,26 @@ class ServerTests(unittest.TestCase):
 
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
-        self.config = {"flashforge_host": "127.0.0.1", "check_code": "code"}
+        self.config = {"printers": [{"host": "127.0.0.1", "code": "code", "name": "Fixture"}],
+                       "flashforge_host": "127.0.0.1", "check_code": "code"}
         self.applied = []
         self.server = plugin.LoopbackServer((plugin.WEB_HOST, plugin.WEB_PORT), plugin.MonitorHandler)
         self.server.configure(lambda: dict(self.config), Path(self.folder.name))
         self.server.restore_page = None
 
-        def apply_settings(host, check_code):
-            host = plugin.local_address(host)
-            if len(check_code) > 32 or any(not 33 <= ord(c) <= 126 for c in check_code):
-                raise ValueError("bad code")
-            self.applied.append((host, check_code))
-            return host
+        def apply_settings(printers):
+            if not isinstance(printers, list) or not printers:
+                raise ValueError("no printers")
+            clean = []
+            for entry in printers:
+                host = plugin.local_address(entry["host"])
+                code = entry.get("code") or ""
+                if len(code) > 32 or any(not 33 <= ord(c) <= 126 for c in code):
+                    raise ValueError("bad code")
+                clean.append({"host": host, "code": code,
+                              "name": entry.get("name") or host})
+            self.applied.append(clean)
+            return clean[0]["host"]
 
         self.server.apply_settings = apply_settings
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05},
@@ -392,8 +400,9 @@ class ServerTests(unittest.TestCase):
         status, body, _ = request(plugin.WEB_PORT, self.url("settings"))
         data = json.loads(body)
         self.assertEqual(status, 200)
-        self.assertEqual(data["host"], "127.0.0.1")
-        self.assertEqual(data["check_code"], "code")
+        self.assertEqual(data["printers"][0]["host"], "127.0.0.1")
+        self.assertEqual(data["printers"][0]["code"], "code")
+        self.assertEqual(data["endpoint"], "127.0.0.1")
 
     def test_settings_post_requires_action_header(self):
         status, _, _ = request(plugin.WEB_PORT, self.url("settings"), method="POST",
@@ -407,7 +416,7 @@ class ServerTests(unittest.TestCase):
                                   headers={"Origin": f"http://{plugin.WEB_HOST}:{plugin.WEB_PORT}",
                                            "Content-Type": "application/json",
                                            "X-FlashForge-Tab-Action": "settings"},
-                                  body=json.dumps({"host": "8.8.8.8", "check_code": "x"}))
+                                  body=json.dumps({"printers": [{"host": "8.8.8.8", "code": "x"}]}))
         self.assertEqual(status, 400)
         self.assertEqual(self.applied, [])
 
@@ -424,12 +433,15 @@ class ServerTests(unittest.TestCase):
                                   headers={"Origin": f"http://{plugin.WEB_HOST}:{plugin.WEB_PORT}",
                                            "Content-Type": "application/json",
                                            "X-FlashForge-Tab-Action": "settings"},
-                                  body=json.dumps({"host": "127.0.0.1", "check_code": "newcode"}))
+                                  body=json.dumps({"printers": [{"host": "127.0.0.1",
+                                                                 "code": "newcode",
+                                                                 "name": "Fixture"}]}))
         data = json.loads(body)
         self.assertEqual(status, 200)
         self.assertEqual(data["endpoint"], "127.0.0.1")
         self.assertFalse(data["moved"])
-        self.assertEqual(self.applied, [("127.0.0.1", "newcode")])
+        self.assertEqual(self.applied,
+                         [[{"host": "127.0.0.1", "code": "newcode", "name": "Fixture"}]])
 
     def test_native_post_requires_action_header(self):
         status, _, _ = request(plugin.WEB_PORT, self.url("native"), method="POST",
@@ -472,7 +484,10 @@ class SwitchViewTests(unittest.TestCase):
         self.service._page_store = Path(self.folder.name) / "device-pages.json"
         self.service._switch_lock = threading.Lock()
         self.service._stopping = threading.Event()
-        self.service._server = SimpleNamespace(settings_for=lambda: ("127.0.0.1", "code"))
+        self.service._server = SimpleNamespace(
+            settings_for=lambda: ("127.0.0.1", "code"),
+            printers=lambda: [{"host": "127.0.0.1", "code": "code", "name": "Adventurer 5M"}],
+            monitors={})
         self.service.restore_page = self.service.restore_page
 
     def tearDown(self):
@@ -494,19 +509,24 @@ class SwitchViewTests(unittest.TestCase):
         self.saved_config = []
         self.service.save_config = lambda value: self.saved_config.append(json.loads(value))
         self.preset.values["print_host_webui"] = plugin.monitor_url("127.0.0.1")
-        endpoint = self.service.apply_settings("192.168.3.99", "newcode")
+        endpoint = self.service.apply_settings([{"host": "192.168.3.99", "code": "newcode",
+                                                  "name": "Second"}])
         self.assertEqual(endpoint, "192.168.3.99")
         self.assertEqual(self.preset.values["print_host"], "192.168.3.99")
         self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("192.168.3.99"))
-        self.assertEqual(self.saved_config, [{"flashforge_host": "192.168.3.99", "check_code": "newcode"}])
+        saved = self.saved_config[0]
+        self.assertEqual(saved["flashforge_host"], "192.168.3.99")
+        self.assertEqual(saved["check_code"], "newcode")
+        self.assertEqual(saved["printers"], [{"host": "192.168.3.99", "code": "newcode",
+                                              "name": "Second"}])
 
     def test_apply_settings_rejects_public_address(self):
         with self.assertRaises(ValueError):
-            self.service.apply_settings("1.1.1.1", "code")
+            self.service.apply_settings([{"host": "1.1.1.1", "code": "code"}])
 
     def test_apply_settings_rejects_bad_check_code(self):
         with self.assertRaises(ValueError):
-            self.service.apply_settings("127.0.0.1", "код")
+            self.service.apply_settings([{"host": "127.0.0.1", "code": "код"}])
 
     def test_switch_rejects_foreign_profile(self):
         self.preset.values["host_type"] = "prusalink"

@@ -4,7 +4,7 @@
 # name = "FlashForge Device Tab"
 # description = "Read-only FlashForge monitoring inside OrcaSlicer's Device tab."
 # author = "Max"
-# version = "1.5.0"
+# version = "1.6.0"
 # ///
 import hashlib
 import http.client
@@ -176,7 +176,7 @@ dialog.settings h2 { margin-bottom: 6px; }
 dialog.settings label { margin-top: 8px; font-size: 12px; color: var(--muted); }
 dialog.settings input, dialog.settings textarea { width: 100%; }
 dialog.settings textarea { font: 13px "Segoe UI", sans-serif; resize: vertical; min-height: 96px; }
-.fleet-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
+.fleet-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; white-space: nowrap; }
 .fleet-toggle input { margin: 0; }
 .setup ol { margin: 6px 0 10px; padding-left: 20px; line-height: 1.55; }
 .setup code { background: var(--header); border-radius: 4px; padding: 1px 5px; font-size: 12px; }
@@ -292,7 +292,7 @@ dialog.settings .caption { margin-top: 2px; }
       </div>
     </div>
   </details>
-  <section class="panel catalog" aria-labelledby="files-title">
+  <section class="panel catalog" id="files-section" aria-labelledby="files-title">
     <div class="row panel-title"><h2 id="files-title">Printer Files</h2><button id="refresh">Refresh</button></div>
     <div class="row file-controls">
       <input id="search" type="search" placeholder="Search files" aria-label="Search files">
@@ -740,7 +740,9 @@ function renderFleet() {
     const meta = document.createElement('div');
     meta.className = 'meta';
     const state = item.status || (item.error ? 'No answer' : 'Waiting…');
+
     const bits = [item.host, state];
+    if (item.file) bits.push(item.file);
     if (item.percent != null) bits.push(item.percent + '%');
     if (item.remaining != null) bits.push(duration(item.remaining) + ' left');
     meta.textContent = bits.join(' · ');
@@ -767,11 +769,10 @@ function applyView() {
   el('setup').hidden = hasPrinters;
   el('fleet').hidden = !showFleet;
   el('monitor').hidden = !hasPrinters || showFleet;
-  for (const id of ['chart', 'history', 'camera']) {
+  for (const id of ['chart', 'history', 'camera', 'files-section']) {
     const node = el(id);
     if (node) node.hidden = !hasPrinters || showFleet;
   }
-  el('files-section') && (el('files-section').hidden = !hasPrinters || showFleet);
   if (showFleet) renderFleet();
 }
 
@@ -1547,7 +1548,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
             return
         try:
             previous = self.server.settings_for()[0]
-            endpoint = apply(str(payload.get("host") or ""), str(payload.get("check_code") or ""))
+            endpoint = apply(payload.get("printers"))
         except ValueError as error:
             self.reply_json({"error": str(error)}, 400)
             return
@@ -1613,8 +1614,8 @@ class MonitorHandler(BaseHTTPRequestHandler):
                     data = {"temperatures": list(monitor.temperatures),
                             "history": monitor.history_snapshot,
                             "historyError": monitor.history_error,
-                            "cameraUrl": monitor.camera_url,
-                            "printers": self.server.fleet_payload(endpoint)}
+                            "cameraUrl": monitor.camera_url}
+                data["printers"] = self.server.fleet_payload(endpoint)
                 self.reply_json(data)
                 return
             if uploading:
