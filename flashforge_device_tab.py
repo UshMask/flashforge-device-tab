@@ -4,7 +4,7 @@
 # name = "FlashForge Device Tab"
 # description = "Read-only FlashForge monitoring inside OrcaSlicer's Device tab."
 # author = "Max"
-# version = "1.6.0"
+# version = "1.6.1"
 # ///
 import hashlib
 import http.client
@@ -86,6 +86,7 @@ PAGE = r'''<!doctype html>
   }
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 [hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 14px "Segoe UI", sans-serif; font-variant-numeric: tabular-nums; }
 main { max-width: 1280px; margin: auto; padding: 20px 24px 28px; }
