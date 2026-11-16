@@ -806,7 +806,7 @@ input, select { font: inherit; color: inherit; background: var(--panel); border:
 .card header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .card .name { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
 .card .host { font-size: 12px; color: var(--muted); }
-.card .state { font-size: 12px; color: var(--muted); }
+.card .state { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .card .state[data-state="active"] { color: var(--blue); }
 .card .state[data-state="complete"] { color: var(--ok); }
 .card .file { min-height: 18px; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2023,9 +2023,17 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             printers.append({"kind": kind, "host": host, "name": name, "code": code,
                              "url": url, "active": active})
 
-        def classify(name, host_type, print_host, code, url="", active=False):
+        def is_user(preset):
+            try:
+                return bool(preset.is_user())
+            except Exception:
+                return False
+
+        def classify(name, host_type, print_host, code, url="", active=False, user=False):
             if not print_host:
-                add("local", name, "", active=active)
+                # System presets are templates, not printers the user owns.
+                if user:
+                    add("local", name, "", active=active)
                 return
             try:
                 host = printer_endpoint(print_host)
@@ -2068,7 +2076,7 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                              preset.config_value("print_host") or "",
                              preset.config_value("printhost_apikey") or "",
                              preset.config_value(DEVICE_UI_KEY) or "",
-                             name == selected)
+                             name == selected, is_user(preset))
                 except Exception:
                     continue
             try:
@@ -2083,7 +2091,7 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                              preset.config_value("print_host") or "",
                              preset.config_value("printhost_apikey") or "",
                              preset.config_value(DEVICE_UI_KEY) or "",
-                             name == selected)
+                             name == selected, is_user(preset))
                 except Exception:
                     continue
 
@@ -2094,7 +2102,12 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             print_host = bundle.full_config_value("print_host") or ""
             code = bundle.full_config_value("printhost_apikey") or ""
             if print_host:
-                classify("Active printer", host_type, print_host, code, "", True)
+                try:
+                    known = printer_endpoint(print_host) in {entry["host"] for entry in printers}
+                except ValueError:
+                    known = True
+                if not known:
+                    classify("Active printer", host_type, print_host, code, "", True, True)
         except Exception:
             pass
         return printers

@@ -280,7 +280,9 @@ class DiscoveryTests(unittest.TestCase):
             def find_preset(self, name):
                 for preset in presets:
                     if preset["name"] == name:
-                        return SimpleNamespace(config_value=lambda key, preset=preset: preset.get(key, ""))
+                        return SimpleNamespace(
+                            config_value=lambda key, preset=preset: preset.get(key, ""),
+                            is_user=lambda preset=preset: preset.get("user", True))
                 return None
 
             def selected_preset_name(self):
