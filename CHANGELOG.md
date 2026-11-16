@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.1.0
+
+Settings without leaving the Device tab.
+
+### Added
+
+- **A Settings dialog inside the panel.** The header now has a `Settings` button
+  that opens a small form with the printer IPv4 address and CheckCode. The
+  values are read from the plugin config, validated and written back through
+  `save_config`, so the Plugins dialog is only needed for the first install.
+- `GET /<endpoint>/settings` returns the current address and code; `POST` with
+  the `X-FlashForge-Tab-Action: settings` header applies them. Both are guarded
+  by the same Host/Origin/`Sec-Fetch-Site` checks as the "back to native page"
+  action, and the body is limited to 4 KB.
+- Changing the address also updates the active printer profile
+  (`print_host` and, when the Device tab shows this panel, `print_host_webui`),
+  so sending files and the panel URL keep pointing at the new printer. The page
+  then moves itself to the new URL.
+
+### Changed
+
+- The POST handler now routes by action header instead of assuming "restore",
+  so the two write endpoints cannot be confused with each other.
+
 ## 1.0.0
 
 First release of **FlashForge Device Tab**. This is the consolidated successor of

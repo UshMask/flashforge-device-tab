@@ -50,7 +50,9 @@ a separate server with a much wider feature set.
 
 2. In OrcaSlicer open **Plugins**, press **Refresh**, enable **FlashForge Device
    Tab** and allow the network access prompt.
-3. Open the plugin settings and enter the printer IPv4 address and CheckCode.
+3. Open the Device tab → **FlashForge Device Tab** → **Settings** and enter the
+   printer IPv4 address and CheckCode. (The same fields exist in the Plugins
+   dialog, but the panel's own form is enough.)
 4. Open **Speed Dial** in the Device tab and choose **FlashForge Device Tab**.
 5. The panel appears in the Device tab. The **Printer Web Interface** button
    returns to the page OrcaSlicer had there before.
@@ -58,6 +60,13 @@ a separate server with a much wider feature set.
 If an older `printer_monitor` or `flashforge_monitor` installation is still
 enabled, disable it first: two monitors polling the same printer fight over its
 single TCP connection.
+
+## Settings
+
+The panel header has a **Settings** button: it opens a small form with the
+printer address and CheckCode, so the plugin can be reconfigured without
+leaving the Device tab. Changing the address also updates the active printer
+profile, because OrcaSlicer sends jobs to the profile's `print_host`.
 
 ## How it works
 

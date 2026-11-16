@@ -154,10 +154,10 @@ class FakePrinter:
         self.http.server_close()
 
 
-def request(port, path, method="GET", headers=None):
+def request(port, path, method="GET", headers=None, body=None):
     connection = HTTPConnection("127.0.0.1", port, timeout=5)
     try:
-        connection.request(method, path, headers=headers or {})
+        connection.request(method, path, body=body, headers=headers or {})
         response = connection.getresponse()
         return response.status, response.read(), dict(response.getheaders())
     finally:
@@ -286,10 +286,20 @@ class ServerTests(unittest.TestCase):
 
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
+        self.config = {"flashforge_host": "127.0.0.1", "check_code": "code"}
+        self.applied = []
         self.server = plugin.LoopbackServer((plugin.WEB_HOST, plugin.WEB_PORT), plugin.MonitorHandler)
-        self.server.configure(lambda: {"flashforge_host": "127.0.0.1", "check_code": "code"},
-                              Path(self.folder.name))
+        self.server.configure(lambda: dict(self.config), Path(self.folder.name))
         self.server.restore_page = None
+
+        def apply_settings(host, check_code):
+            host = plugin.local_address(host)
+            if len(check_code) > 32 or any(not 33 <= ord(c) <= 126 for c in check_code):
+                raise ValueError("bad code")
+            self.applied.append((host, check_code))
+            return host
+
+        self.server.apply_settings = apply_settings
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05},
                                        daemon=True)
         self.thread.start()
@@ -378,6 +388,49 @@ class ServerTests(unittest.TestCase):
         status, _, _ = request(plugin.WEB_PORT, self.url("status"))
         self.assertEqual(status, 200)
 
+    def test_settings_get(self):
+        status, body, _ = request(plugin.WEB_PORT, self.url("settings"))
+        data = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertEqual(data["host"], "127.0.0.1")
+        self.assertEqual(data["check_code"], "code")
+
+    def test_settings_post_requires_action_header(self):
+        status, _, _ = request(plugin.WEB_PORT, self.url("settings"), method="POST",
+                               headers={"Origin": f"http://{plugin.WEB_HOST}:{plugin.WEB_PORT}",
+                                        "Content-Type": "application/json"})
+        self.assertEqual(status, 403)
+        self.assertEqual(self.applied, [])
+
+    def test_settings_post_rejects_public_address(self):
+        status, body, _ = request(plugin.WEB_PORT, self.url("settings"), method="POST",
+                                  headers={"Origin": f"http://{plugin.WEB_HOST}:{plugin.WEB_PORT}",
+                                           "Content-Type": "application/json",
+                                           "X-FlashForge-Tab-Action": "settings"},
+                                  body=json.dumps({"host": "8.8.8.8", "check_code": "x"}))
+        self.assertEqual(status, 400)
+        self.assertEqual(self.applied, [])
+
+    def test_settings_post_rejects_bad_json(self):
+        status, _, _ = request(plugin.WEB_PORT, self.url("settings"), method="POST",
+                               headers={"Origin": f"http://{plugin.WEB_HOST}:{plugin.WEB_PORT}",
+                                        "Content-Type": "application/json",
+                                        "X-FlashForge-Tab-Action": "settings"},
+                               body="{not json")
+        self.assertEqual(status, 400)
+
+    def test_settings_post_saves(self):
+        status, body, _ = request(plugin.WEB_PORT, self.url("settings"), method="POST",
+                                  headers={"Origin": f"http://{plugin.WEB_HOST}:{plugin.WEB_PORT}",
+                                           "Content-Type": "application/json",
+                                           "X-FlashForge-Tab-Action": "settings"},
+                                  body=json.dumps({"host": "127.0.0.1", "check_code": "newcode"}))
+        data = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertEqual(data["endpoint"], "127.0.0.1")
+        self.assertFalse(data["moved"])
+        self.assertEqual(self.applied, [("127.0.0.1", "newcode")])
+
     def test_native_post_requires_action_header(self):
         status, _, _ = request(plugin.WEB_PORT, self.url("native"), method="POST",
                                headers={"Origin": f"http://{plugin.WEB_HOST}:{plugin.WEB_PORT}"})
@@ -436,6 +489,24 @@ class SwitchViewTests(unittest.TestCase):
         message = self.service.switch_view(restore_view="127.0.0.1")
         self.assertIn("printer web interface", message)
         self.assertEqual(self.preset.values["print_host_webui"], "")
+
+    def test_apply_settings_updates_profile(self):
+        self.saved_config = []
+        self.service.save_config = lambda value: self.saved_config.append(json.loads(value))
+        self.preset.values["print_host_webui"] = plugin.monitor_url("127.0.0.1")
+        endpoint = self.service.apply_settings("192.168.3.99", "newcode")
+        self.assertEqual(endpoint, "192.168.3.99")
+        self.assertEqual(self.preset.values["print_host"], "192.168.3.99")
+        self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("192.168.3.99"))
+        self.assertEqual(self.saved_config, [{"flashforge_host": "192.168.3.99", "check_code": "newcode"}])
+
+    def test_apply_settings_rejects_public_address(self):
+        with self.assertRaises(ValueError):
+            self.service.apply_settings("1.1.1.1", "code")
+
+    def test_apply_settings_rejects_bad_check_code(self):
+        with self.assertRaises(ValueError):
+            self.service.apply_settings("127.0.0.1", "код")
 
     def test_switch_rejects_foreign_profile(self):
         self.preset.values["host_type"] = "prusalink"

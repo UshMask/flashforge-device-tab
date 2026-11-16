@@ -4,7 +4,7 @@
 # name = "FlashForge Device Tab"
 # description = "Read-only FlashForge monitoring inside OrcaSlicer's Device tab."
 # author = "Max"
-# version = "1.0.0"
+# version = "1.1.0"
 # ///
 import hashlib
 import http.client
@@ -168,6 +168,15 @@ button:disabled { opacity: .55; cursor: default; }
   main { padding: 14px 12px; }
   .dashboard { grid-template-columns: minmax(0, 1fr); }
 }
+dialog.settings { width: min(420px, calc(100vw - 32px)); padding: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text); }
+dialog.settings::backdrop { background: rgba(10, 14, 16, .55); }
+dialog.settings form { display: flex; flex-direction: column; gap: 6px; padding: 18px 20px 16px; }
+dialog.settings h2 { margin-bottom: 6px; }
+dialog.settings label { margin-top: 8px; font-size: 12px; color: var(--muted); }
+dialog.settings input { width: 100%; }
+dialog.settings .caption { margin-top: 2px; }
+.settings-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.settings-actions button[type="submit"] { background: var(--blue); border-color: var(--blue); color: #fff; }
 </style>
 </head>
 <body>
@@ -176,6 +185,7 @@ button:disabled { opacity: .55; cursor: default; }
     <div class="identity"><h1>{{printer}}</h1><span class="device-state" id="status"></span></div>
     <div class="device-actions">
       <span class="connection" id="connection" role="status">Connecting…</span>
+      <button id="settingsButton" type="button" aria-haspopup="dialog">Settings</button>
       <button id="nativePage" type="button">Printer Web Interface</button>
     </div>
   </header>
@@ -264,6 +274,20 @@ button:disabled { opacity: .55; cursor: default; }
     </div>
   </section>
 </main>
+<dialog class="settings" id="settingsDialog" aria-labelledby="settingsTitle">
+  <form id="settingsForm">
+    <h2 id="settingsTitle">Printer connection</h2>
+    <label for="settingHost">Adventurer IPv4 address</label>
+    <input id="settingHost" type="text" maxlength="15" autocomplete="off" spellcheck="false" placeholder="192.168.1.51">
+    <label for="settingCode">CheckCode</label>
+    <input id="settingCode" type="password" maxlength="32" autocomplete="off" placeholder="from printer network settings">
+    <p class="caption" id="settingsStatus" role="status"></p>
+    <div class="settings-actions">
+      <button type="button" id="settingsCancel">Cancel</button>
+      <button type="submit" id="settingsSave">Save</button>
+    </div>
+  </form>
+</dialog>
 <script>
 const el = id => document.getElementById(id);
 const pageSize = 12;
@@ -650,6 +674,49 @@ el('next').onclick = () => { page++; renderFiles(); };
 document.addEventListener('visibilitychange', updateStatus);
 updateStatus();
 refreshFiles();
+const settingsDialog = el('settingsDialog');
+el('settingsButton').onclick = async () => {
+  el('settingsStatus').textContent = '';
+  settingsDialog.showModal();
+  try {
+    const data = await getJson('/settings');
+    el('settingHost').value = data.host || '';
+    el('settingCode').value = data.check_code || '';
+    el('settingHost').focus();
+  } catch (error) {
+    el('settingsStatus').textContent = error.message || 'Could not read the settings.';
+  }
+};
+el('settingsCancel').onclick = () => settingsDialog.close();
+el('settingsForm').onsubmit = async event => {
+  event.preventDefault();
+  const status = el('settingsStatus');
+  const save = el('settingsSave');
+  save.disabled = true;
+  status.textContent = 'Saving…';
+  try {
+    const response = await fetch(endpoint('/settings'), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-FlashForge-Tab-Action': 'settings'},
+      body: JSON.stringify({host: el('settingHost').value.trim(),
+                            check_code: el('settingCode').value.trim()}),
+      signal: AbortSignal.timeout(12000),
+    });
+    const data = await response.json();
+    if (!response.ok) throw Error(data.error || 'Could not save the settings.');
+    if (data.moved && data.endpoint) {
+      window.location.replace('/' + data.endpoint + '/');
+      return;
+    }
+    status.textContent = 'Saved. Reconnecting…';
+    settingsDialog.close();
+    await updateStatus();
+  } catch (error) {
+    status.textContent = error.message || 'Could not save the settings.';
+  } finally {
+    save.disabled = false;
+  }
+};
 setInterval(updateStatus, 5000);
 </script>
 </body>
@@ -1133,6 +1200,7 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
         self.error = ""
         self.state_lock = threading.Lock()
         self.printer_lock = threading.Lock()
+        self.apply_settings = None
         self.uploading = threading.Event()
         self.uploaded_at = 0.0
         self.stopping = threading.Event()
@@ -1141,6 +1209,10 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
     def settings_for(self):
         config = self.get_config()
         return config.get("flashforge_host") or "", config.get("check_code") or ""
+
+    def settings_payload(self):
+        host, check_code = self.settings_for()
+        return {"host": host, "check_code": check_code, "endpoint": host}
 
     def upload_active(self):
         # A cancelled or crashed Orca upload may never deliver UploadFinished;
@@ -1250,14 +1322,18 @@ class MonitorHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         authority = f"{WEB_HOST}:{WEB_PORT}"
+        action = self.headers.get("X-FlashForge-Tab-Action")
         if (self.headers.get("Host") != authority
                 or self.headers.get("Origin") != f"http://{authority}"
                 or self.headers.get("Sec-Fetch-Site") not in (None, "same-origin")
-                or self.headers.get("X-FlashForge-Tab-Action") != "restore"):
+                or action not in ("restore", "settings")):
             self.reply_json({"error": "Open the monitor from the Device tab."}, 403)
             return
         endpoint, route = self.request_route()
-        if route != "native" or self.server.restore_page is None:
+        if route == "settings" and action == "settings":
+            self.save_settings()
+            return
+        if route != "native" or action != "restore" or self.server.restore_page is None:
             self.reply_json({"error": "The printer web interface is unavailable."}, 404)
             return
         try:
@@ -1266,6 +1342,37 @@ class MonitorHandler(BaseHTTPRequestHandler):
             self.reply_json({"error": str(error)}, 409)
         else:
             self.reply_json({})
+
+    def save_settings(self):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if not 0 < length <= 4096:
+            self.reply_json({"error": "Invalid request."}, 400)
+            return
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (ValueError, UnicodeError):
+            self.reply_json({"error": "Invalid request."}, 400)
+            return
+        if not isinstance(payload, dict):
+            self.reply_json({"error": "Invalid request."}, 400)
+            return
+        apply = self.server.apply_settings
+        if apply is None:
+            self.reply_json({"error": "Settings are unavailable."}, 503)
+            return
+        try:
+            previous = self.server.settings_for()[0]
+            endpoint = apply(str(payload.get("host") or ""), str(payload.get("check_code") or ""))
+        except ValueError as error:
+            self.reply_json({"error": str(error)}, 400)
+            return
+        except (OSError, RuntimeError) as error:
+            self.reply_json({"error": str(error)}, 409)
+            return
+        self.reply_json({"endpoint": endpoint, "moved": endpoint != previous})
 
     def do_GET(self):
         if self.headers.get("Host") != f"{WEB_HOST}:{WEB_PORT}":
@@ -1298,6 +1405,9 @@ class MonitorHandler(BaseHTTPRequestHandler):
             return
         if self.headers.get("Sec-Fetch-Site") not in (None, "same-origin", "none"):
             self.send_error(403)
+            return
+        if route == "settings":
+            self.reply_json(self.server.settings_payload())
             return
 
         try:
@@ -1426,6 +1536,7 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             server.configure(self.config, storage)
             server.restore_page = self.restore_page
             server.check_view = self.check_view
+            server.apply_settings = self.apply_settings
             worker.start()
         except Exception:
             server.server_close()
@@ -1525,6 +1636,30 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             return message
         finally:
             self._switch_lock.release()
+
+    def apply_settings(self, host, check_code):
+        host = local_address(host)
+        if len(check_code) > 32 or any(not 33 <= ord(c) <= 126 for c in check_code):
+            raise ValueError("The CheckCode must be printable ASCII, up to 32 characters.")
+        current_host, current_code = self._server.settings_for()
+        if host != current_host:
+            # The Device tab and the upload path both follow the profile, so a new
+            # address has to land in the active printer preset as well.
+            transaction = orca.host.preset.printer.begin_update()
+            presets = orca.host.preset_bundle().printers
+            preset = presets.edited_preset()
+            if preset.name != transaction.target_name:
+                raise ValueError("The active printer profile changed. Try again.")
+            if preset.config_value("host_type") != "flashforge":
+                raise ValueError("Select a printer profile that uses the FlashForge host.")
+            if monitor_identity(preset.config_value(DEVICE_UI_KEY) or "") == current_host:
+                transaction.set(DEVICE_UI_KEY, monitor_url(host))
+            transaction.set("print_host", host)
+            transaction.commit()
+        if (host, check_code) != (current_host, current_code):
+            self.save_config(json.dumps({"flashforge_host": host, "check_code": check_code},
+                                        ensure_ascii=False))
+        return host
 
     def restore_page(self, view):
         # Request threads are not joined during unload. They can wait for the
