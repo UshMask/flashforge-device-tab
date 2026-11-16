@@ -1,5 +1,10 @@
 ﻿# Changelog
 
+## 1.6.6
+
+The release workflow uploads the plugin with the platform suffix the catalogue
+requires (`_win_x86_64.py`).
+
 ## 1.6.5
 
 - Publishing happens on a published GitHub release through
