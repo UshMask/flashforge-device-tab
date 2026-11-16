@@ -4,7 +4,7 @@
 # name = "FlashForge Device Tab"
 # description = "Read-only FlashForge monitoring inside OrcaSlicer's Device tab."
 # author = "Max"
-# version = "1.4.0"
+# version = "1.5.0"
 # ///
 import hashlib
 import http.client
@@ -41,8 +41,6 @@ POLL_INTERVAL = 5
 HISTORY_LIMIT = 500
 HISTORY_CHECKPOINT = 30
 MAX_JOB_GAP = 180
-DISCOVERY_INTERVAL = 30
-IDLE_POLL_INTERVAL = 15
 
 # The Orca upload worker must not be held hostage by a monitor request that is
 # already talking to the printer, so the drain wait is short and best-effort.
@@ -175,9 +173,7 @@ dialog.settings::backdrop { background: rgba(10, 14, 16, .55); }
 dialog.settings form { display: flex; flex-direction: column; gap: 6px; padding: 18px 20px 16px; }
 dialog.settings h2 { margin-bottom: 6px; }
 dialog.settings label { margin-top: 8px; font-size: 12px; color: var(--muted); }
-dialog.settings input, dialog.settings select { width: 100%; }
-dialog.settings input[type="checkbox"] { width: auto; margin: 0; }
-dialog.settings label.check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); margin-top: 10px; }
+dialog.settings input { width: 100%; }
 dialog.settings .caption { margin-top: 2px; }
 .settings-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .settings-actions button[type="submit"] { background: var(--blue); border-color: var(--blue); color: #fff; }
@@ -281,13 +277,6 @@ dialog.settings .caption { margin-top: 2px; }
 <dialog class="settings" id="settingsDialog" aria-labelledby="settingsTitle">
   <form id="settingsForm">
     <h2 id="settingsTitle">Printer connection</h2>
-    <label for="settingMode">Device tab shows</label>
-    <select id="settingMode">
-      <option value="profile">This printer (active profile)</option>
-      <option value="dashboard">All printers at once</option>
-    </select>
-    <label class="check"><input type="checkbox" id="settingReadCode"> Read CheckCode from the printer profile</label>
-    <label class="check"><input type="checkbox" id="settingTab"> Show the Printers tab</label>
     <label for="settingHost">Adventurer IPv4 address</label>
     <input id="settingHost" type="text" maxlength="15" autocomplete="off" spellcheck="false" placeholder="192.168.1.51">
     <label for="settingCode">CheckCode</label>
@@ -691,9 +680,6 @@ el('settingsButton').onclick = async () => {
   settingsDialog.showModal();
   try {
     const data = await getJson('/settings');
-    el('settingMode').value = data.mode === 'device' ? 'device' : 'panel';
-    el('settingReadCode').checked = data.read_check_code !== false;
-    el('settingTab').checked = data.tab_enabled !== false;
     el('settingHost').value = data.host || '';
     el('settingCode').value = data.check_code || '';
     el('settingHost').focus();
@@ -712,17 +698,19 @@ el('settingsForm').onsubmit = async event => {
     const response = await fetch(endpoint('/settings'), {
       method: 'POST',
       headers: {'Content-Type': 'application/json', 'X-FlashForge-Tab-Action': 'settings'},
-      body: JSON.stringify({mode: el('settingMode').value,
-                            host: el('settingHost').value.trim(),
-                            check_code: el('settingCode').value.trim(),
-                            read_check_code: el('settingReadCode').checked,
-                            tab_enabled: el('settingTab').checked}),
+      body: JSON.stringify({host: el('settingHost').value.trim(),
+                            check_code: el('settingCode').value.trim()}),
       signal: AbortSignal.timeout(12000),
     });
     const data = await response.json();
     if (!response.ok) throw Error(data.error || 'Could not save the settings.');
+    if (data.moved && data.endpoint) {
+      window.location.replace('/' + data.endpoint + '/');
+      return;
+    }
+    status.textContent = 'Saved. Reconnecting…';
     settingsDialog.close();
-    window.location.replace('/');
+    await updateStatus();
   } catch (error) {
     status.textContent = error.message || 'Could not save the settings.';
   } finally {
@@ -771,358 +759,6 @@ byId('save').onclick = () => {
 };
 </script>
 </html>'''
-
-DASHBOARD_PAGE = r'''<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{title}}</title>
-<style>
-:root {
-  color-scheme: light;
-  --bg: #efefef; --panel: #fff; --header: #f7f7f7; --text: #242b31; --muted: #5d6873;
-  --line: #d9dee3; --blue: #166ac7; --track: #e4e9ef; --ok: #23764b; --warn: #92502a;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    color-scheme: dark;
-    --bg: #242829; --panel: #303637; --header: #373f41; --text: #f0f3f6; --muted: #b7c1c8;
-    --line: #4b5558; --blue: #77baff; --track: #50585c; --ok: #88d8a8; --warn: #f0b488;
-  }
-}
-* { box-sizing: border-box; }
-[hidden] { display: none !important; }
-body { margin: 0; background: var(--bg); color: var(--text); font: 14px "Segoe UI", sans-serif; font-variant-numeric: tabular-nums; }
-main { max-width: 1280px; margin: auto; padding: 20px 24px 28px; }
-h1 { font-size: 17px; font-weight: 600; margin: 0; }
-h2 { font-size: 14px; font-weight: 600; margin: 0; }
-.device { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; padding: 0 0 10px; margin-bottom: 10px; border-bottom: 2px solid var(--panel); }
-.identity, .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
-.muted { color: var(--muted); }
-.note { margin: 0 0 14px; font-size: 12px; color: var(--muted); max-width: 900px; }
-.connection { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
-.connection::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-.connection.connected { color: var(--ok); }
-.connection.disconnected { color: var(--warn); }
-button { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 6px 10px; cursor: pointer; }
-button:hover:enabled { border-color: var(--blue); }
-input, select { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 6px 9px; }
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 10px; min-height: 190px; }
-.card.foreign { opacity: .82; }
-.card header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-.card .name { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
-.card .host { font-size: 12px; color: var(--muted); }
-.card .state { font-size: 12px; color: var(--muted); white-space: nowrap; }
-.card .state[data-state="active"] { color: var(--blue); }
-.card .state[data-state="complete"] { color: var(--ok); }
-.card .file { min-height: 18px; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.progress-line { display: flex; align-items: center; gap: 8px; }
-progress { display: block; appearance: none; width: 100%; height: 8px; border: 0; border-radius: 5px; background: var(--track); overflow: hidden; }
-progress::-webkit-progress-bar { background: var(--track); border-radius: 5px; }
-progress::-webkit-progress-value { background: var(--blue); border-radius: 5px; }
-.percent { min-width: 4ch; text-align: right; font-size: 12px; }
-.readouts { display: flex; gap: 16px; font-size: 12px; color: var(--muted); }
-.readouts strong { color: var(--text); font-size: 14px; }
-.card .footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; }
-.card a { color: var(--blue); text-decoration: none; font-size: 12px; font-weight: 600; }
-.card a:hover { text-decoration: underline; }
-.empty { background: var(--panel); border: 1px dashed var(--line); border-radius: 8px; padding: 28px; text-align: center; color: var(--muted); }
-dialog { width: min(460px, calc(100vw - 32px)); padding: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text); }
-dialog::backdrop { background: rgba(10, 14, 16, .55); }
-dialog form { display: flex; flex-direction: column; gap: 8px; padding: 18px 20px 16px; }
-dialog label { font-size: 12px; color: var(--muted); }
-dialog label.check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); }
-dialog input[type="checkbox"] { width: auto; margin: 0; }
-dialog ul { margin: 4px 0 0; padding-left: 18px; font-size: 13px; }
-.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
-.dialog-actions button[type="submit"] { background: var(--blue); border-color: var(--blue); color: #fff; }
-</style>
-</head>
-<body>
-<main>
-  <header class="device">
-    <div class="identity">
-      <h1>{{title}}</h1>
-      <span class="connection" id="connection" role="status">Connecting…</span>
-      <span class="muted" id="count"></span>
-    </div>
-    <div class="actions">
-      <span class="muted" id="modeLabel"></span>
-      <button id="refresh" type="button">Refresh</button>
-      <button id="settingsButton" type="button" aria-haspopup="dialog">Settings</button>
-    </div>
-  </header>
-  <p class="note">
-    Live data is read over the local network and only FlashForge printers are supported.
-    Other printers are listed with their own web interface; printers without one cannot be
-    monitored by this plugin.
-  </p>
-  <div class="grid" id="grid"></div>
-  <p class="empty" id="empty" hidden>
-    No printer profiles yet. Add printers in OrcaSlicer, then reopen this tab.
-  </p>
-</main>
-<dialog id="settingsDialog" aria-labelledby="settingsTitle">
-  <form id="settingsForm">
-    <h2 id="settingsTitle">Device tab</h2>
-    <label for="settingMode">What the Device tab shows for FlashForge printers</label>
-    <select id="settingMode">
-      <option value="panel">Printer panel (recommended)</option>
-      <option value="device">All printers dashboard</option>
-    </select>
-    <label class="check"><input type="checkbox" id="settingReadCode"> Read CheckCode from printer profiles</label>
-    <label class="check"><input type="checkbox" id="settingTab"> Show this Printers tab</label>
-    <p class="muted">The dashboard is always available in this tab. Choosing “All printers
-      dashboard” additionally replaces the Device tab page for FlashForge profiles.</p>
-    <p class="muted" id="settingsStatus" role="status"></p>
-    <ul id="printerList"></ul>
-    <div class="dialog-actions">
-      <button type="button" id="settingsCancel">Cancel</button>
-      <button type="submit" id="settingsSave">Save</button>
-    </div>
-  </form>
-</dialog>
-<script>
-const el = id => document.getElementById(id);
-const bridge = window.orca && typeof window.orca.postMessage === 'function' ? window.orca : null;
-
-function duration(seconds) {
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor(seconds % 3600 / 60);
-  const rest = seconds % 60;
-  const pad = value => String(value).padStart(2, '0');
-  return pad(hours) + ':' + pad(minutes) + ':' + pad(rest);
-}
-
-function stateOf(printer) {
-  if (printer.complete) return 'complete';
-  if (printer.printing) return 'active';
-  return '';
-}
-
-function header(printer, label) {
-  const head = document.createElement('header');
-  const left = document.createElement('div');
-  const name = document.createElement('div');
-  name.className = 'name';
-  name.textContent = printer.name;
-  const host = document.createElement('div');
-  host.className = 'host';
-  host.textContent = printer.host || '';
-  left.append(name, host);
-  const state = document.createElement('span');
-  state.className = 'state';
-  state.dataset.state = label ? '' : stateOf(printer);
-  state.textContent = label || printer.status || (printer.error ? 'No answer' : 'Waiting…');
-  head.append(left, state);
-  return head;
-}
-
-function foreignCard(printer, text, linkText, href) {
-  const article = document.createElement('article');
-  article.className = 'card foreign';
-  article.append(header(printer, text));
-  const footer = document.createElement('div');
-  footer.className = 'footer';
-  const spacer = document.createElement('span');
-  const link = document.createElement('a');
-  link.href = href;
-  link.textContent = linkText;
-  if (/^https?:/i.test(href)) {
-    link.target = '_blank';
-    link.rel = 'noreferrer';
-  }
-  if (href) {
-    footer.append(spacer, link);
-  } else {
-    const note = document.createElement('span');
-    note.className = 'muted';
-    note.textContent = 'not monitored';
-    footer.append(spacer, note);
-  }
-  article.append(footer);
-  return article;
-}
-
-function meteorCard(printer) {
-  const article = document.createElement('article');
-  article.className = 'card';
-  article.append(header(printer));
-
-  const file = document.createElement('div');
-  file.className = 'file';
-  file.textContent = printer.file || (printer.error ? printer.error : '');
-
-  const line = document.createElement('div');
-  line.className = 'progress-line';
-  const bar = document.createElement('progress');
-  bar.max = 100;
-  bar.value = printer.percent ?? 0;
-  const percent = document.createElement('span');
-  percent.className = 'percent';
-  percent.textContent = printer.percent == null ? '' : printer.percent + '%';
-  line.append(bar, percent);
-
-  const readouts = document.createElement('div');
-  readouts.className = 'readouts';
-  const nozzle = document.createElement('span');
-  nozzle.textContent = 'Nozzle ';
-  const nozzleValue = document.createElement('strong');
-  nozzleValue.textContent = Number.isFinite(printer.nozzle) ? Math.round(printer.nozzle) + ' °C' : '—';
-  nozzle.append(nozzleValue);
-  const bed = document.createElement('span');
-  bed.textContent = 'Bed ';
-  const bedValue = document.createElement('strong');
-  bedValue.textContent = Number.isFinite(printer.bed) ? Math.round(printer.bed) + ' °C' : '—';
-  bed.append(bedValue);
-  readouts.append(nozzle, bed);
-
-  const footer = document.createElement('div');
-  footer.className = 'footer';
-  const remaining = document.createElement('span');
-  remaining.className = 'muted';
-  remaining.textContent = printer.remaining == null ? '' : duration(printer.remaining) + ' left';
-  const link = document.createElement('a');
-  link.href = '/' + printer.host + '/';
-  link.textContent = 'Open panel';
-  footer.append(remaining, link);
-
-  article.append(file, line, readouts, footer);
-  return article;
-}
-
-function card(printer) {
-  if (printer.kind === 'web') {
-    return foreignCard(printer, 'Web interface', 'Open', printer.url || ('http://' + printer.host));
-  }
-  if (printer.kind === 'local') {
-    return foreignCard(printer, 'No web interface', '', '');
-  }
-  return meteorCard(printer);
-}
-
-function render(data) {
-  const printers = data.printers || [];
-  el('connection').className = 'connection connected';
-  el('connection').textContent = 'Connected';
-  el('modeLabel').textContent = data.mode === 'device' ? 'Device tab: dashboard' : 'Device tab: panel';
-  el('count').textContent = printers.length
-    ? printers.length + (printers.length === 1 ? ' printer' : ' printers') : '';
-  el('empty').hidden = printers.length > 0;
-  el('grid').replaceChildren(...printers.map(card));
-}
-
-async function load() {
-  if (bridge) {
-    bridge.postMessage({action: 'dashboard'});
-    return;
-  }
-  try {
-    const response = await fetch('data', {cache: 'no-store', signal: AbortSignal.timeout(12000)});
-    if (!response.ok) throw Error('No response');
-    render(await response.json());
-  } catch {
-    el('connection').className = 'connection disconnected';
-    el('connection').textContent = 'No response';
-  }
-}
-
-async function loadSettings() {
-  if (bridge) {
-    bridge.postMessage({action: 'settings'});
-    return;
-  }
-  try {
-    const response = await fetch('settings', {cache: 'no-store', signal: AbortSignal.timeout(12000)});
-    applySettings(await response.json());
-  } catch {
-    el('settingsStatus').textContent = 'Could not read the settings.';
-  }
-}
-
-function applySettings(data) {
-  if (!data) return;
-  el('settingMode').value = data.mode === 'device' ? 'device' : 'panel';
-  el('settingReadCode').checked = data.read_check_code !== false;
-  el('settingTab').checked = data.tab_enabled !== false;
-  const items = (data.printers || []).map(printer => {
-    const item = document.createElement('li');
-    const kind = printer.kind === 'flashforge' ? 'monitored'
-      : printer.kind === 'web' ? 'web interface' : 'no web interface';
-    item.textContent = printer.name + ' · ' + (printer.host || 'local') + ' — ' + kind
-      + (printer.active ? ' (active profile)' : '');
-    return item;
-  });
-  el('printerList').replaceChildren(...items);
-}
-
-if (bridge) {
-  bridge.onMessage(payload => {
-    if (!payload) return;
-    if (payload.error) {
-      el('settingsStatus').textContent = payload.error;
-      return;
-    }
-    if (payload.printers) {
-      render(payload);
-      if (el('settingsDialog').open) applySettings(payload);
-    }
-    if (payload.mode) el('settingMode').value = payload.mode === 'device' ? 'device' : 'panel';
-  });
-}
-
-el('refresh').onclick = load;
-
-el('settingsButton').onclick = () => {
-  el('settingsStatus').textContent = '';
-  el('settingsDialog').showModal();
-  loadSettings();
-};
-
-el('settingsCancel').onclick = () => el('settingsDialog').close();
-
-el('settingsForm').onsubmit = async event => {
-  event.preventDefault();
-  const status = el('settingsStatus');
-  const save = el('settingsSave');
-  const mode = el('settingMode').value;
-  const options = {read_check_code: el('settingReadCode').checked,
-                   tab_enabled: el('settingTab').checked};
-  save.disabled = true;
-  status.textContent = 'Saving…';
-  try {
-    if (bridge) {
-      bridge.postMessage({action: 'options', mode, ...options});
-      status.textContent = 'Saved.';
-      el('settingsDialog').close();
-      setTimeout(load, 300);
-    } else {
-      const response = await fetch('settings', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json', 'X-FlashForge-Tab-Action': 'settings'},
-        body: JSON.stringify({mode, ...options}),
-        signal: AbortSignal.timeout(12000),
-      });
-      const data = await response.json();
-      if (!response.ok) throw Error(data.error || 'Could not save the settings.');
-      el('settingsDialog').close();
-      window.location.reload();
-    }
-  } catch (error) {
-    status.textContent = error.message || 'Could not save the settings.';
-  } finally {
-    save.disabled = false;
-  }
-};
-
-load();
-setInterval(load, 5000);
-</script>
-</body>
-</html>'''
-
 
 STATES = {
     "READY": "Ready", "IDLE": "Ready", "BUSY": "Busy",
@@ -1521,7 +1157,6 @@ WEB_HOST = "127.0.0.1"
 WEB_PORT = 18771
 DEVICE_UI_KEY = "print_host_webui"
 MONITOR_TITLE = "FlashForge"
-DASHBOARD_TITLE = "FlashForge printers"
 
 
 def monitor_url(endpoint=""):
@@ -1545,19 +1180,6 @@ def monitor_identity(url):
         return None
 
 
-def dashboard_url():
-    return f"http://{WEB_HOST}:{WEB_PORT}/dashboard/"
-
-
-def dashboard_identity(url):
-    try:
-        parsed = urlsplit(url)
-    except ValueError:
-        return False
-    return parsed.scheme == "http" and parsed.netloc == f"{WEB_HOST}:{WEB_PORT}" and \
-        parsed.path.strip("/") == "dashboard"
-
-
 def printer_endpoint(print_host):
     try:
         url = urlsplit(print_host if "://" in print_host else "http://" + print_host)
@@ -1570,135 +1192,27 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
     restore_page = None
     check_view = None
-    apply_settings = None
-    discover = None
-    debug_payload = None
 
     def configure(self, get_config, storage):
         self.get_config = get_config
         self.storage = storage
-        self.monitors = {}
-        self.errors = {}
-        self.printers = []
-        self.state_lock = threading.RLock()
+        self.monitor = None
+        self.error = ""
+        self.state_lock = threading.Lock()
         self.printer_lock = threading.Lock()
+        self.apply_settings = None
         self.uploading = threading.Event()
         self.uploaded_at = 0.0
         self.stopping = threading.Event()
         self.poller = None
-        self.next_discovery = 0.0
-        self.heal_device_tab = None
-        self.heal_attempts = 0
-
-    # ---- configuration -------------------------------------------------
-
-    def config(self):
-        try:
-            value = self.get_config()
-        except Exception:
-            return {}
-        return value if isinstance(value, dict) else {}
-
-    def mode(self):
-        value = self.config().get("mode")
-        if value in ("device", "dashboard"):
-            return "device"
-        return "panel"
-
-    def legacy_settings(self):
-        config = self.config()
-        return config.get("flashforge_host") or "", config.get("check_code") or ""
-
-    def active_printer(self):
-        with self.state_lock:
-            flash = [entry for entry in self.printers if entry.get("kind", "flashforge") == "flashforge"]
-            for entry in flash:
-                if entry.get("active"):
-                    return entry
-            return flash[0] if flash else None
 
     def settings_for(self):
-        entry = self.active_printer()
-        if entry:
-            return entry["host"], entry.get("code", "")
-        return self.legacy_settings()
+        config = self.get_config()
+        return config.get("flashforge_host") or "", config.get("check_code") or ""
 
     def settings_payload(self):
-        entry = self.active_printer() or {}
-        with self.state_lock:
-            printers = [{"host": item["host"], "name": item.get("name", ""),
-                         "kind": item.get("kind", "flashforge"),
-                         "active": bool(item.get("active"))} for item in self.printers]
-        config = self.config()
-        return {"host": entry.get("host", ""), "check_code": entry.get("code", ""),
-                "endpoint": entry.get("host", ""), "mode": self.mode(), "printers": printers,
-                "read_check_code": config.get("read_check_code", True),
-                "tab_enabled": config.get("tab_enabled", True)}
-
-    def refresh_printers(self):
-        entries = []
-        if self.discover is not None:
-            try:
-                entries = self.discover() or []
-            except Exception:
-                entries = []
-        if not entries:
-            # No FlashForge preset yet: fall back to the address from the old config.
-            host, code = self.legacy_settings()
-            if host:
-                entries = [{"kind": "flashforge", "host": host, "code": code,
-                            "name": "Printer", "active": True}]
-        with self.state_lock:
-            self.printers = entries
-            known = {entry["host"] for entry in entries}
-            for host in [name for name in self.monitors if name not in known]:
-                self.monitors.pop(host).history.save(int(time.time()))
-                self.errors.pop(host, None)
-            for entry in entries:
-                if entry.get("kind", "flashforge") != "flashforge":
-                    continue
-                monitor = self.monitors.get(entry["host"])
-                if monitor is None:
-                    try:
-                        adapter = FlashForge(entry["host"], entry.get("code", ""))
-                    except ValueError as error:
-                        self.errors[entry["host"]] = str(error)
-                        continue
-                    monitor = PrinterMonitor(
-                        adapter, self.storage / f"flashforge-{adapter.host}-history.json")
-                    monitor.endpoint = adapter.host
-                    monitor.next_due = 0.0
-                    self.monitors[entry["host"]] = monitor
-                    self.errors.pop(entry["host"], None)
-                else:
-                    monitor.adapter.check_code = entry.get("code", "")
-            for host in [name for name in self.monitors
-                         if name not in {entry["host"] for entry in entries}]:
-                self.monitors.pop(host).history.save(int(time.time()))
-
-    def dashboard_payload(self):
-        printers = []
-        for entry in list(self.printers):
-            monitor = self.monitors.get(entry["host"])
-            data, error = None, self.errors.get(entry["host"], "")
-            if monitor is not None:
-                with monitor.state_lock:
-                    data = monitor.latest
-                    error = monitor.error or error
-            item = {"host": entry["host"], "name": entry.get("name") or entry["host"],
-                    "kind": entry.get("kind", "flashforge"), "url": entry.get("url", ""),
-                    "activeProfile": bool(entry.get("active")), "error": error,
-                    "status": None, "percent": None, "remaining": None, "file": "",
-                    "nozzle": None, "bed": None, "printing": False, "complete": False}
-            if data:
-                item.update(status=data.get("status"), percent=data.get("percent"),
-                            remaining=data.get("remaining"), file=data.get("file"),
-                            nozzle=data.get("nozzle"), bed=data.get("bed"),
-                            printing=bool(data.get("active")), complete=bool(data.get("complete")))
-            printers.append(item)
-        return {"mode": self.mode(), "printers": printers}
-
-    # ---- upload coordination -------------------------------------------
+        host, check_code = self.settings_for()
+        return {"host": host, "check_code": check_code, "endpoint": host}
 
     def upload_active(self):
         # A cancelled or crashed Orca upload may never deliver UploadFinished;
@@ -1726,29 +1240,34 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
         if acquired:
             self.printer_lock.release()
 
-    # ---- polling --------------------------------------------------------
-
     def poll_printer(self):
+        monitor = None
+        previous = None
         try:
             while not self.stopping.is_set():
                 now = int(time.time())
-                mono = time.monotonic()
                 try:
-                    if mono >= self.next_discovery:
-                        self.refresh_printers()
-                        self.next_discovery = mono + DISCOVERY_INTERVAL
-                        if self.heal_device_tab is not None and self.heal_attempts < 6:
-                            self.heal_attempts += 1
+                    settings = self.settings_for()
+                    if settings != previous:
+                        if monitor:
+                            monitor.history.save(now)
+                        monitor = None
+                        error = ""
+                        host, secret = settings
+                        if host:
                             try:
-                                if self.heal_device_tab():
-                                    self.heal_device_tab = None
-                            except Exception:
-                                pass
-                    active = (self.active_printer() or {}).get("host")
-                    for host, monitor in list(self.monitors.items()):
-                        if mono < getattr(monitor, "next_due", 0.0):
-                            continue
-                        monitor.next_due = mono + (POLL_INTERVAL if host == active else IDLE_POLL_INTERVAL)
+                                adapter = FlashForge(host, secret)
+                                monitor = PrinterMonitor(
+                                    adapter, self.storage / f"flashforge-{adapter.host}-history.json")
+                                monitor.endpoint = adapter.host
+                                monitor.settings = settings
+                            except ValueError as exc:
+                                error = str(exc)
+                        with self.state_lock:
+                            self.monitor = monitor
+                            self.error = error
+                        previous = settings
+                    if monitor:
                         with self.printer_io():
                             monitor.sample(now)
                 except UploadInProgress:
@@ -1756,15 +1275,14 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
                 except Exception:
                     # One bad response must not end the poll loop or the server.
                     with self.state_lock:
-                        for host in list(self.monitors):
-                            self.errors[host] = "Could not update printer data."
-                    for monitor in list(self.monitors.values()):
+                        self.error = "Could not update printer data."
+                    if monitor:
                         with monitor.state_lock:
                             monitor.latest = None
                             monitor.error = "Could not update printer data."
-                self.stopping.wait(0.5)
+                self.stopping.wait(POLL_INTERVAL)
         finally:
-            for monitor in list(self.monitors.values()):
+            if monitor:
                 monitor.history.save(int(time.time()))
 
     def serve_forever(self, poll_interval=0.5):
@@ -1801,27 +1319,24 @@ class AliasServer(ThreadingMixIn, HTTPServer):
 
 
 class AliasRedirectHandler(BaseHTTPRequestHandler):
-    """Answers on the ports older plugin releases used and redirects to the panel."""
+    """Answers on the ports older releases used and forwards to the panel."""
 
     def do_GET(self):
         service = FlashForgeService.instance
         server = service._server if service is not None else None
-        parts = [part for part in self.path.partition("?")[0].split("/") if part]
         host = ""
-        for part in parts:
+        for part in [part for part in self.path.partition("?")[0].split("/") if part]:
             try:
                 host = local_address(part)
                 break
             except ValueError:
                 continue
-        if server is not None:
-            if server.mode() == "device":
-                target = dashboard_url()
-            else:
-                active = server.active_printer() or {}
-                target = monitor_url(host or active.get("host", ""))
+        if host:
+            target = monitor_url(host)
+        elif server is not None:
+            target = monitor_url(server.settings_for()[0] or "")
         else:
-            target = monitor_url(host) if host else dashboard_url()
+            target = monitor_url()
         self.send_response(308)
         self.send_header("Location", target)
         self.send_header("Content-Length", "0")
@@ -1834,10 +1349,8 @@ class AliasRedirectHandler(BaseHTTPRequestHandler):
 class MonitorHandler(BaseHTTPRequestHandler):
     def request_route(self):
         path = self.path.partition("?")[0]
-        first, _, rest = path.lstrip("/").partition("/")
-        return first, rest
-
-    # ---- POST -----------------------------------------------------------
+        endpoint, _, route = path.lstrip("/").partition("/")
+        return endpoint, route
 
     def do_POST(self):
         authority = f"{WEB_HOST}:{WEB_PORT}"
@@ -1850,7 +1363,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
             return
         endpoint, route = self.request_route()
         if route == "settings" and action == "settings":
-            self.save_settings(endpoint)
+            self.save_settings()
             return
         if route != "native" or action != "restore" or self.server.restore_page is None:
             self.reply_json({"error": "The printer web interface is unavailable."}, 404)
@@ -1862,22 +1375,20 @@ class MonitorHandler(BaseHTTPRequestHandler):
         else:
             self.reply_json({})
 
-    def read_json_body(self):
+    def save_settings(self):
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             length = 0
         if not 0 < length <= 4096:
-            return None
+            self.reply_json({"error": "Invalid request."}, 400)
+            return
         try:
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
         except (ValueError, UnicodeError):
-            return None
-        return payload if isinstance(payload, dict) else None
-
-    def save_settings(self, endpoint):
-        payload = self.read_json_body()
-        if payload is None:
+            self.reply_json({"error": "Invalid request."}, 400)
+            return
+        if not isinstance(payload, dict):
             self.reply_json({"error": "Invalid request."}, 400)
             return
         apply = self.server.apply_settings
@@ -1885,93 +1396,70 @@ class MonitorHandler(BaseHTTPRequestHandler):
             self.reply_json({"error": "Settings are unavailable."}, 503)
             return
         try:
-            previous = self.server.mode()
-            result = apply(str(payload.get("host") or ""), str(payload.get("check_code") or ""),
-                           str(payload.get("mode") or ""), payload.get("read_check_code"),
-                           payload.get("tab_enabled"))
+            previous = self.server.settings_for()[0]
+            endpoint = apply(str(payload.get("host") or ""), str(payload.get("check_code") or ""))
         except ValueError as error:
             self.reply_json({"error": str(error)}, 400)
             return
         except (OSError, RuntimeError) as error:
             self.reply_json({"error": str(error)}, 409)
             return
-        self.reply_json({"mode": self.server.mode(), "endpoint": result,
-                         "moved": self.server.mode() != previous})
-
-    # ---- GET ------------------------------------------------------------
+        self.reply_json({"endpoint": endpoint, "moved": endpoint != previous})
 
     def do_GET(self):
         if self.headers.get("Host") != f"{WEB_HOST}:{WEB_PORT}":
             self.send_error(403)
             return
         endpoint, route = self.request_route()
-        if endpoint != "dashboard" and self.headers.get("Sec-Fetch-Site") not in (None, "same-origin", "none"):
-            self.send_error(403)
-            return
-        if endpoint == "dashboard":
-            if route and self.headers.get("Sec-Fetch-Site") not in (None, "same-origin", "none"):
-                self.send_error(403)
-                return
-            if not route and not self.path.partition("?")[0].endswith("/"):
-                self.redirect(dashboard_url())
-                return
-            self.serve_dashboard(route)
-            return
+        settings = self.server.settings_for()
+        try:
+            configured = printer_endpoint(settings[0]) if settings[0] else ""
+        except ValueError:
+            configured = ""
         if not endpoint:
-            target = self.server.active_printer()
-            if self.server.mode() == "device" or not target:
-                self.redirect(dashboard_url())
-                return
-            self.redirect(monitor_url(target["host"]))
+            if configured:
+                self.send_response(308)
+                self.send_header("Location", monitor_url(configured))
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            else:
+                self.reply_json({"error": "Enter your printer address in the plugin settings."}, 503)
             return
         if not route:
             if not self.path.partition("?")[0].endswith("/"):
-                self.redirect(monitor_url(endpoint))
+                self.send_response(308)
+                self.send_header("Location", monitor_url(endpoint))
+                self.send_header("Content-Length", "0")
+                self.end_headers()
                 return
             page = PAGE.replace("{{printer}}", MONITOR_TITLE)
             self.reply(page.encode("utf-8"), "text/html; charset=utf-8")
             return
+        if self.headers.get("Sec-Fetch-Site") not in (None, "same-origin", "none"):
+            self.send_error(403)
+            return
         if route == "settings":
             self.reply_json(self.server.settings_payload())
             return
+
         try:
             if self.server.check_view is not None:
                 endpoint = self.server.check_view(endpoint)
+            if configured and endpoint != configured:
+                raise ValueError("The address in the OrcaSlicer profile does not match the plugin settings.")
         except (OSError, RuntimeError, ValueError) as error:
             self.reply_json({"error": str(error)}, 409)
             return
-        self.serve_printer(endpoint, route)
 
-    def serve_dashboard(self, route):
-        if not route:
-            # Shown inside the plugin's own Printers tab, which is a different
-            # origin, so the page has to be frameable; it carries no data itself.
-            page = DASHBOARD_PAGE.replace("{{title}}", DASHBOARD_TITLE)
-            self.reply(page.encode("utf-8"), "text/html; charset=utf-8", frameable=True)
-            return
-        if route == "data":
-            self.reply_json(self.server.dashboard_payload())
-            return
-        if route == "debug":
-            self.reply_json(self.server.debug_payload or {})
-            return
-        if route == "settings":
-            self.reply_json(self.server.settings_payload())
-            return
-        self.send_error(404)
-
-    def serve_printer(self, endpoint, route):
-        with self.server.state_lock:
-            monitor = self.server.monitors.get(endpoint)
-            error = self.server.errors.get(endpoint, "")
-        if monitor is None:
-            message = error or "Waiting for the printer…"
-            if route == "telemetry":
-                self.reply_json({"temperatures": [], "history": [], "historyError": "", "cameraUrl": ""})
-            else:
-                self.reply_json({"error": message}, 503)
-            return
         try:
+            monitor, error, uploading = self.snapshot()
+            if monitor is None or monitor.settings != settings:
+                if route == "telemetry":
+                    self.reply_json({"temperatures": [], "history": [], "historyError": "", "cameraUrl": ""})
+                else:
+                    message = "Waiting for the printer…" if settings[0] else "Enter your printer address in the plugin settings."
+                    self.reply_json({"error": error or message}, 503)
+                return
             if route == "telemetry":
                 with monitor.state_lock:
                     data = {"temperatures": list(monitor.temperatures),
@@ -1980,7 +1468,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
                             "cameraUrl": monitor.camera_url}
                 self.reply_json(data)
                 return
-            if self.server.upload_active():
+            if uploading:
                 raise UploadInProgress
             with monitor.state_lock:
                 data = monitor.latest
@@ -2018,17 +1506,15 @@ class MonitorHandler(BaseHTTPRequestHandler):
             return
         self.send_error(404)
 
-    def redirect(self, location):
-        self.send_response(308)
-        self.send_header("Location", location)
-        self.send_header("Content-Length", "0")
-        self.end_headers()
+    def snapshot(self):
+        with self.server.state_lock:
+            return self.server.monitor, self.server.error, self.server.upload_active()
 
     def reply_json(self, data, status=200):
         self.reply(json.dumps(data, ensure_ascii=False).encode("utf-8"),
                    "application/json; charset=utf-8", status)
 
-    def reply(self, body, content_type, status=200, frameable=False):
+    def reply(self, body, content_type, status=200):
         try:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
@@ -2036,8 +1522,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Cross-Origin-Resource-Policy", "same-origin")
-            if not frameable:
-                self.send_header("X-Frame-Options", "DENY")
+            self.send_header("X-Frame-Options", "DENY")
             self.end_headers()
             self.wfile.write(body)
         except (ConnectionError, TimeoutError):
@@ -2055,8 +1540,7 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         return 'FlashForge Device Tab'
 
     def get_default_config(self):
-        return {"mode": "panel", "flashforge_host": "", "check_code": "",
-                "read_check_code": True, "tab_enabled": True, "codes": {}}
+        return {"flashforge_host": "", "check_code": ""}
 
     def has_config_ui(self):
         return True
@@ -2065,151 +1549,11 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         return CONFIG_PAGE
 
     def config(self):
-        try:
-            config = json.loads(self.get_config())
-        except (TypeError, ValueError):
-            return self.get_default_config()
+        config = json.loads(self.get_config())
         if not isinstance(config, dict):
             return self.get_default_config()
-        result = {name: config[name].strip() if isinstance(config.get(name), str) else ""
-                  for name in ("mode", "flashforge_host", "check_code")}
-        result["read_check_code"] = config.get("read_check_code", True) is not False
-        result["tab_enabled"] = config.get("tab_enabled", True) is not False
-        codes = config.get("codes")
-        result["codes"] = {str(key): str(value) for key, value in codes.items()
-                           if isinstance(value, str)} if isinstance(codes, dict) else {}
-        return result
-
-    def discover_printers(self):
-        """Printer profiles from OrcaSlicer, classified by how they can be reached."""
-        printers = []
-        seen = set()
-
-        def add(kind, name, host, code="", url="", active=False):
-            key = (kind, host, name)
-            if key in seen:
-                return
-            seen.add(key)
-            printers.append({"kind": kind, "host": host, "name": name, "code": code,
-                             "url": url, "active": active})
-
-        def is_user(preset):
-            try:
-                return bool(preset.is_user())
-            except Exception:
-                return False
-
-        def classify(name, host_type, print_host, code, url="", active=False, user=False):
-            if not print_host:
-                # System presets are templates, not printers the user owns.
-                if user:
-                    add("local", name, "", active=active)
-                return
-            try:
-                host = printer_endpoint(print_host)
-            except ValueError:
-                return
-            if host_type == "flashforge":
-                add("flashforge", name, host, code if read_codes else stored_codes.get(host, ""),
-                    "", active)
-            else:
-                add("web", name, host, "", url or f"http://{host}", active)
-
-        settings = self.config()
-        read_codes = settings.get("read_check_code", True)
-        stored_codes = settings.get("codes") or {}
-
-        try:
-            bundle = orca.host.preset_bundle()
-        except Exception:
-            return printers
-
-        collection = None
-        selected = ""
-        try:
-            collection = bundle.printers
-            selected = collection.selected_preset_name() or ""
-        except Exception:
-            collection = None
-
-        if collection is not None:
-            # Named lookup and index lookup can differ between OrcaSlicer releases,
-            # so try both and let the dedupe keep the list clean.
-            try:
-                names = list(collection.preset_names() or [])
-            except Exception:
-                names = []
-            for name in names:
-                try:
-                    preset = collection.find_preset(name)
-                except Exception:
-                    preset = None
-                if preset is None:
-                    continue
-                try:
-                    classify(name, preset.config_value("host_type") or "",
-                             preset.config_value("print_host") or "",
-                             preset.config_value("printhost_apikey") or "",
-                             preset.config_value(DEVICE_UI_KEY) or "",
-                             name == selected, is_user(preset))
-                except Exception:
-                    continue
-            try:
-                size = collection.size()
-            except Exception:
-                size = 0
-            for index in range(size):
-                try:
-                    preset = collection.preset(index)
-                    name = preset.name
-                    classify(name, preset.config_value("host_type") or "",
-                             preset.config_value("print_host") or "",
-                             preset.config_value("printhost_apikey") or "",
-                             preset.config_value(DEVICE_UI_KEY) or "",
-                             name == selected, is_user(preset))
-                except Exception:
-                    continue
-
-        # The merged configuration always describes the active profile, even when
-        # the preset collection is not readable from the plugin thread.
-        try:
-            host_type = bundle.full_config_value("host_type") or ""
-            print_host = bundle.full_config_value("print_host") or ""
-            code = bundle.full_config_value("printhost_apikey") or ""
-            if print_host:
-                try:
-                    known = printer_endpoint(print_host) in {entry["host"] for entry in printers}
-                except ValueError:
-                    known = True
-                if not known:
-                    classify("Active printer", host_type, print_host, code, "", True, True)
-        except Exception:
-            pass
-        return printers
-
-    def discovery_debug(self):
-        info = {}
-        try:
-            bundle = orca.host.preset_bundle()
-            collection = bundle.printers
-            info["selected"] = collection.selected_preset_name()
-            info["size"] = collection.size()
-            info["names"] = list(collection.preset_names() or [])[:40]
-            rows = []
-            for index in range(min(collection.size(), 40)):
-                try:
-                    preset = collection.preset(index)
-                    rows.append({"name": preset.name,
-                                 "host_type": preset.config_value("host_type") or "",
-                                 "print_host": preset.config_value("print_host") or ""})
-                except Exception as error:
-                    rows.append({"error": str(error)})
-            info["presets"] = rows
-            info["full"] = {key: bundle.full_config_value(key)
-                            for key in ("host_type", "print_host", "printhost_apikey")}
-        except Exception as error:
-            info["error"] = str(error)
-        return info
+        fields = ("flashforge_host", "check_code")
+        return {name: config[name].strip() if isinstance(config.get(name), str) else "" for name in fields}
 
     def on_load(self):
         # Bind during the lifecycle callback so OrcaSlicer reports startup
@@ -2223,12 +1567,9 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                                   name='FlashForge Device Tab HTTP', daemon=True)
         try:
             server.configure(self.config, storage)
-            server.discover = self.discover_printers
             server.restore_page = self.restore_page
             server.check_view = self.check_view
             server.apply_settings = self.apply_settings
-            server.debug_payload = self.discovery_debug
-            server.heal_device_tab = self.heal_device_tab
             worker.start()
         except Exception:
             server.server_close()
@@ -2245,9 +1586,25 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         self._server = server
         FlashForgeService.instance = self
         try:
-            self.heal_device_tab()
+            self.adopt_profile_address()
         except Exception:
             pass
+
+    def adopt_profile_address(self):
+        """First run after an upgrade: take the address from the active profile."""
+        config = self.config()
+        if config.get("flashforge_host"):
+            return
+        preset = orca.host.preset_bundle().current_printer_preset()
+        if preset.config_value("host_type") != "flashforge":
+            return
+        print_host = preset.config_value("print_host") or ""
+        if not print_host:
+            return
+        host = printer_endpoint(print_host)
+        self.save_config(json.dumps({"flashforge_host": host,
+                                     "check_code": config.get("check_code", "")},
+                                    ensure_ascii=False))
 
     def on_unload(self):
         for alias in getattr(self, "_aliases", []):
@@ -2268,138 +1625,17 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             server.begin_upload()
         elif event == orca.LifecycleEvent.UploadFinished:
             server.uploading.clear()
-        elif event in (orca.LifecycleEvent.DeviceSelected, orca.LifecycleEvent.PrintStateChanged):
-            server.next_discovery = 0.0
 
     def check_view(self, endpoint):
-        if self._server is not None and self._server.mode() == "device":
-            return endpoint
         preset = orca.host.preset_bundle().current_printer_preset()
         if preset.config_value("host_type") != "flashforge":
             raise ValueError("Open FlashForge Device Tab for a FlashForge printer profile from Speed Dial.")
+        if monitor_identity(preset.config_value(DEVICE_UI_KEY) or "") != endpoint:
+            raise ValueError("Open FlashForge Device Tab for the current printer profile from Speed Dial.")
         current = printer_endpoint(preset.config_value("print_host") or "")
         if endpoint and endpoint != current:
             raise ValueError("The printer address changed. Reopen FlashForge Device Tab for the current printer.")
         return current
-
-    def apply_settings(self, host, check_code, mode, read_check_code=None, tab_enabled=None):
-        server = self._server
-        host = local_address(host) if host else ""
-        if len(check_code) > 32 or any(not 33 <= ord(c) <= 126 for c in check_code):
-            raise ValueError("The CheckCode must be printable ASCII, up to 32 characters.")
-        if mode in ("profile",):
-            mode = "panel"
-        elif mode in ("dashboard",):
-            mode = "device"
-        if mode and mode not in ("panel", "device"):
-            raise ValueError("Unknown display mode.")
-        current_host, current_code = server.active_printer() and \
-            (server.active_printer()["host"], server.active_printer().get("code", "")) or server.legacy_settings()
-        config = dict(server.config())
-        read_codes = config.get("read_check_code", True) if read_check_code is None else bool(read_check_code)
-        if host and (host != current_host or (check_code and check_code != current_code)):
-            if read_codes is False and host == current_host:
-                # Codes are not read from profiles: keep them in the plugin config.
-                codes = dict(config.get("codes") or {})
-                codes[host] = check_code
-                config["codes"] = codes
-            else:
-                transaction = orca.host.preset.printer.begin_update()
-                preset = orca.host.preset_bundle().printers.edited_preset()
-                if preset.name != transaction.target_name:
-                    raise ValueError("The active printer profile changed. Try again.")
-                if preset.config_value("host_type") != "flashforge":
-                    raise ValueError("Select a printer profile that uses the FlashForge host.")
-                transaction.set("print_host", host)
-                if read_codes:
-                    transaction.set("printhost_apikey", check_code)
-                transaction.commit()
-            current_host, current_code = host, check_code
-        wanted_mode = mode or server.mode()
-        config["mode"] = wanted_mode
-        config["read_check_code"] = read_codes
-        if tab_enabled is not None:
-            config["tab_enabled"] = bool(tab_enabled)
-        if host:
-            config["flashforge_host"] = host
-            config["check_code"] = check_code
-        self.save_config(json.dumps(config, ensure_ascii=False))
-        server.next_discovery = 0.0
-        self._point_device_tab(current_host, wanted_mode)
-        return current_host
-
-    def _point_device_tab(self, host, mode):
-        """Keep the Device tab on the page that matches the chosen display mode."""
-        try:
-            transaction = orca.host.preset.printer.begin_update()
-            preset = orca.host.preset_bundle().printers.edited_preset()
-            if preset.name != transaction.target_name:
-                return
-            if preset.config_value("host_type") != "flashforge":
-                return
-            current = preset.config_value(DEVICE_UI_KEY) or ""
-            target = dashboard_url() if mode == "device" else monitor_url(host)
-            if current == target:
-                return
-            if current and not (monitor_identity(current) or dashboard_identity(current)):
-                try:
-                    pages = self.saved_pages()
-                except (OSError, ValueError):
-                    pages = {}
-                pages[preset.name] = current
-                pending = self._page_store.with_suffix(".tmp")
-                pending.write_text(json.dumps(pages, ensure_ascii=False), encoding="utf-8")
-                os.replace(pending, self._page_store)
-            transaction.set(DEVICE_UI_KEY, target)
-            transaction.commit()
-        except (OSError, RuntimeError, ValueError):
-            pass
-
-    def set_mode(self, mode):
-        if mode in ("profile",):
-            mode = "panel"
-        elif mode in ("dashboard",):
-            mode = "device"
-        if mode not in ("panel", "device"):
-            raise ValueError("Unknown display mode.")
-        config = dict(self._server.config())
-        config["mode"] = mode
-        self.save_config(json.dumps(config, ensure_ascii=False))
-        host, _ = self._server.settings_for()
-        self._point_device_tab(host, mode)
-        return mode
-
-    def heal_device_tab(self):
-        """Point a stale plugin URL in the active profile at the current server."""
-        try:
-            transaction = orca.host.preset.printer.begin_update()
-            preset = orca.host.preset_bundle().printers.edited_preset()
-            if preset.name != transaction.target_name:
-                return False
-            if preset.config_value("host_type") != "flashforge":
-                return True
-            current = preset.config_value(DEVICE_UI_KEY) or ""
-            prefixes = tuple(f"http://{WEB_HOST}:{port}" for port in (18765, 18769, WEB_PORT))
-            if not current.startswith(prefixes):
-                return True
-            host = printer_endpoint(preset.config_value("print_host") or "")
-            target = dashboard_url() if self._server.mode() == "device" else monitor_url(host)
-            if current == target:
-                return True
-            if not current.startswith(f"http://{WEB_HOST}:{WEB_PORT}"):
-                try:
-                    pages = self.saved_pages()
-                except (OSError, ValueError):
-                    pages = {}
-                pages.setdefault(preset.name, "")
-                pending = self._page_store.with_suffix(".tmp")
-                pending.write_text(json.dumps(pages, ensure_ascii=False), encoding="utf-8")
-                os.replace(pending, self._page_store)
-            transaction.set(DEVICE_UI_KEY, target)
-            transaction.commit()
-            return True
-        except (OSError, RuntimeError, ValueError):
-            return False
 
     def saved_pages(self):
         try:
@@ -2425,31 +1661,28 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                 raise ValueError("Select a printer profile that uses the FlashForge host.")
             current_url = preset.config_value(DEVICE_UI_KEY) or ""
             print_host = preset.config_value("print_host") or ""
-            endpoint = printer_endpoint(print_host)
-            if not self._server.printers:
-                # First click after install: profiles have not been scanned yet.
-                self._server.refresh_printers()
-            if restore_view is not None and restore_view != endpoint:
+            current_view = monitor_identity(current_url)
+            if restore_view is not None and restore_view != current_view:
                 raise ValueError("This monitor page is not open for the current OrcaSlicer profile.")
-            if restore_view is not None:
+            if current_view:
+                # A damaged cache or an older URL can always fall back to Orca's profile.
                 fallback = presets.selected_preset().config_value(DEVICE_UI_KEY) or ""
-                if monitor_identity(fallback) or dashboard_identity(fallback):
+                if monitor_identity(fallback):
                     fallback = ""
                 try:
                     pages = self.saved_pages()
                 except (OSError, ValueError):
                     pages = {}
                 target = pages.get(preset.name, fallback)
-                if monitor_identity(target) or dashboard_identity(target):
+                if monitor_identity(target):
                     target = fallback
                 message = "Opened the printer web interface."
             else:
-                host, check_code = preset.config_value("print_host"), preset.config_value("printhost_apikey")
-                if not host:
-                    raise ValueError("Enter the printer address in the printer profile first.")
-                managed = endpoint == self._server.settings_for()[0]
-                if not managed:
-                    raise ValueError("The printer profile is not managed by this plugin.")
+                endpoint = printer_endpoint(print_host)
+                host, check_code = self._server.settings_for()
+                if not host or endpoint != printer_endpoint(host):
+                    raise ValueError("The printer address in the plugin settings does not match the active profile.")
+                FlashForge(host, check_code)
                 try:
                     pages = self.saved_pages()
                 except ValueError:
@@ -2460,7 +1693,7 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                 pending = self._page_store.with_suffix(".tmp")
                 pending.write_text(json.dumps(pages, ensure_ascii=False), encoding="utf-8")
                 os.replace(pending, self._page_store)
-                target = dashboard_url() if self._server.mode() == "device" else monitor_url(endpoint)
+                target = monitor_url(endpoint)
                 message = "Opened FlashForge Device Tab in the Device tab."
 
             if self._stopping.is_set():
@@ -2470,6 +1703,30 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             return message
         finally:
             self._switch_lock.release()
+
+    def apply_settings(self, host, check_code):
+        host = local_address(host)
+        if len(check_code) > 32 or any(not 33 <= ord(c) <= 126 for c in check_code):
+            raise ValueError("The CheckCode must be printable ASCII, up to 32 characters.")
+        current_host, current_code = self._server.settings_for()
+        if host != current_host:
+            # The Device tab and the upload path both follow the profile, so a new
+            # address has to land in the active printer preset as well.
+            transaction = orca.host.preset.printer.begin_update()
+            presets = orca.host.preset_bundle().printers
+            preset = presets.edited_preset()
+            if preset.name != transaction.target_name:
+                raise ValueError("The active printer profile changed. Try again.")
+            if preset.config_value("host_type") != "flashforge":
+                raise ValueError("Select a printer profile that uses the FlashForge host.")
+            if monitor_identity(preset.config_value(DEVICE_UI_KEY) or "") == current_host:
+                transaction.set(DEVICE_UI_KEY, monitor_url(host))
+            transaction.set("print_host", host)
+            transaction.commit()
+        if (host, check_code) != (current_host, current_code):
+            self.save_config(json.dumps({"flashforge_host": host, "check_code": check_code},
+                                        ensure_ascii=False))
+        return host
 
     def restore_page(self, view):
         # Request threads are not joined during unload. They can wait for the
@@ -2484,64 +1741,6 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         return orca.ExecutionResult.success(message)
 
 
-class PrintersPageService(orca.pages.PagesPluginCapabilityBase):
-    """Dashboard as its own OrcaSlicer tab."""
-
-    def get_name(self):
-        return "Printers"
-
-    def get_type(self):
-        return orca.PluginType.Pages
-
-    def get_ui(self):
-        service = FlashForgeService.instance
-        if service is not None and service._server is not None:
-            if not service._server.config().get("tab_enabled", True):
-                return (
-                    "<!doctype html><html><head><meta charset='utf-8'>"
-                    "<style>html,body{margin:0;height:100%;background:#242829;color:#cdd6db;"
-                    "font:14px 'Segoe UI',sans-serif}div{padding:28px 32px;max-width:560px}"
-                    "h2{font-size:16px;margin:0 0 8px}p{margin:0;color:#93a1a9}</style></head>"
-                    "<body><div><h2>Printers tab is turned off</h2>"
-                    "<p>Enable it in the Device tab → FlashForge Device Tab → Settings.</p>"
-                    "</div></body></html>"
-                )
-        # The dashboard is served by the plugin's loopback server, so the tab and
-        # the Device tab share one implementation and one data path.
-        return (
-            "<!doctype html><html><head><meta charset='utf-8'>"
-            "<style>html,body{margin:0;height:100%;background:#242829}"
-            "iframe{border:0;width:100%;height:100%;display:block}</style></head>"
-            f"<body><iframe src='{dashboard_url()}' title='FlashForge printers'></iframe></body></html>"
-        )
-
-    def on_message(self, message):
-        service = FlashForgeService.instance
-        if service is None or service._server is None:
-            return
-        try:
-            payload = json.loads(message)
-        except (TypeError, ValueError):
-            return
-        if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
-            payload = payload["data"]
-        if not isinstance(payload, dict):
-            return
-        try:
-            action = payload.get("action")
-            if action == "dashboard":
-                self.post_message(service._server.dashboard_payload())
-            elif action == "settings":
-                self.post_message(service._server.settings_payload())
-            elif action in ("mode", "options"):
-                service.apply_settings("", "", str(payload.get("mode") or ""),
-                                       payload.get("read_check_code"),
-                                       payload.get("tab_enabled"))
-                self.post_message({"mode": service._server.mode()})
-        except ValueError as error:
-            self.post_message({"error": str(error)})
-
-
 @orca.plugin
 class FlashForgeDeviceTab(orca.base):
     def register_capabilities(self):
@@ -2550,4 +1749,3 @@ class FlashForgeDeviceTab(orca.base):
         # connects to a new address.
         orca.request_permissions(network_socket=[f"('{WEB_HOST}', {WEB_PORT})"], threading=True)
         orca.register_capability(FlashForgeService)
-        orca.register_capability(PrintersPageService)

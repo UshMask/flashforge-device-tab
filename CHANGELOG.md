@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.5.0
+
+Back to a single printer panel, and back to a low risk rating.
+
+### Changed
+
+- Removed the experimental Printers tab and dashboard together with the profile
+  discovery they needed. The plugin is again one panel in the Device tab,
+  configured by printer address and CheckCode.
+- The plugin no longer reads `printhost_apikey` from printer profiles. The
+  CheckCode is stored in the plugin config, and the catalogue scan rates the
+  plugin **low risk** again.
+- On the first load after an upgrade the plugin adopts the address from the
+  active printer profile when its own config has none.
+
+### Kept
+
+- The Settings dialog in the panel header (address, CheckCode).
+- Redirects from the older loopback ports (18765/18769), so an upgraded Device
+  tab never stays on a dead address.
+
 ## 1.4.0
 
 Settings for the two things users asked about: what is read from profiles, and

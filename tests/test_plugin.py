@@ -23,8 +23,6 @@ orca = SimpleNamespace(
     base=object,
     plugin=lambda cls: cls,
     script=SimpleNamespace(ScriptPluginCapabilityBase=object),
-    pages=SimpleNamespace(PagesPluginCapabilityBase=object),
-    PluginType=SimpleNamespace(Pages="pages"),
     host=SimpleNamespace(),
     LifecycleEvent=SimpleNamespace(UploadStarted="upload-started", UploadFinished="upload-finished"),
     ExecutionResult=SimpleNamespace(success=lambda message: ("ok", message),
@@ -271,103 +269,6 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(path.read_text(encoding="utf-8"), "broken")
 
 
-class DiscoveryTests(unittest.TestCase):
-    def make_service(self, presets, selected):
-        class Collection:
-            def preset_names(self):
-                return [preset["name"] for preset in presets]
-
-            def find_preset(self, name):
-                for preset in presets:
-                    if preset["name"] == name:
-                        return SimpleNamespace(
-                            config_value=lambda key, preset=preset: preset.get(key, ""),
-                            is_user=lambda preset=preset: preset.get("user", True))
-                return None
-
-            def selected_preset_name(self):
-                return selected
-
-        orca.host = SimpleNamespace(preset_bundle=lambda: SimpleNamespace(printers=Collection()))
-        service = plugin.FlashForgeService()
-        service.get_config = lambda: "{}"
-        return service
-
-    def test_discovers_flashforge_profiles(self):
-        service = self.make_service([
-            {"name": "5M", "host_type": "flashforge", "print_host": "192.168.3.37",
-             "printhost_apikey": "code1"},
-            {"name": "AD5X", "host_type": "flashforge", "print_host": "http://192.168.3.50:80",
-             "printhost_apikey": "code2"},
-            {"name": "Prusa", "host_type": "prusalink", "print_host": "192.168.3.60"},
-        ], "AD5X")
-        printers = service.discover_printers()
-        self.assertEqual([item["kind"] for item in printers], ["flashforge", "flashforge", "web"])
-        self.assertEqual([item["host"] for item in printers],
-                         ["192.168.3.37", "192.168.3.50", "192.168.3.60"])
-        self.assertEqual([item.get("code") for item in printers][:2], ["code1", "code2"])
-        self.assertEqual([item["active"] for item in printers], [False, True, False])
-
-    def test_marks_profiles_without_address_as_local(self):
-        service = self.make_service([
-            {"name": "Empty", "host_type": "flashforge", "print_host": ""},
-            {"name": "Public", "host_type": "flashforge", "print_host": "8.8.8.8"},
-        ], "Empty")
-        printers = service.discover_printers()
-        self.assertEqual(len(printers), 1)
-        self.assertEqual(printers[0]["kind"], "local")
-        self.assertEqual(printers[0]["name"], "Empty")
-        self.assertTrue(printers[0]["active"])
-
-
-class PageBridgeTests(unittest.TestCase):
-    def setUp(self):
-        self.messages = []
-        self.server = SimpleNamespace(
-            dashboard_payload=lambda: {"mode": "device", "printers": [{"kind": "flashforge"}]},
-            settings_payload=lambda: {"mode": "device", "printers": []},
-            mode=lambda: "panel",
-        )
-
-        class Service:
-            _server = self.server
-
-            def __init__(self):
-                self.calls = []
-
-            def apply_settings(self, host, code, mode, read_check_code=None, tab_enabled=None):
-                if mode and mode not in ("panel", "device", "dashboard"):
-                    raise ValueError("Unknown display mode.")
-                self.calls.append((host, code, mode, read_check_code, tab_enabled))
-                if mode:
-                    self._server.mode = lambda: ("device" if mode == "dashboard" else mode)
-
-        self.service = Service()
-        plugin.FlashForgeService.instance = self.service
-        self.page = plugin.PrintersPageService()
-        self.page.post_message = self.messages.append
-
-    def tearDown(self):
-        plugin.FlashForgeService.instance = None
-
-    def test_dashboard_message(self):
-        self.page.on_message(json.dumps({"action": "dashboard"}))
-        self.assertEqual(self.messages[0]["mode"], "device")
-        self.assertEqual(self.messages[0]["printers"], [{"kind": "flashforge"}])
-
-    def test_settings_message(self):
-        self.page.on_message(json.dumps({"channel": "orca", "data": {"action": "settings"}}))
-        self.assertEqual(self.messages[0]["mode"], "device")
-
-    def test_mode_message(self):
-        self.page.on_message(json.dumps({"action": "mode", "mode": "dashboard"}))
-        self.assertEqual(self.messages[0], {"mode": "device"})
-
-    def test_mode_message_rejects_unknown(self):
-        self.page.on_message(json.dumps({"action": "mode", "mode": "carousel"}))
-        self.assertIn("error", self.messages[0])
-
-
 class ServerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -391,11 +292,11 @@ class ServerTests(unittest.TestCase):
         self.server.configure(lambda: dict(self.config), Path(self.folder.name))
         self.server.restore_page = None
 
-        def apply_settings(host, check_code, mode="", read_check_code=None, tab_enabled=None):
+        def apply_settings(host, check_code):
             host = plugin.local_address(host)
             if len(check_code) > 32 or any(not 33 <= ord(c) <= 126 for c in check_code):
                 raise ValueError("bad code")
-            self.applied.append((host, check_code, mode, read_check_code, tab_enabled))
+            self.applied.append((host, check_code))
             return host
 
         self.server.apply_settings = apply_settings
@@ -454,7 +355,7 @@ class ServerTests(unittest.TestCase):
 
     def test_endpoint_mismatch(self):
         status, body, _ = request(plugin.WEB_PORT, self.url("status", "10.0.0.9"))
-        self.assertEqual(status, 503)
+        self.assertEqual(status, 409)
 
     def test_files_and_preview(self):
         status, body, _ = request(plugin.WEB_PORT, self.url("files"))
@@ -465,24 +366,6 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(headers["Content-Type"], "image/png")
         self.assertEqual(image[:8], plugin.PNG_HEADER)
-
-    def test_dashboard_redirect(self):
-        self.config["mode"] = "dashboard"
-        status, _, headers = request(plugin.WEB_PORT, "/")
-        self.assertEqual(status, 308)
-        self.assertTrue(headers["Location"].endswith("/dashboard/"))
-
-    def test_dashboard_page_and_data(self):
-        self.config["mode"] = "dashboard"
-        status, body, _ = request(plugin.WEB_PORT, "/dashboard/")
-        self.assertEqual(status, 200)
-        self.assertIn(b"All printers", body)
-        status, body, _ = request(plugin.WEB_PORT, "/dashboard/data")
-        data = json.loads(body)
-        self.assertEqual(status, 200)
-        self.assertEqual(data["mode"], "device")
-        self.assertEqual([item["host"] for item in data["printers"]], ["127.0.0.1"])
-        self.assertAlmostEqual(data["printers"][0]["nozzle"], 205.3, places=1)
 
     def test_telemetry_has_chart_and_history(self):
         status, body, _ = request(plugin.WEB_PORT, self.url("telemetry"))
@@ -546,7 +429,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["endpoint"], "127.0.0.1")
         self.assertFalse(data["moved"])
-        self.assertEqual(self.applied, [("127.0.0.1", "newcode", "", None, None)])
+        self.assertEqual(self.applied, [("127.0.0.1", "newcode")])
 
     def test_native_post_requires_action_header(self):
         status, _, _ = request(plugin.WEB_PORT, self.url("native"), method="POST",
@@ -589,39 +472,7 @@ class SwitchViewTests(unittest.TestCase):
         self.service._page_store = Path(self.folder.name) / "device-pages.json"
         self.service._switch_lock = threading.Lock()
         self.service._stopping = threading.Event()
-        class FakeServer:
-            def __init__(self):
-                self.settings = ("127.0.0.1", "code")
-                self.data = {"mode": "profile", "flashforge_host": "127.0.0.1", "check_code": "code"}
-                self.next_discovery = 0.0
-                self.monitors = {}
-                self.printers = [{"host": "127.0.0.1", "code": "code",
-                                  "name": "Printer", "active": True}]
-
-            def refresh_printers(self):
-                pass
-
-            def settings_for(self):
-                return self.settings
-
-            def legacy_settings(self):
-                return self.settings
-
-            def active_printer(self):
-                return {"host": self.settings[0], "code": self.settings[1],
-                        "name": "Printer", "active": True}
-
-            def config(self):
-                return dict(self.data)
-
-            def mode(self):
-                return self.data.get("mode", "profile")
-
-        self.fake_server = FakeServer()
-        self.saved_config = []
-        self.service.save_config = lambda value: (self.saved_config.append(json.loads(value)),
-                                                  self.fake_server.data.update(json.loads(value)))
-        self.service._server = self.fake_server
+        self.service._server = SimpleNamespace(settings_for=lambda: ("127.0.0.1", "code"))
         self.service.restore_page = self.service.restore_page
 
     def tearDown(self):
@@ -641,40 +492,21 @@ class SwitchViewTests(unittest.TestCase):
 
     def test_apply_settings_updates_profile(self):
         self.saved_config = []
-        self.service.save_config = lambda value: (self.saved_config.append(json.loads(value)),
-                                                  self.fake_server.data.update(json.loads(value)))
+        self.service.save_config = lambda value: self.saved_config.append(json.loads(value))
         self.preset.values["print_host_webui"] = plugin.monitor_url("127.0.0.1")
-        endpoint = self.service.apply_settings("192.168.3.99", "newcode", "", None, None)
+        endpoint = self.service.apply_settings("192.168.3.99", "newcode")
         self.assertEqual(endpoint, "192.168.3.99")
         self.assertEqual(self.preset.values["print_host"], "192.168.3.99")
         self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("192.168.3.99"))
-        saved = self.saved_config[0]
-        self.assertEqual(saved["flashforge_host"], "192.168.3.99")
-        self.assertEqual(saved["check_code"], "newcode")
-
-    def test_apply_settings_mode_only(self):
-        self.saved_config = []
-        self.service.save_config = lambda value: (self.saved_config.append(json.loads(value)),
-                                                  self.fake_server.data.update(json.loads(value)))
-        endpoint = self.service.apply_settings("", "", "dashboard", None, None)
-        self.assertEqual(endpoint, "127.0.0.1")
-        saved = self.saved_config[0]
-        self.assertEqual(saved["mode"], "device")
-        self.assertEqual(saved["flashforge_host"], "127.0.0.1")
-        self.assertEqual(saved["check_code"], "code")
-        self.assertEqual(self.fake_server.mode(), "device")
-
-    def test_apply_settings_rejects_unknown_mode(self):
-        with self.assertRaises(ValueError):
-            self.service.apply_settings("", "", "carousel", None, None)
+        self.assertEqual(self.saved_config, [{"flashforge_host": "192.168.3.99", "check_code": "newcode"}])
 
     def test_apply_settings_rejects_public_address(self):
         with self.assertRaises(ValueError):
-            self.service.apply_settings("1.1.1.1", "code", "", None, None)
+            self.service.apply_settings("1.1.1.1", "code")
 
     def test_apply_settings_rejects_bad_check_code(self):
         with self.assertRaises(ValueError):
-            self.service.apply_settings("127.0.0.1", "код", "", None, None)
+            self.service.apply_settings("127.0.0.1", "код")
 
     def test_switch_rejects_foreign_profile(self):
         self.preset.values["host_type"] = "prusalink"
