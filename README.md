@@ -61,12 +61,19 @@ If an older `printer_monitor` or `flashforge_monitor` installation is still
 enabled, disable it first: two monitors polling the same printer fight over its
 single TCP connection.
 
-## Settings
+## Display modes
 
-The panel header has a **Settings** button: it opens a small form with the
-printer address and CheckCode, so the plugin can be reconfigured without
-leaving the Device tab. Changing the address also updates the active printer
-profile, because OrcaSlicer sends jobs to the profile's `print_host`.
+The panel's **Settings** button offers two layouts:
+
+- **One printer** — the Device tab shows the printer of the active OrcaSlicer
+  profile, with its full panel.
+- **All printers** — the Device tab shows a dashboard at `/dashboard/` with a
+  card per FlashForge printer profile.
+
+Printer addresses and CheckCodes come from the printer profiles themselves
+(`print_host` and `printhost_apikey`), so each printer keeps its own settings.
+Changing the address in the panel also updates the active profile, because
+OrcaSlicer sends jobs to the profile's `print_host`.
 
 ## How it works
 
