@@ -1,5 +1,10 @@
 ﻿# Changelog
 
+## 1.6.2
+
+- Release check: publishing this tag only through GitHub, without uploading
+the file to the catalogue by hand.
+
 ## 1.6.1
 
 - The “All printers” view no longer leaves the temperature chart panel behind,
