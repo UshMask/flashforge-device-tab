@@ -1,5 +1,10 @@
 ﻿# Changelog
 
+## 1.6.4
+
+- One workflow now does everything on a `v*` tag: tests, the GitHub release and
+the OrcaCloud publish call (OIDC, no tokens).
+
 ## 1.6.3
 
 - The GitHub release now publishes straight to the catalogue through the

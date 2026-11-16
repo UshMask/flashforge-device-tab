@@ -4,7 +4,7 @@
 # name = "FlashForge Device Tab"
 # description = "Read-only FlashForge monitoring inside OrcaSlicer's Device tab."
 # author = "Max"
-# version = "1.6.3"
+# version = "1.6.4"
 # ///
 import hashlib
 import http.client
