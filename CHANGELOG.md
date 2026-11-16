@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.2.0
+
+Two display modes, chosen by the user, and real multi-printer support.
+
+### Added
+
+- **Display mode.** The panel's Settings dialog and the dashboard both offer
+  *one printer (the active OrcaSlicer profile)* or *all printers at once*. The
+  choice is stored in the plugin config and rewrites `print_host_webui`, so the
+  Device tab shows the page that matches the mode.
+- **Dashboard at `/dashboard/`**: a card per FlashForge printer profile with
+  state, progress, remaining time, temperatures and a link to its full panel.
+- **Printer discovery from OrcaSlicer profiles.** Every printer profile with
+  host type FlashForge contributes its address (`print_host`) and CheckCode
+  (`printhost_apikey`), so each printer keeps its own settings and no second
+  list has to be maintained.
+- Per-printer monitors and history files; the active printer is polled every
+  5 s, the others every 15 s.
+
+### Changed
+
+- The panel now serves any discovered printer at `/<address>/`, not only the
+  configured one.
+- `POST /settings` accepts a `mode` field and applies the mode together with the
+  address and CheckCode.
+
+### Fixed
+
+- The panel no longer refuses to open when the active profile's address differs
+  from the last saved plugin config; the profile is the source of truth.
+
 ## 1.1.0
 
 Settings without leaving the Device tab.
