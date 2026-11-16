@@ -4,7 +4,7 @@
 # name = "FlashForge Device Tab"
 # description = "Read-only FlashForge monitoring inside OrcaSlicer's Device tab."
 # author = "Max"
-# version = "1.3.0"
+# version = "1.3.1"
 # ///
 import hashlib
 import http.client
@@ -1556,6 +1556,7 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
     check_view = None
     apply_settings = None
     discover = None
+    debug_payload = None
 
     def configure(self, get_config, storage):
         self.get_config = get_config
@@ -1840,10 +1841,13 @@ class MonitorHandler(BaseHTTPRequestHandler):
             self.send_error(403)
             return
         endpoint, route = self.request_route()
-        if self.headers.get("Sec-Fetch-Site") not in (None, "same-origin", "none"):
+        if endpoint != "dashboard" and self.headers.get("Sec-Fetch-Site") not in (None, "same-origin", "none"):
             self.send_error(403)
             return
         if endpoint == "dashboard":
+            if route and self.headers.get("Sec-Fetch-Site") not in (None, "same-origin", "none"):
+                self.send_error(403)
+                return
             if not route and not self.path.partition("?")[0].endswith("/"):
                 self.redirect(dashboard_url())
                 return
@@ -1876,11 +1880,16 @@ class MonitorHandler(BaseHTTPRequestHandler):
 
     def serve_dashboard(self, route):
         if not route:
+            # Shown inside the plugin's own Printers tab, which is a different
+            # origin, so the page has to be frameable; it carries no data itself.
             page = DASHBOARD_PAGE.replace("{{title}}", DASHBOARD_TITLE)
-            self.reply(page.encode("utf-8"), "text/html; charset=utf-8")
+            self.reply(page.encode("utf-8"), "text/html; charset=utf-8", frameable=True)
             return
         if route == "data":
             self.reply_json(self.server.dashboard_payload())
+            return
+        if route == "debug":
+            self.reply_json(self.server.debug_payload or {})
             return
         if route == "settings":
             self.reply_json(self.server.settings_payload())
@@ -1955,7 +1964,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
         self.reply(json.dumps(data, ensure_ascii=False).encode("utf-8"),
                    "application/json; charset=utf-8", status)
 
-    def reply(self, body, content_type, status=200):
+    def reply(self, body, content_type, status=200, frameable=False):
         try:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
@@ -1963,7 +1972,8 @@ class MonitorHandler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Cross-Origin-Resource-Policy", "same-origin")
-            self.send_header("X-Frame-Options", "DENY")
+            if not frameable:
+                self.send_header("X-Frame-Options", "DENY")
             self.end_headers()
             self.wfile.write(body)
         except (ConnectionError, TimeoutError):
@@ -2001,37 +2011,117 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                 for name in fields}
 
     def discover_printers(self):
-        """FlashForge printer profiles, with the address and CheckCode they carry."""
+        """Printer profiles from OrcaSlicer, classified by how they can be reached."""
         printers = []
+        seen = set()
+
+        def add(kind, name, host, code="", url="", active=False):
+            key = (kind, host, name)
+            if key in seen:
+                return
+            seen.add(key)
+            printers.append({"kind": kind, "host": host, "name": name, "code": code,
+                             "url": url, "active": active})
+
+        def classify(name, host_type, print_host, code, url="", active=False):
+            if not print_host:
+                add("local", name, "", active=active)
+                return
+            try:
+                host = printer_endpoint(print_host)
+            except ValueError:
+                return
+            if host_type == "flashforge":
+                add("flashforge", name, host, code, "", active)
+            else:
+                add("web", name, host, "", url or f"http://{host}", active)
+
         try:
-            preset_bundle = orca.host.preset_bundle()
-            collection = preset_bundle.printers
-            selected = collection.selected_preset_name()
-            for name in collection.preset_names():
-                preset = collection.find_preset(name)
+            bundle = orca.host.preset_bundle()
+        except Exception:
+            return printers
+
+        collection = None
+        selected = ""
+        try:
+            collection = bundle.printers
+            selected = collection.selected_preset_name() or ""
+        except Exception:
+            collection = None
+
+        if collection is not None:
+            # Named lookup and index lookup can differ between OrcaSlicer releases,
+            # so try both and let the dedupe keep the list clean.
+            try:
+                names = list(collection.preset_names() or [])
+            except Exception:
+                names = []
+            for name in names:
+                try:
+                    preset = collection.find_preset(name)
+                except Exception:
+                    preset = None
                 if preset is None:
                     continue
-                host_type = preset.config_value("host_type") or ""
-                print_host = preset.config_value("print_host") or ""
-                if not print_host:
-                    printers.append({"kind": "local", "host": "", "name": name,
-                                     "active": name == selected})
-                    continue
                 try:
-                    host = printer_endpoint(print_host)
-                except ValueError:
+                    classify(name, preset.config_value("host_type") or "",
+                             preset.config_value("print_host") or "",
+                             preset.config_value("printhost_apikey") or "",
+                             preset.config_value(DEVICE_UI_KEY) or "",
+                             name == selected)
+                except Exception:
                     continue
-                if host_type == "flashforge":
-                    printers.append({"kind": "flashforge", "host": host, "name": name,
-                                     "code": preset.config_value("printhost_apikey") or "",
-                                     "active": name == selected})
-                else:
-                    url = preset.config_value(DEVICE_UI_KEY) or f"http://{host}"
-                    printers.append({"kind": "web", "host": host, "name": name, "url": url,
-                                     "active": name == selected})
+            try:
+                size = collection.size()
+            except Exception:
+                size = 0
+            for index in range(size):
+                try:
+                    preset = collection.preset(index)
+                    name = preset.name
+                    classify(name, preset.config_value("host_type") or "",
+                             preset.config_value("print_host") or "",
+                             preset.config_value("printhost_apikey") or "",
+                             preset.config_value(DEVICE_UI_KEY) or "",
+                             name == selected)
+                except Exception:
+                    continue
+
+        # The merged configuration always describes the active profile, even when
+        # the preset collection is not readable from the plugin thread.
+        try:
+            host_type = bundle.full_config_value("host_type") or ""
+            print_host = bundle.full_config_value("print_host") or ""
+            code = bundle.full_config_value("printhost_apikey") or ""
+            if print_host:
+                classify("Active printer", host_type, print_host, code, "", True)
         except Exception:
-            return []
+            pass
         return printers
+
+    def discovery_debug(self):
+        info = {}
+        try:
+            bundle = orca.host.preset_bundle()
+            collection = bundle.printers
+            info["selected"] = collection.selected_preset_name()
+            info["size"] = collection.size()
+            info["names"] = list(collection.preset_names() or [])[:40]
+            rows = []
+            for index in range(min(collection.size(), 40)):
+                try:
+                    preset = collection.preset(index)
+                    rows.append({"name": preset.name,
+                                 "host_type": preset.config_value("host_type") or "",
+                                 "print_host": preset.config_value("print_host") or ""})
+                except Exception as error:
+                    rows.append({"error": str(error)})
+            info["presets"] = rows
+            info["full"] = {key: bundle.full_config_value(key)
+                            for key in ("host_type", "print_host", "printhost_apikey")}
+        except Exception as error:
+            info["error"] = str(error)
+        return info
 
     def on_load(self):
         # Bind during the lifecycle callback so OrcaSlicer reports startup
@@ -2049,6 +2139,7 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             server.restore_page = self.restore_page
             server.check_view = self.check_view
             server.apply_settings = self.apply_settings
+            server.debug_payload = self.discovery_debug
             worker.start()
         except Exception:
             server.server_close()
@@ -2254,7 +2345,14 @@ class PrintersPageService(orca.pages.PagesPluginCapabilityBase):
         return orca.PluginType.Pages
 
     def get_ui(self):
-        return DASHBOARD_PAGE.replace("{{title}}", DASHBOARD_TITLE)
+        # The dashboard is served by the plugin's loopback server, so the tab and
+        # the Device tab share one implementation and one data path.
+        return (
+            "<!doctype html><html><head><meta charset='utf-8'>"
+            "<style>html,body{margin:0;height:100%;background:#242829}"
+            "iframe{border:0;width:100%;height:100%;display:block}</style></head>"
+            f"<body><iframe src='{dashboard_url()}' title='FlashForge printers'></iframe></body></html>"
+        )
 
     def on_message(self, message):
         service = FlashForgeService.instance

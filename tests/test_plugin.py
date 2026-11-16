@@ -310,7 +310,10 @@ class DiscoveryTests(unittest.TestCase):
             {"name": "Public", "host_type": "flashforge", "print_host": "8.8.8.8"},
         ], "Empty")
         printers = service.discover_printers()
-        self.assertEqual(printers, [{"kind": "local", "host": "", "name": "Empty", "active": True}])
+        self.assertEqual(len(printers), 1)
+        self.assertEqual(printers[0]["kind"], "local")
+        self.assertEqual(printers[0]["name"], "Empty")
+        self.assertTrue(printers[0]["active"])
 
 
 class PageBridgeTests(unittest.TestCase):
