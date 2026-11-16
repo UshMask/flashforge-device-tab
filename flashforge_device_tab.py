@@ -38,6 +38,7 @@ READ_IDLE = 4.0
 READ_TOTAL = 30.0
 
 POLL_INTERVAL = 5
+IDLE_POLL_INTERVAL = 15
 HISTORY_LIMIT = 500
 HISTORY_CHECKPOINT = 30
 MAX_JOB_GAP = 180
@@ -173,7 +174,19 @@ dialog.settings::backdrop { background: rgba(10, 14, 16, .55); }
 dialog.settings form { display: flex; flex-direction: column; gap: 6px; padding: 18px 20px 16px; }
 dialog.settings h2 { margin-bottom: 6px; }
 dialog.settings label { margin-top: 8px; font-size: 12px; color: var(--muted); }
-dialog.settings input { width: 100%; }
+dialog.settings input, dialog.settings textarea { width: 100%; }
+dialog.settings textarea { font: 13px "Segoe UI", sans-serif; resize: vertical; min-height: 96px; }
+.fleet-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
+.fleet-toggle input { margin: 0; }
+.setup ol { margin: 6px 0 10px; padding-left: 20px; line-height: 1.55; }
+.setup code { background: var(--header); border-radius: 4px; padding: 1px 5px; font-size: 12px; }
+.fleet-list { display: flex; flex-direction: column; gap: 8px; }
+.fleet-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; }
+.fleet-row.current { border-color: var(--blue); }
+.fleet-row .name { font-weight: 600; overflow-wrap: anywhere; }
+.fleet-row .meta { font-size: 12px; color: var(--muted); }
+.fleet-row .value { font-size: 13px; white-space: nowrap; }
+.fleet-row a { color: var(--blue); font-size: 12px; font-weight: 600; text-decoration: none; }
 dialog.settings .caption { margin-top: 2px; }
 .settings-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .settings-actions button[type="submit"] { background: var(--blue); border-color: var(--blue); color: #fff; }
@@ -185,11 +198,30 @@ dialog.settings .caption { margin-top: 2px; }
     <div class="identity"><h1>{{printer}}</h1><span class="device-state" id="status"></span></div>
     <div class="device-actions">
       <span class="connection" id="connection" role="status">Connecting…</span>
+      <label class="fleet-toggle"><input type="checkbox" id="fleetToggle"> All printers</label>
       <button id="settingsButton" type="button" aria-haspopup="dialog">Settings</button>
       <button id="nativePage" type="button">Printer Web Interface</button>
     </div>
   </header>
   <p class="device-message" id="viewMessage" role="status" hidden></p>
+  <section class="panel" id="setup" hidden>
+    <h2 class="panel-title">Set up your first printer</h2>
+    <div class="tool-body setup">
+      <ol>
+        <li>This page is shown by the plugin inside OrcaSlicer: Device tab → <b>Speed Dial</b> → <b>FlashForge Device Tab</b>.</li>
+        <li>Press <b>Settings</b> in the panel header.</li>
+        <li>Add one line per printer: <code>192.168.3.37 | 03dd42ee | Adventurer 5M</code> —
+            address | CheckCode | name. The CheckCode is in the printer's network settings.</li>
+        <li>Save and wait a few seconds: temperatures and progress appear here.</li>
+      </ol>
+      <p class="caption">Only FlashForge printers on the local network are supported. The plugin is read-only:
+        it never starts, pauses or cancels a job.</p>
+    </div>
+  </section>
+  <section class="panel" id="fleet" hidden>
+    <div class="row panel-title"><h2>Printers</h2><button id="fleetRefresh" type="button">Refresh</button></div>
+    <div class="tool-body"><div class="fleet-list" id="fleetList"></div></div>
+  </section>
   <div class="dashboard" id="monitor">
     <section class="panel" aria-labelledby="job-title">
       <h2 class="panel-title" id="job-title">Print Job</h2>
@@ -276,11 +308,11 @@ dialog.settings .caption { margin-top: 2px; }
 </main>
 <dialog class="settings" id="settingsDialog" aria-labelledby="settingsTitle">
   <form id="settingsForm">
-    <h2 id="settingsTitle">Printer connection</h2>
-    <label for="settingHost">Adventurer IPv4 address</label>
-    <input id="settingHost" type="text" maxlength="15" autocomplete="off" spellcheck="false" placeholder="192.168.1.51">
-    <label for="settingCode">CheckCode</label>
-    <input id="settingCode" type="password" maxlength="32" autocomplete="off" placeholder="from printer network settings">
+    <h2 id="settingsTitle">Printers</h2>
+    <label for="printersText">One printer per line: address | CheckCode | name</label>
+    <textarea id="printersText" rows="5" spellcheck="false" placeholder="192.168.3.37 | 03dd42ee | Adventurer 5M"></textarea>
+    <p class="caption">CheckCode is optional: without it the panel cannot show the remaining time,
+      filament estimate or camera address.</p>
     <p class="caption" id="settingsStatus" role="status"></p>
     <div class="settings-actions">
       <button type="button" id="settingsCancel">Cancel</button>
@@ -418,6 +450,10 @@ async function updateTools() {
   try {
     const data = await getJson('/telemetry');
     temperatures = data.temperatures;
+    if (Array.isArray(data.printers)) {
+      fleetPrinters = data.printers;
+      applyView();
+    }
     drawChart();
     if (data.cameraUrl && !el('cameraUrl').value && !el('cameraUrl').matches(':focus')) {
       el('cameraUrl').value = data.cameraUrl;
@@ -675,14 +711,84 @@ document.addEventListener('visibilitychange', updateStatus);
 updateStatus();
 refreshFiles();
 const settingsDialog = el('settingsDialog');
+function parsePrinters(value) {
+  const printers = [];
+  for (const line of value.split(/\r?\n/)) {
+    const parts = line.split('|').map(part => part.trim());
+    if (!parts[0]) continue;
+    printers.push({host: parts[0], code: parts[1] || '', name: parts[2] || ''});
+  }
+  return printers;
+}
+
+function formatPrinters(printers) {
+  return (printers || []).map(item => [item.host, item.code || '', item.name || '']
+    .join(' | ').replace(/ \| $/, '')).join('\n');
+}
+
+const fleetToggle = el('fleetToggle');
+let fleetPrinters = [];
+
+function renderFleet() {
+  const rows = fleetPrinters.map(item => {
+    const row = document.createElement('div');
+    row.className = 'fleet-row' + (item.current ? ' current' : '');
+    const left = document.createElement('div');
+    const name = document.createElement('div');
+    name.className = 'name';
+    name.textContent = item.name || item.host;
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const state = item.status || (item.error ? 'No answer' : 'Waiting…');
+    const bits = [item.host, state];
+    if (item.percent != null) bits.push(item.percent + '%');
+    if (item.remaining != null) bits.push(duration(item.remaining) + ' left');
+    meta.textContent = bits.join(' · ');
+    left.append(name, meta);
+    const right = document.createElement('div');
+    right.className = 'value';
+    if (item.current) {
+      right.textContent = 'open';
+    } else {
+      const link = document.createElement('a');
+      link.href = '/' + item.host + '/';
+      link.textContent = 'Open';
+      right.append(link);
+    }
+    row.append(left, right);
+    return row;
+  });
+  el('fleetList').replaceChildren(...rows);
+}
+
+function applyView() {
+  const hasPrinters = fleetPrinters.length > 0;
+  const showFleet = hasPrinters && fleetToggle.checked;
+  el('setup').hidden = hasPrinters;
+  el('fleet').hidden = !showFleet;
+  el('monitor').hidden = !hasPrinters || showFleet;
+  for (const id of ['chart', 'history', 'camera']) {
+    const node = el(id);
+    if (node) node.hidden = !hasPrinters || showFleet;
+  }
+  el('files-section') && (el('files-section').hidden = !hasPrinters || showFleet);
+  if (showFleet) renderFleet();
+}
+
+fleetToggle.checked = localStorage.getItem('ff-fleet') === '1';
+fleetToggle.onchange = () => {
+  try { localStorage.setItem('ff-fleet', fleetToggle.checked ? '1' : '0'); } catch {}
+  applyView();
+};
+el('fleetRefresh').onclick = () => updateStatus();
+
 el('settingsButton').onclick = async () => {
   el('settingsStatus').textContent = '';
   settingsDialog.showModal();
   try {
     const data = await getJson('/settings');
-    el('settingHost').value = data.host || '';
-    el('settingCode').value = data.check_code || '';
-    el('settingHost').focus();
+    el('printersText').value = formatPrinters(data.printers);
+    el('printersText').focus();
   } catch (error) {
     el('settingsStatus').textContent = error.message || 'Could not read the settings.';
   }
@@ -698,17 +804,11 @@ el('settingsForm').onsubmit = async event => {
     const response = await fetch(endpoint('/settings'), {
       method: 'POST',
       headers: {'Content-Type': 'application/json', 'X-FlashForge-Tab-Action': 'settings'},
-      body: JSON.stringify({host: el('settingHost').value.trim(),
-                            check_code: el('settingCode').value.trim()}),
+      body: JSON.stringify({printers: parsePrinters(el('printersText').value)}),
       signal: AbortSignal.timeout(12000),
     });
     const data = await response.json();
     if (!response.ok) throw Error(data.error || 'Could not save the settings.');
-    if (data.moved && data.endpoint) {
-      window.location.replace('/' + data.endpoint + '/');
-      return;
-    }
-    status.textContent = 'Saved. Reconnecting…';
     settingsDialog.close();
     await updateStatus();
   } catch (error) {
@@ -717,6 +817,7 @@ el('settingsForm').onsubmit = async event => {
     save.disabled = false;
   }
 };
+applyView();
 setInterval(updateStatus, 5000);
 </script>
 </body>
@@ -1196,7 +1297,7 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
     def configure(self, get_config, storage):
         self.get_config = get_config
         self.storage = storage
-        self.monitor = None
+        self.monitors = {}
         self.error = ""
         self.state_lock = threading.Lock()
         self.printer_lock = threading.Lock()
@@ -1206,13 +1307,61 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
         self.stopping = threading.Event()
         self.poller = None
 
-    def settings_for(self):
+    def printers(self):
+        """Configured printers: address, CheckCode and a display name."""
         config = self.get_config()
-        return config.get("flashforge_host") or "", config.get("check_code") or ""
+        result = []
+        for entry in config.get("printers") or []:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                host = local_address(str(entry.get("host") or ""))
+            except ValueError:
+                continue
+            if any(item["host"] == host for item in result):
+                continue
+            result.append({"host": host, "code": str(entry.get("code") or ""),
+                           "name": str(entry.get("name") or host)[:60]})
+        if not result:
+            # Older releases kept a single address in the plugin config.
+            try:
+                host = local_address(config.get("flashforge_host") or "")
+            except ValueError:
+                host = ""
+            if host:
+                result.append({"host": host, "code": config.get("check_code") or "",
+                               "name": "Printer"})
+        return result
+
+    def settings_for(self):
+        printers = self.printers()
+        return (printers[0]["host"], printers[0]["code"]) if printers else ("", "")
 
     def settings_payload(self):
-        host, check_code = self.settings_for()
-        return {"host": host, "check_code": check_code, "endpoint": host}
+        printers = self.printers()
+        return {"printers": printers, "endpoint": printers[0]["host"] if printers else ""}
+
+    def fleet_payload(self, current=None):
+        items = []
+        for entry in self.printers():
+            monitor = self.monitors.get(entry["host"])
+            data, error = None, ""
+            if monitor is not None:
+                with monitor.state_lock:
+                    data = monitor.latest
+                    error = monitor.error
+            item = {"host": entry["host"], "name": entry["name"],
+                    "current": entry["host"] == current, "error": error,
+                    "status": None, "percent": None, "remaining": None,
+                    "file": "", "nozzle": None, "bed": None,
+                    "printing": False, "complete": False}
+            if data:
+                item.update(status=data.get("status"), percent=data.get("percent"),
+                            remaining=data.get("remaining"), file=data.get("file"),
+                            nozzle=data.get("nozzle"), bed=data.get("bed"),
+                            printing=bool(data.get("active")), complete=bool(data.get("complete")))
+            items.append(item)
+        return items
 
     def upload_active(self):
         # A cancelled or crashed Orca upload may never deliver UploadFinished;
@@ -1241,48 +1390,49 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
             self.printer_lock.release()
 
     def poll_printer(self):
-        monitor = None
-        previous = None
         try:
             while not self.stopping.is_set():
                 now = int(time.time())
+                mono = time.monotonic()
                 try:
-                    settings = self.settings_for()
-                    if settings != previous:
-                        if monitor:
-                            monitor.history.save(now)
-                        monitor = None
-                        error = ""
-                        host, secret = settings
-                        if host:
-                            try:
-                                adapter = FlashForge(host, secret)
+                    entries = self.printers()
+                    hosts = {entry["host"] for entry in entries}
+                    with self.state_lock:
+                        for host in [name for name in self.monitors if name not in hosts]:
+                            self.monitors.pop(host).history.save(now)
+                        for entry in entries:
+                            monitor = self.monitors.get(entry["host"])
+                            if monitor is None:
+                                try:
+                                    adapter = FlashForge(entry["host"], entry["code"])
+                                except ValueError:
+                                    continue
                                 monitor = PrinterMonitor(
-                                    adapter, self.storage / f"flashforge-{adapter.host}-history.json")
-                                monitor.endpoint = adapter.host
-                                monitor.settings = settings
-                            except ValueError as exc:
-                                error = str(exc)
-                        with self.state_lock:
-                            self.monitor = monitor
-                            self.error = error
-                        previous = settings
-                    if monitor:
+                                    adapter, self.storage / f"flashforge-{entry['host']}-history.json")
+                                monitor.endpoint = entry["host"]
+                                monitor.next_due = 0.0
+                                self.monitors[entry["host"]] = monitor
+                            monitor.adapter.check_code = entry["code"]
+                            monitor.name = entry["name"]
+                    for position, entry in enumerate(entries):
+                        monitor = self.monitors.get(entry["host"])
+                        if monitor is None or mono < getattr(monitor, "next_due", 0.0):
+                            continue
+                        # The first printer is the one usually on screen.
+                        interval = POLL_INTERVAL if position == 0 or len(entries) <= 3 else IDLE_POLL_INTERVAL
+                        monitor.next_due = mono + interval
                         with self.printer_io():
                             monitor.sample(now)
                 except UploadInProgress:
                     pass
                 except Exception:
-                    # One bad response must not end the poll loop or the server.
-                    with self.state_lock:
-                        self.error = "Could not update printer data."
-                    if monitor:
+                    for monitor in list(self.monitors.values()):
                         with monitor.state_lock:
                             monitor.latest = None
                             monitor.error = "Could not update printer data."
-                self.stopping.wait(POLL_INTERVAL)
+                self.stopping.wait(0.5)
         finally:
-            if monitor:
+            for monitor in list(self.monitors.values()):
                 monitor.history.save(int(time.time()))
 
     def serve_forever(self, poll_interval=0.5):
@@ -1411,11 +1561,8 @@ class MonitorHandler(BaseHTTPRequestHandler):
             self.send_error(403)
             return
         endpoint, route = self.request_route()
-        settings = self.server.settings_for()
-        try:
-            configured = printer_endpoint(settings[0]) if settings[0] else ""
-        except ValueError:
-            configured = ""
+        printers = self.server.printers()
+        configured = printers[0]["host"] if printers else ""
         if not endpoint:
             if configured:
                 self.send_response(308)
@@ -1445,27 +1592,29 @@ class MonitorHandler(BaseHTTPRequestHandler):
         try:
             if self.server.check_view is not None:
                 endpoint = self.server.check_view(endpoint)
-            if configured and endpoint != configured:
-                raise ValueError("The address in the OrcaSlicer profile does not match the plugin settings.")
+            if printers and endpoint not in {entry["host"] for entry in printers}:
+                raise ValueError("This printer is not in the plugin settings.")
         except (OSError, RuntimeError, ValueError) as error:
             self.reply_json({"error": str(error)}, 409)
             return
 
         try:
-            monitor, error, uploading = self.snapshot()
-            if monitor is None or monitor.settings != settings:
+            monitor = self.server.monitors.get(endpoint)
+            uploading = self.server.upload_active()
+            if monitor is None:
                 if route == "telemetry":
-                    self.reply_json({"temperatures": [], "history": [], "historyError": "", "cameraUrl": ""})
+                    self.reply_json({"temperatures": [], "history": [], "historyError": "",
+                                     "cameraUrl": "", "printers": self.server.fleet_payload(endpoint)})
                 else:
-                    message = "Waiting for the printer…" if settings[0] else "Enter your printer address in the plugin settings."
-                    self.reply_json({"error": error or message}, 503)
+                    self.reply_json({"error": "This printer is not configured yet."}, 503)
                 return
             if route == "telemetry":
                 with monitor.state_lock:
                     data = {"temperatures": list(monitor.temperatures),
                             "history": monitor.history_snapshot,
                             "historyError": monitor.history_error,
-                            "cameraUrl": monitor.camera_url}
+                            "cameraUrl": monitor.camera_url,
+                            "printers": self.server.fleet_payload(endpoint)}
                 self.reply_json(data)
                 return
             if uploading:
@@ -1508,7 +1657,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
 
     def snapshot(self):
         with self.server.state_lock:
-            return self.server.monitor, self.server.error, self.server.upload_active()
+            return None, self.server.error, self.server.upload_active()
 
     def reply_json(self, data, status=200):
         self.reply(json.dumps(data, ensure_ascii=False).encode("utf-8"),
@@ -1540,7 +1689,7 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         return 'FlashForge Device Tab'
 
     def get_default_config(self):
-        return {"flashforge_host": "", "check_code": ""}
+        return {"printers": [], "flashforge_host": "", "check_code": ""}
 
     def has_config_ui(self):
         return True
@@ -1549,11 +1698,16 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         return CONFIG_PAGE
 
     def config(self):
-        config = json.loads(self.get_config())
+        try:
+            config = json.loads(self.get_config())
+        except (TypeError, ValueError):
+            return self.get_default_config()
         if not isinstance(config, dict):
             return self.get_default_config()
-        fields = ("flashforge_host", "check_code")
-        return {name: config[name].strip() if isinstance(config.get(name), str) else "" for name in fields}
+        result = {name: config[name].strip() if isinstance(config.get(name), str) else ""
+                  for name in ("flashforge_host", "check_code")}
+        result["printers"] = config.get("printers") if isinstance(config.get("printers"), list) else []
+        return result
 
     def on_load(self):
         # Bind during the lifecycle callback so OrcaSlicer reports startup
@@ -1704,29 +1858,48 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         finally:
             self._switch_lock.release()
 
-    def apply_settings(self, host, check_code):
-        host = local_address(host)
-        if len(check_code) > 32 or any(not 33 <= ord(c) <= 126 for c in check_code):
-            raise ValueError("The CheckCode must be printable ASCII, up to 32 characters.")
-        current_host, current_code = self._server.settings_for()
-        if host != current_host:
-            # The Device tab and the upload path both follow the profile, so a new
-            # address has to land in the active printer preset as well.
-            transaction = orca.host.preset.printer.begin_update()
-            presets = orca.host.preset_bundle().printers
-            preset = presets.edited_preset()
-            if preset.name != transaction.target_name:
-                raise ValueError("The active printer profile changed. Try again.")
+    def apply_settings(self, printers):
+        if not isinstance(printers, list):
+            raise ValueError("Invalid printer list.")
+        clean = []
+        for entry in printers:
+            if not isinstance(entry, dict):
+                raise ValueError("Invalid printer entry.")
+            host = local_address(str(entry.get("host") or ""))
+            code = str(entry.get("code") or "")
+            if len(code) > 32 or any(not 33 <= ord(c) <= 126 for c in code):
+                raise ValueError("The CheckCode must be printable ASCII, up to 32 characters.")
+            if any(item["host"] == host for item in clean):
+                continue
+            clean.append({"host": host, "code": code,
+                          "name": str(entry.get("name") or host)[:60]})
+        if not clean:
+            raise ValueError("Add at least one printer address.")
+        host, check_code = clean[0]["host"], clean[0]["code"]
+        self.save_config(json.dumps({"printers": clean, "flashforge_host": host,
+                                     "check_code": check_code}, ensure_ascii=False))
+        self._point_device_tab(host)
+        return host
+
+    def _point_device_tab(self, host):
+        """Keep the Device tab pointed at the first configured printer."""
+        try:
+            preset = orca.host.preset_bundle().current_printer_preset()
             if preset.config_value("host_type") != "flashforge":
-                raise ValueError("Select a printer profile that uses the FlashForge host.")
-            if monitor_identity(preset.config_value(DEVICE_UI_KEY) or "") == current_host:
+                return
+            current = printer_endpoint(preset.config_value("print_host") or "")
+            if current == host:
+                return
+            transaction = orca.host.preset.printer.begin_update()
+            edited = orca.host.preset_bundle().printers.edited_preset()
+            if edited.name != transaction.target_name:
+                return
+            if monitor_identity(edited.config_value(DEVICE_UI_KEY) or "") == current:
                 transaction.set(DEVICE_UI_KEY, monitor_url(host))
             transaction.set("print_host", host)
             transaction.commit()
-        if (host, check_code) != (current_host, current_code):
-            self.save_config(json.dumps({"flashforge_host": host, "check_code": check_code},
-                                        ensure_ascii=False))
-        return host
+        except (OSError, RuntimeError, ValueError):
+            pass
 
     def restore_page(self, view):
         # Request threads are not joined during unload. They can wait for the
@@ -1749,3 +1922,4 @@ class FlashForgeDeviceTab(orca.base):
         # connects to a new address.
         orca.request_permissions(network_socket=[f"('{WEB_HOST}', {WEB_PORT})"], threading=True)
         orca.register_capability(FlashForgeService)
+
