@@ -1,5 +1,10 @@
 ﻿# Changelog
 
+## 1.6.3
+
+- The GitHub release now publishes straight to the catalogue through the
+`publish-orcacloud.yml` workflow (OIDC trusted publishing, no tokens).
+
 ## 1.6.2
 
 - Release check: publishing this tag only through GitHub, without uploading
