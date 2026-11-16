@@ -1,5 +1,12 @@
 ﻿# Changelog
 
+## 1.6.1
+
+- The “All printers” view no longer leaves the temperature chart panel behind,
+  and the header toggle no longer wraps onto two lines.
+- Releases are published from GitHub: pushing a `v*` tag runs the tests and
+  creates the release asset the OrcaSlicer catalogue picks up.
+
 ## 1.6.0
 
 Several printers in one panel, and a setup screen instead of an empty tab.
