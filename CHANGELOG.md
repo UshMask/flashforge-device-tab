@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.3.1
+
+Fixes the empty Printers tab.
+
+### Fixed
+
+- The Printers tab renders the same loopback dashboard in an iframe instead of
+  relying on the page-to-plugin message bridge, so it works even when the bridge
+  is not available.
+- Printer discovery no longer depends on a single preset API: named lookup,
+  indexed lookup and the merged `full_config_value()` of the active profile are
+  combined, so the active printer is always listed even if the collection cannot
+  be read from the plugin thread.
+- Added `GET /dashboard/debug` returning what discovery sees, for support.
+
 ## 1.3.0
 
 The dashboard becomes its own OrcaSlicer tab, and coexistence with other printers
