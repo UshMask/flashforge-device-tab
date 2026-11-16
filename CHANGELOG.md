@@ -1,5 +1,10 @@
 ﻿# Changelog
 
+## 1.6.5
+
+- Publishing happens on a published GitHub release through
+`publish-orcacloud.yml`, exactly as the catalogue documents it.
+
 ## 1.6.4
 
 - One workflow now does everything on a `v*` tag: tests, the GitHub release and
