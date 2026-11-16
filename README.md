@@ -1,126 +1,78 @@
 # FlashForge Device Tab
 
-Read-only FlashForge monitoring inside OrcaSlicer's Device tab.
+A single-file OrcaSlicer plugin that fills the empty **Device tab** for FlashForge
+printers: job progress, temperatures, the printer's file list with previews, the
+camera stream, a 30-minute temperature chart and a print history that survives
+restarts. Read-only — it never starts, pauses or cancels a job.
 
-OrcaSlicer leaves the Device tab empty for FlashForge printers — the page fails
-to load because the printer has no web UI of its own. This plugin fills the tab
-with a local page served from inside OrcaSlicer: temperatures, print progress,
-remaining time, layer, filament, the printer's file list with thumbnails, a
-camera stream, a 30-minute temperature chart and a print history.
+![The Device tab with the printer panel](docs/panel.png)
 
-It needs no second application, no Node, no Docker and no Raspberry Pi. It runs
-inside the plugin sandbox of stock OrcaSlicer.
+## What it does
 
-## What it shows
+- **Print job card** — file name, progress, remaining and elapsed time, layer.
+- **Printer readings** — nozzle and bed temperature against their targets, fan
+  and speed.
+- **Temperatures chart** — the last 30 minutes, sampled every five seconds.
+- **Camera** — the printer's MJPEG stream, if the printer exposes one.
+- **Printer files** — the on-printer file list with previews, 10 per page.
+- **Print history** — jobs with start, end, duration and result, kept on disk so
+  it survives OrcaSlicer restarts.
+- **Several printers** — every printer in the plugin settings is monitored; tick
+  **All printers** in the panel header to see them side by side, click one to open
+  its full panel.
 
-- Nozzle and bed temperatures with targets
-- Print progress, remaining and elapsed time, current layer
-- Filament estimate for the running job
-- Printer file list with PNG previews, search and pagination
-- MJPEG camera stream (address is taken from the printer or entered by hand)
-- Temperature chart for the last 30 minutes
-- Print history with results, kept between sessions
+## Install
 
-## What it does not do
+1. Download `flashforge_device_tab.py` from the latest release.
+2. In OrcaSlicer open **Plugins → Install from file** and pick the file.
+3. Enable **FlashForge Device Tab**.
+4. Make sure the printer profile uses the **FlashForge** host type.
+5. Open **Device tab → Speed Dial → FlashForge Device Tab**.
 
-- No control: the plugin never starts, pauses or cancels a job.
-- No print-host replacement: OrcaSlicer keeps sending jobs the way it always did.
-- No other vendors: this is a FlashForge panel, not a universal monitor.
-- No cloud, no accounts, no notifications.
+OrcaSlicer 2.5.0 or newer, Windows x64. The plugin needs no extra software: no
+Node, no Docker, no Raspberry Pi, no second application.
 
-If you need pause/cancel, multiple printers or Spoolman integration, use
-[FlashForgeWebUI](https://github.com/Parallel-7/FlashForgeWebUI) instead — it is
-a separate server with a much wider feature set.
+## Settings
 
-## Requirements
+Press **Settings** in the panel header. One printer per line:
 
-- OrcaSlicer 2.5.x with the plugin system (tested on 2.5.1, Windows).
-- FlashForge printer reachable over the LAN. Developed against Adventurer 5M;
-  the same protocol is used by 5M Pro, AD5X and Creator 5.
-- CheckCode from the printer's network settings (needed for the remaining-time
-  estimate, filament and camera address).
+```
+192.168.1.37 | 1a2b3c4d | Adventurer 5M
+192.168.1.10 | 1a2b3c4d | Adventurer 5M #2
+```
 
-## Install (local plugin)
-
-1. Copy this folder so that the plugin file ends up here:
-
-   ```
-   %APPDATA%\OrcaSlicer\orca_plugins\flashforge_device_tab\flashforge_device_tab.py
-   ```
-
-2. In OrcaSlicer open **Plugins**, press **Refresh**, enable **FlashForge Device
-   Tab** and allow the network access prompt.
-3. Open the Device tab → **FlashForge Device Tab** → **Settings** and enter the
-   printer IPv4 address and CheckCode. (The same fields exist in the Plugins
-   dialog, but the panel's own form is enough.)
-4. Open **Speed Dial** in the Device tab and choose **FlashForge Device Tab**.
-5. The panel appears in the Device tab. The **Printer Web Interface** button
-   returns to the page OrcaSlicer had there before.
-
-If an older `printer_monitor` or `flashforge_monitor` installation is still
-enabled, disable it first: two monitors polling the same printer fight over its
-single TCP connection.
-
-## Display modes
-
-The panel's **Settings** button offers two layouts:
-
-- **One printer** — the Device tab shows the printer of the active OrcaSlicer
-  profile, with its full panel.
-- **All printers** — the Device tab shows a dashboard at `/dashboard/` with a
-  card per FlashForge printer profile.
-
-Printer addresses and CheckCodes come from the printer profiles themselves
-(`print_host` and `printhost_apikey`), so each printer keeps its own settings.
-Changing the address in the panel also updates the active profile, because
-OrcaSlicer sends jobs to the profile's `print_host`.
+`address | CheckCode | name`. The name is optional and falls back to the address.
+The CheckCode is the one in the printer's own network settings; without it the
+panel cannot show the remaining time, filament estimate or camera address — the
+rest still works.
 
 ## How it works
 
-The plugin starts a loopback HTTP server on `127.0.0.1:18771`, polls the printer
-over TCP (`8899`, `~M105/M27/M119/M115/M661/M662`) and over its HTTP API
-(`8898`, `/detail`), and serves the panel from that loopback address. Switching
-the Device tab to the panel is done by writing `print_host_webui` in the active
-printer profile; the previous value is saved per profile and restored by the
-button.
+OrcaSlicer shows a plugin page in the Device tab when the printer profile's
+`print_host_webui` points at it. The plugin runs a loopback HTTP server on
+`127.0.0.1:18771`, speaks the FlashForge TCP protocol on port 8899 and the
+printer's HTTP API on 8898, and renders a single HTML page. Everything is one
+Python file that ships its own HTML, CSS and JavaScript.
 
-Network access to the printer is granted by OrcaSlicer's plugin permission
-prompt the first time the plugin connects to a new address.
+## Security
+
+- Reads **only its own configuration** from OrcaSlicer; printer profiles are
+  never read for credentials.
+- Talks to the local network: the printers you configure, nothing else.
+- Serves one page on `127.0.0.1`, checks `Host`, `Origin` and `Sec-Fetch-Site`,
+  refuses framing from other origins and sends `no-store`.
+- The OrcaSlicer plugin catalogue rates the plugin **low risk**.
 
 ## Development
 
-```bash
-python -m unittest discover -s tests -v
+```powershell
+python -m unittest discover -s tests
 ```
 
-The suite runs the plugin against a fixture printer that speaks the same TCP and
-HTTP dialects, so it covers the protocol, the history state machine, the HTTP
-guards, the upload pause and the Device-tab switch without a real machine.
-
-Repository layout:
-
-```
-flashforge_device_tab.py   the whole plugin (single file, stdlib only)
-tests/test_plugin.py       fixture printer + 26 self-checks
-```
-
-## Card text (for the plugin catalog)
-
-> OrcaSlicer leaves the Device tab empty for FlashForge printers. This plugin
-> fills it: temperatures, print progress, remaining time, layer, filament used,
-> the printer's file list with thumbnails, camera stream, a 30-minute
-> temperature chart and a print history — all inside the tab. Read-only by
-> design: it never sends, starts or cancels jobs, and needs no extra software.
-
-## Credits
-
-The FlashForge LAN protocol was reverse engineered by the community; this plugin
-builds on what is documented in
-[flashforge-python-api](https://github.com/GhostTypes/ff-5mp-api-py) and
-[flashforge-finder-api](https://github.com/01F0/flashforge-finder-api).
-
-Community plugin, not affiliated with FlashForge or OrcaSlicer.
+The tests start a fake FlashForge printer (TCP 8899 + HTTP 8898) and exercise the
+protocol client, the history file, the loopback server's guards, the settings
+endpoint and the page bridge.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. Community plugin, not affiliated with FlashForge or OrcaSlicer.

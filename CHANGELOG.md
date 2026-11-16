@@ -1,4 +1,24 @@
-# Changelog
+﻿# Changelog
+
+## 1.6.0
+
+Several printers in one panel, and a setup screen instead of an empty tab.
+
+### Added
+
+- **Printers in the plugin config**: `address | CheckCode | name`, one per line in
+  Settings. Every configured printer is monitored — the open one every five
+  seconds, the rest every fifteen (automatic, depending on how many there are).
+- **“All printers” toggle** in the panel header: a compact list of every printer
+  with state, progress and remaining time; click one to open its full panel.
+- **Setup screen**: when no printer is configured, the panel explains what to
+  open and where to press instead of showing an empty grid.
+
+### Changed
+
+- The Device tab page now identifies printers by address from the plugin config;
+  printer profiles are no longer read to discover printers.
+- Settings dialog edits the printer list instead of a single address.
 
 ## 1.5.0
 
@@ -28,10 +48,10 @@ whether the extra tab exists.
 
 ### Added
 
-- **“Read CheckCode from printer profiles”** (on by default). Turning it off keeps
+- **вЂњRead CheckCode from printer profilesвЂќ** (on by default). Turning it off keeps
   the plugin from reading `printhost_apikey`; a code typed in the panel is then
   stored in the plugin config instead.
-- **“Show the Printers tab”** (on by default). Turning it off leaves the tab in
+- **вЂњShow the Printers tabвЂќ** (on by default). Turning it off leaves the tab in
   place with a short note instead of the dashboard.
 - Both switches are in the panel's Settings and in the dashboard's Settings.
 
@@ -39,8 +59,8 @@ whether the extra tab exists.
 
 - The Device tab no longer stays broken after an upgrade: a `print_host_webui`
   that points at an older plugin port (18765/18769) is rewritten to the current
-  page on plugin load, and the previous value is kept for the “back to native
-  page” action.
+  page on plugin load, and the previous value is kept for the вЂњback to native
+  pageвЂќ action.
 
 ## 1.3.1
 
@@ -64,7 +84,7 @@ is explicit.
 
 ### Added
 
-- **A separate “Printers” tab** (plugin `Pages` capability) that is always
+- **A separate вЂњPrintersвЂќ tab** (plugin `Pages` capability) that is always
   available, whatever printer profile is active. The Device tab keeps its
   per-profile page.
 - **A setting for the Device tab**: keep the printer panel (default) or replace it
@@ -150,7 +170,7 @@ Scope is now fixed: FlashForge only, read-only, one plugin.
   adapter duplicated built-in functionality while doubling the polling and
   routing code.
 - Status API now returns numbers (`nozzle: 205.3`) instead of pre-formatted
-  strings (`"205 °C"`); the page formats units itself. This removes the fragile
+  strings (`"205 В°C"`); the page formats units itself. This removes the fragile
   regex parsing of display strings on the client.
 - Loopback page moved to port `18771` so it cannot collide with an older
   installed monitor.
@@ -178,3 +198,4 @@ Scope is now fixed: FlashForge only, read-only, one plugin.
 - `flashforge_monitor.py` is retired; its features are covered here.
 - The multi-profile routing layer (per-profile monitors, `PRINTER_NAMES`,
   `printer_endpoint` branching) that only existed to serve PrusaLink.
+
