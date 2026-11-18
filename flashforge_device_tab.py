@@ -6,6 +6,7 @@
 # author = "Max"
 # version = "1.7.0"
 # ///
+import base64
 import hashlib
 import http.client
 import ipaddress
@@ -253,8 +254,10 @@ dialog.settings .caption { margin-top: 2px; }
     <section class="panel" aria-labelledby="readouts-title">
       <h2 class="panel-title" id="readouts-title">Printer Readings</h2>
       <dl class="readouts">
-        <div class="readout"><dt>Nozzle</dt><dd><strong id="nozzle">—</strong> <span class="muted" id="nozzleTarget"></span></dd></div>
+        <div class="readout"><dt id="nozzleLabel">Nozzle</dt><dd><strong id="nozzle">—</strong> <span class="muted" id="nozzleTarget"></span></dd></div>
         <div class="readout"><dt>Bed</dt><dd><strong id="bed">—</strong> <span class="muted" id="bedTarget"></span></dd></div>
+        <div class="readout" id="extraNozzlesReading" hidden><dt>Other tools</dt><dd id="extraNozzles"></dd></div>
+        <div class="readout" id="chamberReading" hidden><dt>Chamber</dt><dd id="chamber"></dd></div>
         <div class="readout" id="fanReading" hidden><dt>Part Cooling Fan</dt><dd><strong id="fan"></strong></dd></div>
         <div class="readout" id="speedReading" hidden><dt>Print Speed</dt><dd><strong id="speed"></strong></dd></div>
       </dl>
@@ -291,7 +294,7 @@ dialog.settings .caption { margin-top: 2px; }
       <div class="tool-body">
         <canvas class="chart" id="chart" role="img" aria-label="Chart of actual and target temperatures for the nozzle and bed"></canvas>
         <div class="chart-legend muted">
-          <span class="nozzle-series">Nozzle</span><span class="nozzle-series target">Nozzle Target</span>
+          <span class="nozzle-series" id="chartNozzle">Nozzle</span><span class="nozzle-series target" id="chartNozzleTarget">Nozzle Target</span>
           <span class="bed-series">Bed</span><span class="bed-series target">Bed Target</span>
         </div>
       </div>
@@ -341,10 +344,10 @@ dialog.settings .caption { margin-top: 2px; }
 <dialog class="settings" id="settingsDialog" aria-labelledby="settingsTitle">
   <form id="settingsForm">
     <h2 id="settingsTitle">Printers</h2>
-    <label for="printersText">One printer per line: address | CheckCode | name</label>
+    <label for="printersText">One printer per line: address | CheckCode | name | serial number</label>
     <textarea id="printersText" rows="5" spellcheck="false" placeholder="192.168.3.37 | 03dd42ee | Adventurer 5M"></textarea>
-    <p class="caption">CheckCode is optional: without it the panel cannot show the remaining time,
-      filament estimate or camera address.</p>
+    <p class="caption">Creator 5 and 5 Pro require both CheckCode and the printer serial number.
+      Adventurer 5M reads its serial number automatically.</p>
     <p class="caption" id="settingsStatus" role="status"></p>
     <div class="settings-actions">
       <button type="button" id="settingsCancel">Cancel</button>
@@ -647,6 +650,18 @@ async function updateStatus() {
     el('bed').textContent = plain(data.bed);
     el('bedTarget').textContent = data.bedTarget == null
       ? (Number.isFinite(data.bed) ? '°C' : '') : '/ ' + celsius(data.bedTarget);
+    const tools = data.tools || [];
+    el('nozzleLabel').textContent = tools.length ? 'T1' : 'Nozzle';
+    el('chartNozzle').textContent = el('nozzleLabel').textContent;
+    el('chartNozzleTarget').textContent = el('nozzleLabel').textContent + ' Target';
+    const temperatures = (actual, target) => [actual, target]
+      .map(value => value == null ? '—' : celsius(value)).join(' / ');
+    el('extraNozzlesReading').hidden = tools.length < 2;
+    el('extraNozzles').textContent = tools.slice(1).map((tool, index) =>
+      'T' + (index + 2) + ' ' + temperatures(tool.actual, tool.target)).join(' · ');
+    el('chamberReading').hidden = data.chamber == null;
+    el('chamber').textContent = data.chamber == null ? ''
+      : temperatures(data.chamber.actual, data.chamber.target);
     for (const key of ['fan', 'speed']) {
       el(key + 'Reading').hidden = data[key] == null;
       el(key).textContent = data[key] == null ? '' : data[key] + ' %';
@@ -690,7 +705,9 @@ function updatePrinter(data) {
   set('printerLight', sensors.led == null ? '' : sensors.led ? 'On' : 'Off');
   const ends = sensors.endstops || {};
   const parts = Object.entries(ends).map(([axis, value]) => axis.toUpperCase() + ' ' + value);
-  set('printerSensors', parts.length ? 'Endstops: ' + parts.join('  ') : '');
+  if (sensors.door) parts.push('Door / lid: ' + sensors.door);
+  if (sensors.errorCode) parts.push('Error: ' + sensors.errorCode);
+  set('printerSensors', (Object.keys(ends).length ? 'Endstops: ' : '') + parts.join('  '));
 }
 
 function updateActions(data) {
@@ -823,14 +840,14 @@ function parsePrinters(value) {
   for (const line of value.split(/\r?\n/)) {
     const parts = line.split('|').map(part => part.trim());
     if (!parts[0]) continue;
-    printers.push({host: parts[0], code: parts[1] || '', name: parts[2] || ''});
+    printers.push({host: parts[0], code: parts[1] || '', name: parts[2] || '', serial: parts[3] || ''});
   }
   return printers;
 }
 
 function formatPrinters(printers) {
-  return (printers || []).map(item => [item.host, item.code || '', item.name || '']
-    .join(' | ').replace(/ \| $/, '')).join('\n');
+  return (printers || []).map(item => [item.host, item.code || '', item.name || '', item.serial || '']
+    .join(' | ').replace(/(?: \| )+$/, '')).join('\n');
 }
 
 const fleetToggle = el('fleetToggle');
@@ -961,10 +978,12 @@ input, button { font: inherit; padding: 6px 8px; }
 p { max-width: 520px; }
 </style>
 <div>
-  <label for="flashforgeHost">Adventurer IPv4 address</label>
+  <label for="flashforgeHost">Printer IPv4 address</label>
   <input type="text" id="flashforgeHost" placeholder="192.168.1.51" maxlength="15" autocomplete="off">
   <label for="code">CheckCode</label>
   <input type="password" id="code" maxlength="32" autocomplete="off">
+  <label for="serial">Serial number (required for Creator 5 / 5 Pro)</label>
+  <input type="text" id="serial" maxlength="64" autocomplete="off">
   <p>From the Device tab, open Speed Dial and choose FlashForge Device Tab.</p>
   <p>Allow OrcaSlicer to access your printer when prompted, then reload the plugin.</p>
   <button id="save" type="button">Save</button>
@@ -972,19 +991,28 @@ p { max-width: 520px; }
 </div>
 <script>
 const byId = id => document.getElementById(id);
-const fields = {flashforge_host: byId('flashforgeHost'), check_code: byId('code')};
+const fields = {flashforge_host: byId('flashforgeHost'), check_code: byId('code'), serial_number: byId('serial')};
 const saved = byId('saved');
 let pending = false;
+let printers = [];
 window.orca.onConfig(config => {
-  for (const [key, field] of Object.entries(fields)) field.value = config[key] || '';
+  printers = Array.isArray(config.printers) ? config.printers : [];
+  const first = printers[0];
+  fields.flashforge_host.value = first?.host || config.flashforge_host || '';
+  fields.check_code.value = first?.code ?? config.check_code ?? '';
+  fields.serial_number.value = first?.serial ?? config.serial_number ?? '';
   if (pending) saved.textContent = 'Saved';
   pending = false;
 });
 for (const field of Object.values(fields)) field.oninput = () => { saved.textContent = ''; };
 byId('save').onclick = () => {
   pending = true;
-  window.orca.saveConfig(Object.fromEntries(Object.entries(fields).map(([key, field]) =>
-    [key, field.value.trim()])));
+  const config = Object.fromEntries(Object.entries(fields).map(([key, field]) => [key, field.value.trim()]));
+  if (printers.length) {
+    config.printers = [{...printers[0], host: config.flashforge_host, code: config.check_code,
+      serial: config.serial_number}, ...printers.slice(1)];
+  }
+  window.orca.saveConfig(config);
 };
 </script>
 </html>'''
@@ -1133,27 +1161,52 @@ def history_stats(jobs, now):
     }
 
 
-def control_job(host, serial, check_code, action):
-    """Pause, resume or cancel the running job through the printer's HTTP API."""
-    body = json.dumps({"serialNumber": serial, "checkCode": check_code,
-                       "payload": {"cmd": "jobCtl_cmd",
-                                   "args": {"jobID": "", "action": action}}})
-    connection = http.client.HTTPConnection(host, API_PORT, timeout=3)
+class PrinterAPIError(ValueError):
+    pass
+
+
+def printer_api(host, serial, check_code, path, fields=None, timeout=3, limit=65536):
+    body = json.dumps({"serialNumber": serial, "checkCode": check_code, **(fields or {})})
+    connection = http.client.HTTPConnection(host, API_PORT, timeout=timeout)
     try:
-        connection.request("POST", "/control", body, {"Content-Type": "application/json"})
+        connection.request("POST", path, body, {"Content-Type": "application/json"})
         response = connection.getresponse()
-        raw = response.read(8192)
         if response.status != 200:
-            raise ValueError("The printer did not accept the command")
+            raise PrinterAPIError(f"The printer HTTP API returned status {response.status}.")
+        raw = response.read(limit + 1)
+        if len(raw) > limit:
+            raise PrinterAPIError("The printer HTTP response is too large.")
         result = json.loads(raw)
-        if result.get("code") != 0:
-            raise ValueError(result.get("message") or "The printer did not accept the command")
-    except (OSError, ValueError, TypeError, http.client.HTTPException) as error:
-        if isinstance(error, ValueError):
+    except (ValueError, RecursionError) as error:
+        if isinstance(error, PrinterAPIError):
             raise
-        raise ValueError("The printer did not respond to the command") from error
+        raise PrinterAPIError("The printer returned invalid HTTP data.") from error
+    except http.client.HTTPException as error:
+        raise OSError("The printer HTTP connection failed.") from error
     finally:
         connection.close()
+
+    if not isinstance(result, dict) or type(result.get("code")) is not int:
+        raise PrinterAPIError("The printer returned invalid HTTP data.")
+    code = result["code"]
+    message = result.get("message")
+    if code == -2:
+        raise PrinterAPIError("Enable LAN-only mode on the printer.")
+    if code == 1:
+        if message == "SN is different":
+            raise PrinterAPIError("Check the printer serial number in the plugin settings.")
+        if message == "Access code is different":
+            raise PrinterAPIError("Check the CheckCode in the plugin settings.")
+        raise PrinterAPIError("Check the serial number and CheckCode in the plugin settings.")
+    if code:
+        raise PrinterAPIError(f"The printer rejected the HTTP request (code {code}).")
+    return result
+
+
+def control_job(host, serial, check_code, action):
+    """Pause, resume or cancel the current job through the printer's HTTP API."""
+    printer_api(host, serial, check_code, "/control",
+                {"payload": {"cmd": "jobCtl_cmd", "args": {"jobID": "", "action": action}}})
 
 
 def read_snapshot(camera_url, limit=2_000_000):
@@ -1191,32 +1244,108 @@ def read_snapshot(camera_url, limit=2_000_000):
 
 
 def read_job_detail(serial, check_code, host):
-    body = json.dumps({"serialNumber": serial, "checkCode": check_code})
-    connection = http.client.HTTPConnection(host, API_PORT, timeout=1.5)
     try:
-        connection.request("POST", "/detail", body, {"Content-Type": "application/json"})
-        response = connection.getresponse()
-        if response.status != 200:
-            return {}, "The printer API is unavailable"
-        result = json.loads(response.read(65536))
-        if result.get("code") != 0:
-            return {}, "Check the CheckCode in the plugin settings"
-        detail = result.get("detail")
-        if isinstance(detail, dict):
-            return detail, ""
-    except (OSError, ValueError, TypeError, AttributeError, http.client.HTTPException):
-        pass
-    finally:
-        connection.close()
-    return {}, "The printer API is unavailable"
+        return read_http_detail(host, serial, check_code), ""
+    except PrinterAPIError as error:
+        return {}, str(error)
+    except OSError:
+        return {}, "The printer API is unavailable"
+
+
+def read_http_detail(host, serial, check_code):
+    detail = printer_api(host, serial, check_code, "/detail", timeout=1.5).get("detail")
+    if not isinstance(detail, dict):
+        raise PrinterAPIError("The printer returned invalid status data.")
+    return detail
 
 
 def detail_number(detail, key, lower, upper):
+    if isinstance(detail.get(key), bool):
+        return None
     try:
         value = float(detail[key])
     except (KeyError, TypeError, ValueError, OverflowError):
         return None
     return value if lower <= value <= upper else None
+
+
+def read_http_status(host, serial, check_code):
+    detail = read_http_detail(host, serial, check_code)
+
+    def field(key):
+        value = detail.get(key)
+        return value.strip() if isinstance(value, str) else ""
+
+    state = field("status").upper()
+    state = {"PAUSE": "PAUSED", "CANCEL": "CANCELING", "CALIBRATE_DOING": "BUSY"}.get(state, state)
+    if not state:
+        raise PrinterAPIError("The printer returned invalid status data.")
+    complete = state in {"COMPLETED", "BUILDING_COMPLETED", "FINISHED"}
+    active = state in ACTIVE_JOB
+    has_job = active or complete or state in ENDED_JOB
+    model = field("model")
+    pid = detail.get("pid")
+    creator_pro = model.casefold() == "creator 5 pro" or pid in (41, "29", "0x29")
+    creator = creator_pro or model.casefold() == "creator 5" or pid in (40, "28", "0x28")
+    volume = re.fullmatch(r"(\d{1,4})[xX](\d{1,4})[xX](\d{1,4})", field("measure"))
+
+    def tool_values(key):
+        values = detail.get(key)
+        if not isinstance(values, list):
+            return []
+        return [detail_number({index: value}, index, 0, 500)
+                for index, value in enumerate(values[:4])]
+
+    actuals = tool_values("nozzleTemps")
+    targets = tool_values("nozzleTargetTemps")
+    tools = [{"actual": actual, "target": target}
+             for actual, target in zip((actuals + [None] * 4)[:4],
+                                       (targets + [None] * 4)[:4])] if creator or actuals or targets else []
+    readings = {
+        "nozzle": tools[0]["actual"] if tools else detail_number(detail, "rightTemp", 0, 500),
+        "nozzleTarget": tools[0]["target"] if tools else detail_number(detail, "rightTargetTemp", 0, 500),
+        "bed": detail_number(detail, "platTemp", 0, 200),
+        "bedTarget": detail_number(detail, "platTargetTemp", 0, 200),
+    }
+    chamber = {"actual": detail_number(detail, "chamberTemp", 0, 150),
+               "target": detail_number(detail, "chamberTargetTemp", 0, 150)}
+    camera = field("cameraStreamUrl")
+    try:
+        parts = urlsplit(camera)
+        if parts.scheme != "http" or parts.hostname != host or parts.port != 8080 or parts.username is not None:
+            camera = ""
+    except ValueError:
+        camera = ""
+    led = field("lightStatus")
+    door = field("doorStatus")
+    remaining = detail_number(detail, "estimatedTime", 1e-9, 365 * 24 * 3600) if active else None
+    elapsed = detail_number(detail, "printDuration", 1 if complete else 0, 365 * 24 * 3600) if has_job else None
+    progress = detail_number(detail, "printProgress", 0, 1) if active else None
+    total = detail_number(detail, "targetPrintLayer", 1, 1_000_000) if has_job else None
+    layer = detail_number(detail, "printLayer", 0, total) if total is not None else None
+    return {
+        "status": STATES.get(state, state), "state": state, **readings,
+        "temperatures": readings, "tools": tools,
+        "chamber": chamber if creator_pro and any(value is not None for value in chamber.values()) else None,
+        "layer": int(layer) if layer is not None else None,
+        "layerTotal": int(total) if total is not None else None,
+        "percent": 100 if complete else round(progress * 100) if progress is not None else None,
+        "file": field("printFileName").rsplit("/", 1)[-1] if has_job else "",
+        "active": active, "complete": complete,
+        "remaining": math.ceil(remaining) if remaining is not None else None,
+        "timeHint": "The printer has not reported the remaining time yet" if active and remaining is None else "",
+        "elapsed": int(elapsed) if elapsed is not None else None,
+        "filament": None,
+        "fan": detail_number(detail, "coolingFanSpeed", 0, 100),
+        "speed": detail_number(detail, "printSpeedAdjust", 1, 1000),
+        "cameraUrl": camera,
+        "info": {"model": model, "name": field("name"), "firmware": field("firmwareVersion"),
+                 "serial": serial, "mac": field("macAddr"), "volume": list(map(int, volume.groups())) if volume else None,
+                 "tools": detail_number(detail, "nozzleCnt", 1, 16)},
+        "sensors": {"led": led == "open" if led in {"open", "close"} else None,
+                    "door": door if creator_pro and door in {"open", "close"} else "",
+                    "errorCode": field("errorCode"), "endstops": {}, "moveMode": ""},
+    }
 
 
 def read_status(host, check_code, include_details=False):
@@ -1336,22 +1465,94 @@ def local_address(host):
     return str(address)
 
 
+def printer_serial(value):
+    serial = str(value or "").strip()
+    if serial and not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", serial):
+        raise ValueError("Enter a serial number using up to 64 letters, digits, hyphens or underscores.")
+    return serial
+
+
 class FlashForge:
-    def __init__(self, address, check_code):
+    def __init__(self, address, check_code, serial=""):
         self.host = local_address(address)
+        self.http_only = False
         self.check_code = check_code
+        self.serial = serial
+
+    def configure(self, check_code, serial):
+        if (check_code, serial) != (self.check_code, self.serial):
+            self.http_only = False
+        self.check_code = check_code
+        self.serial = serial
 
     def status(self, include_details):
-        return read_status(self.host, self.check_code, include_details)
+        if not self.http_only:
+            try:
+                return read_status(self.host, self.check_code, include_details)
+            except PermissionError:
+                raise
+            except (OSError, ValueError):
+                if not self.serial or not self.check_code:
+                    raise PrinterAPIError(
+                        "TCP connection failed. For Creator 5 / 5 Pro, set the serial number and CheckCode."
+                    ) from None
+        try:
+            status = read_http_status(self.host, self.serial, self.check_code)
+        except PermissionError:
+            raise
+        except OSError:
+            self.http_only = False
+            raise
+        self.http_only = True
+        return status
 
     def files(self):
+        if self.http_only:
+            names = printer_api(self.host, self.serial, self.check_code, "/gcodeList",
+                                limit=1024 * 1024).get("gcodeList")
+            if not isinstance(names, list):
+                raise PrinterAPIError("The printer returned an invalid file list.")
+            files = {}
+            for name in names:
+                if isinstance(name, str) and name and not any(c in name for c in "/\\\0\r\n"):
+                    try:
+                        key = hashlib.sha256(name.encode("utf-8")).hexdigest()[:32]
+                    except UnicodeEncodeError:
+                        continue
+                    files[key] = (name, name)
+            return files
         return {
             key: (path.rsplit(b"/", 1)[-1].decode("utf-8", "replace"), path)
             for key, path in read_files(self.host).items()
         }
 
     def preview(self, path):
+        if self.http_only:
+            if not isinstance(path, str):
+                return None
+            result = printer_api(self.host, self.serial, self.check_code, "/gcodeThumb",
+                                 {"fileName": path}, limit=4 * ((MAX_PREVIEW + 2) // 3) + 4096)
+            encoded = result.get("imageData")
+            if not isinstance(encoded, str) or not encoded:
+                return None
+            try:
+                image = base64.b64decode(encoded, validate=True)
+            except ValueError:
+                return None
+            if len(image) <= MAX_PREVIEW and preview_type(image):
+                return image
+            return None
+        if not isinstance(path, bytes):
+            return None
         return read_preview(self.host, path)
+
+
+def preview_type(image):
+    if image and image.startswith(PNG_HEADER) and image.endswith(PNG_END):
+        return "image/png"
+    if image and image.startswith(b"\xff\xd8\xff") and image.endswith(b"\xff\xd9"):
+        return "image/jpeg"
+    return None
 
 
 class PrintHistory:
@@ -1472,6 +1673,10 @@ class PrinterMonitor:
                 self.latest = None
                 self.permission_denied = True
                 self.error = "Allow access to the printer, then reload the plugin."
+        except PrinterAPIError as error:
+            with self.state_lock:
+                self.latest = None
+                self.error = str(error)
         except (OSError, ValueError):
             with self.state_lock:
                 self.latest = None
@@ -1547,7 +1752,7 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
         self.poller = None
 
     def printers(self):
-        """Configured printers: address, CheckCode and a display name."""
+        """Configured printers and their plugin credentials."""
         config = self.get_config()
         result = []
         for entry in config.get("printers") or []:
@@ -1560,7 +1765,8 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
             if any(item["host"] == host for item in result):
                 continue
             result.append({"host": host, "code": str(entry.get("code") or ""),
-                           "name": str(entry.get("name") or host)[:60]})
+                           "name": str(entry.get("name") or host)[:60],
+                           "serial": str(entry.get("serial") or "").strip()})
         if not result:
             # Older releases kept a single address in the plugin config.
             try:
@@ -1569,7 +1775,7 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
                 host = ""
             if host:
                 result.append({"host": host, "code": config.get("check_code") or "",
-                               "name": "Printer"})
+                               "name": "Printer", "serial": config.get("serial_number") or ""})
         return result
 
     def settings_for(self):
@@ -1643,7 +1849,7 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
                             monitor = self.monitors.get(entry["host"])
                             if monitor is None:
                                 try:
-                                    adapter = FlashForge(entry["host"], entry["code"])
+                                    adapter = FlashForge(entry["host"], entry["code"], entry["serial"])
                                 except ValueError:
                                     continue
                                 monitor = PrinterMonitor(
@@ -1651,7 +1857,6 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
                                 monitor.endpoint = entry["host"]
                                 monitor.next_due = 0.0
                                 self.monitors[entry["host"]] = monitor
-                            monitor.adapter.check_code = entry["code"]
                             monitor.name = entry["name"]
                     for position, entry in enumerate(entries):
                         monitor = self.monitors.get(entry["host"])
@@ -1661,6 +1866,7 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
                         interval = POLL_INTERVAL if position == 0 or len(entries) <= 3 else IDLE_POLL_INTERVAL
                         monitor.next_due = mono + interval
                         with self.printer_io():
+                            monitor.adapter.configure(entry["code"], entry["serial"])
                             monitor.sample(now)
                         if self.notify is not None:
                             try:
@@ -1937,10 +2143,14 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 if entry is not None:
                     with self.server.printer_io():
                         image = monitor.adapter.preview(entry[1])
-                    self.reply(image or b"", "image/png", 200 if image else 404)
+                    media_type = preview_type(image)
+                    self.reply(image if media_type else b"", media_type or "image/png", 200 if media_type else 404)
                     return
         except UploadInProgress:
             self.reply_json({"error": "OrcaSlicer is sending a print job. Monitoring will resume when the transfer is complete."}, 503)
+            return
+        except PrinterAPIError as error:
+            self.reply_json({"error": str(error)}, 503)
             return
         except (OSError, ValueError, RuntimeError):
             self.reply_json({"error": "The printer did not respond or returned incomplete data"}, 503)
@@ -1984,7 +2194,7 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         return 'FlashForge Device Tab'
 
     def get_default_config(self):
-        return {"printers": [], "flashforge_host": "", "check_code": ""}
+        return {"printers": [], "flashforge_host": "", "check_code": "", "serial_number": ""}
 
     def has_config_ui(self):
         return True
@@ -2000,7 +2210,7 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         if not isinstance(config, dict):
             return self.get_default_config()
         result = {name: config[name].strip() if isinstance(config.get(name), str) else ""
-                  for name in ("flashforge_host", "check_code")}
+                  for name in ("flashforge_host", "check_code", "serial_number")}
         result["printers"] = config.get("printers") if isinstance(config.get("printers"), list) else []
         return result
 
@@ -2054,7 +2264,8 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             return
         host = printer_endpoint(print_host)
         self.save_config(json.dumps({"flashforge_host": host,
-                                     "check_code": config.get("check_code", "")},
+                                     "check_code": config.get("check_code", ""),
+                                     "serial_number": config.get("serial_number", "")},
                                     ensure_ascii=False))
 
     def on_unload(self):
@@ -2170,11 +2381,15 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                 continue
             clean.append({"host": host, "code": code,
                           "name": str(entry.get("name") or host)[:60]})
+            serial = printer_serial(entry.get("serial"))
+            if serial:
+                clean[-1]["serial"] = serial
         if not clean:
             raise ValueError("Add at least one printer address.")
         host, check_code = clean[0]["host"], clean[0]["code"]
         self.save_config(json.dumps({"printers": clean, "flashforge_host": host,
-                                     "check_code": check_code}, ensure_ascii=False))
+                                     "check_code": check_code,
+                                     "serial_number": clean[0].get("serial", "")}, ensure_ascii=False))
         self._point_device_tab(host)
         return host
 
@@ -2241,17 +2456,19 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         monitor = self._server.monitors.get(host)
         if monitor is None:
             raise ValueError("The printer is not connected yet.")
-        with monitor.state_lock:
-            data = monitor.latest
-        serial = ((data or {}).get("info") or {}).get("serial") or ""
-        if not serial:
-            raise ValueError("The printer did not report its serial number.")
-        control_job(host, serial, entry["code"], target)
         try:
             with self._server.printer_io():
+                with monitor.state_lock:
+                    data = monitor.latest
+                serial = ((data or {}).get("info") or {}).get("serial") or ""
+                if not serial:
+                    raise ValueError("The printer did not report its serial number.")
+                if monitor.adapter.http_only and serial != entry["serial"]:
+                    raise ValueError("Wait for the printer to reconnect with the new settings.")
+                control_job(host, serial, entry["code"], target)
                 monitor.sample(int(time.time()))
-        except (OSError, ValueError, RuntimeError):
-            pass
+        except UploadInProgress as error:
+            raise RuntimeError("OrcaSlicer is sending a print job. Try again when it finishes.") from error
         with monitor.state_lock:
             return (monitor.latest or {}).get("state", "")
 
