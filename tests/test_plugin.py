@@ -4,6 +4,7 @@ Run with:  python -m unittest discover -s tests -v
 The fixture printer speaks the same TCP and HTTP dialects as an Adventurer 5M,
 so the plugin is exercised end to end without a real machine.
 """
+import base64
 import json
 import socket
 import sys
@@ -15,6 +16,7 @@ from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -355,6 +357,16 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(data["remaining"], 3600)
         self.assertEqual(data["percent"], 6)
 
+    def test_adventurer_keeps_tcp_without_http_credentials(self):
+        adapter = plugin.FlashForge("127.0.0.1", "", "unused-configured-serial")
+        data = adapter.status(False)
+        self.assertEqual(data["info"]["serial"], "SN12345")
+        self.assertEqual(data["percent"], 6)
+        self.assertIsNone(data["remaining"])
+        file_paths = [path for _, path in adapter.files().values()]
+        self.assertIn(b"/user/Fixture.3mf", file_paths)
+        self.assertEqual(adapter.preview(b"/user/Fixture.3mf"), PNG)
+
     def test_page_served(self):
         status, body, headers = request(plugin.WEB_PORT, self.url(""))
         self.assertEqual(status, 200)
@@ -504,6 +516,171 @@ class ServerTests(unittest.TestCase):
         self.wait_for_status(200)
 
 
+class CreatorHTTPTests(unittest.TestCase):
+    def setUp(self):
+        self.detail = {
+            "status": "printing", "model": "Creator 5 Pro", "pid": "29",
+            "firmwareVersion": "1.9.2", "measure": "256X256X256", "nozzleCnt": 4,
+            "nozzleTemps": [210, 28, 29, 30], "nozzleTargetTemps": [220, 0, 0, 0],
+            "rightTemp": 99, "rightTargetTemp": 99, "platTemp": 57, "platTargetTemp": 60,
+            "chamberTemp": 39, "chamberTargetTemp": 45, "lightStatus": "open",
+            "doorStatus": "close", "cameraStreamUrl": "http://127.0.0.1:8080/?action=stream",
+            "printFileName": "Тест 5.3mf", "printProgress": 0.42, "printLayer": 5,
+            "targetPrintLayer": 20, "estimatedTime": 180.2, "printDuration": 60,
+            "coolingFanSpeed": 80, "printSpeedAdjust": 100,
+        }
+        self.calls = []
+        self.lan_only = True
+        self.bad_detail = False
+        fixture = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                fixture.calls.append((self.path, body))
+                if not fixture.lan_only:
+                    result = {"code": -2, "message": "Lan mode error"}
+                elif body["serialNumber"] != "SN-C5P":
+                    result = {"code": 1, "message": "SN is different"}
+                elif body["checkCode"] != "abc01234":
+                    result = {"code": 1, "message": "Access code is different"}
+                elif self.path == "/detail":
+                    result = {"code": 0, "detail": fixture.detail}
+                elif self.path == "/gcodeList":
+                    result = {"code": 0, "gcodeList": ["Тест 5.3mf", "", 5, "../unexpected.gcode"]}
+                elif self.path == "/gcodeThumb":
+                    image = base64.b64encode(PNG).decode("ascii") if body["fileName"] == "Тест 5.3mf" else "%%"
+                    result = {"code": 0, "imageData": image}
+                elif self.path == "/control":
+                    args = body["payload"]["args"]
+                    fixture.detail["status"] = {"pause": "pause", "continue": "printing",
+                                                "cancel": "canceling"}[args["action"]]
+                    result = {"code": 0}
+                else:
+                    self.send_error(404)
+                    return
+                raw = b"<invalid>" if fixture.bad_detail and self.path == "/detail" else json.dumps(result).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "appliation/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def log_message(self, *args):
+                pass
+
+        http = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.addCleanup(http.server_close)
+        threading.Thread(target=http.serve_forever, daemon=True).start()
+        self.addCleanup(http.shutdown)
+        tcp = socket.socket()
+        self.addCleanup(tcp.close)
+        tcp.bind(("127.0.0.1", 0))  # Reserve a port without accepting connections.
+        ports = patch.multiple(plugin, API_PORT=http.server_port, PORT=tcp.getsockname()[1])
+        ports.start()
+        self.addCleanup(ports.stop)
+        self.adapter = plugin.FlashForge("127.0.0.1", "abc01234", "SN-C5P")
+
+    def test_fallback_caches_http_and_decodes_creator_status(self):
+        with patch.object(plugin, "read_status", wraps=plugin.read_status) as tcp:
+            data = self.adapter.status(False)
+            self.detail["status"] = "pause"
+            paused = self.adapter.status(False)
+            tcp.assert_called_once()
+        self.assertEqual(data["info"]["model"], "Creator 5 Pro")
+        self.assertEqual(data["info"]["volume"], [256, 256, 256])
+        self.assertEqual(data["nozzle"], 210)
+        self.assertEqual(data["tools"][3], {"actual": 30, "target": 0})
+        self.assertEqual(data["chamber"], {"actual": 39, "target": 45})
+        self.assertEqual(data["sensors"]["door"], "close")
+        self.assertEqual(data["percent"], 42)
+        self.assertEqual((data["layer"], data["layerTotal"]), (5, 20))
+        self.assertEqual((data["remaining"], data["elapsed"]), (181, 60))
+        self.assertEqual(data["cameraUrl"], self.detail["cameraStreamUrl"])
+        self.assertEqual(paused["state"], "PAUSED")
+        self.assertTrue(paused["active"])
+
+    def test_missing_invalid_credentials_and_lan_mode(self):
+        self.adapter.configure("abc01234", "")
+        with self.assertRaisesRegex(plugin.PrinterAPIError, "set the serial number and CheckCode"):
+            self.adapter.status(False)
+        self.assertEqual(self.calls, [])
+        self.adapter.configure("abc01234", "wrong")
+        with self.assertRaisesRegex(plugin.PrinterAPIError, "Check the printer serial number"):
+            self.adapter.status(False)
+        self.adapter.configure("wrong", "SN-C5P")
+        with self.assertRaisesRegex(plugin.PrinterAPIError, "Check the CheckCode"):
+            self.adapter.status(False)
+        self.lan_only = False
+        with self.assertRaisesRegex(plugin.PrinterAPIError, "Enable LAN-only mode"):
+            self.adapter.status(False)
+        self.lan_only = True
+        self.adapter.configure("abc01234", "SN-C5P")
+        self.assertEqual(self.adapter.status(False)["state"], "PRINTING")
+
+    def test_invalid_detail_recovers_and_preview_rejects_invalid_data(self):
+        self.bad_detail = True
+        with self.assertRaisesRegex(plugin.PrinterAPIError, "invalid HTTP data"):
+            self.adapter.status(False)
+        self.bad_detail = False
+        self.detail.update({"status": "completed", "printProgress": 2, "nozzleTemps": None,
+                            "nozzleTargetTemps": None, "cameraStreamUrl": "http://192.168.1.8:8080/"})
+        data = self.adapter.status(False)
+        self.assertEqual((data["complete"], data["percent"]), (True, 100))
+        self.assertIsNone(data["nozzle"])
+        self.assertEqual(data["cameraUrl"], "")
+        self.assertIsNone(self.adapter.preview("absent.3mf"))
+
+    def test_http_timeout_recovers_on_next_sample(self):
+        self.adapter.status(False)
+        with patch.object(plugin, "read_http_status", side_effect=TimeoutError):
+            with self.assertRaises(TimeoutError):
+                self.adapter.status(False)
+        self.assertEqual(self.adapter.status(False)["state"], "PRINTING")
+
+    def test_status_files_preview_and_controls_through_device_server(self):
+        web_port = free_port()
+        with patch.multiple(plugin, WEB_PORT=web_port, POLL_INTERVAL=0.1), tempfile.TemporaryDirectory() as folder:
+            server = plugin.LoopbackServer(("127.0.0.1", web_port), plugin.MonitorHandler)
+            preset = {"host": "127.0.0.1", "code": "abc01234", "serial": "SN-C5P"}
+            server.configure(lambda: {"printers": [preset]}, Path(folder))
+            service = plugin.FlashForgeService()
+            service._server = server
+            server.act = service.act
+            worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+            worker.start()
+            try:
+                path = "/127.0.0.1/"
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    status, body, _ = request(web_port, path + "status")
+                    if status == 200:
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(status, 200, body)
+                self.assertEqual(json.loads(body)["file"], "Тест 5.3mf")
+                status, body, _ = request(web_port, path + "files")
+                self.assertEqual(status, 200, body)
+                file, = json.loads(body)["files"]
+                self.assertEqual(file["name"], "Тест 5.3mf")
+                status, body, headers = request(web_port, path + "preview/" + file["id"])
+                self.assertEqual((status, body, headers["Content-Type"]), (200, PNG, "image/png"))
+                for action, state in (("pause", "PAUSED"), ("resume", "PRINTING"), ("cancel", "CANCELING")):
+                    status, body, _ = request(
+                        web_port, path + "action", method="POST", body=json.dumps({"action": action}),
+                        headers={"Origin": f"http://127.0.0.1:{web_port}", "Content-Type": "application/json",
+                                 "X-FlashForge-Tab-Action": "action"})
+                    self.assertEqual(status, 200, body)
+                    self.assertEqual(json.loads(body)["state"], state)
+                controls = [body["payload"] for path, body in self.calls if path == "/control"]
+                self.assertEqual([payload["args"]["action"] for payload in controls], ["pause", "continue", "cancel"])
+                self.assertTrue(all(payload["cmd"] == "jobCtl_cmd" for payload in controls))
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join(timeout=2)
+
+
 class SwitchViewTests(unittest.TestCase):
     def setUp(self):
         self.saved = (plugin.PORT, plugin.API_PORT, plugin.WEB_PORT)
@@ -570,6 +747,17 @@ class SwitchViewTests(unittest.TestCase):
     def test_apply_settings_rejects_public_address(self):
         with self.assertRaises(ValueError):
             self.service.apply_settings([{"host": "1.1.1.1", "code": "code"}])
+
+    def test_apply_settings_preserves_creator_serial_and_older_entries(self):
+        saved = []
+        self.service.save_config = lambda value: saved.append(json.loads(value))
+        self.service.apply_settings([{"host": "127.0.0.1", "serial": " SN-C5P ", "code": "abc01234"},
+                                     {"host": "192.168.1.37"}])
+        self.assertEqual(saved[0]["serial_number"], "SN-C5P")
+        self.assertEqual(saved[0]["printers"][0]["serial"], "SN-C5P")
+        self.assertNotIn("serial", saved[0]["printers"][1])
+        with self.assertRaisesRegex(ValueError, "Enter a serial number"):
+            self.service.apply_settings([{"host": "127.0.0.1", "serial": "bad | serial"}])
 
     def test_apply_settings_rejects_bad_check_code(self):
         with self.assertRaises(ValueError):
