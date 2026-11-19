@@ -52,8 +52,8 @@ switches back to the plugin panel.
 Press **Settings** in the panel header. One printer per line:
 
 ```
-192.168.1.37 | 1a2b3c4d | Adventurer 5M
-192.168.1.10 | 1a2b3c4d | Creator 5 Pro | YOUR-SERIAL-NUMBER
+192.168.1.50 | 1a2b3c4d | Adventurer 5M
+192.168.1.51 | 2b3c4d5e | Creator 5 Pro | YOUR-SERIAL-NUMBER
 ```
 
 `address | CheckCode | name | serial number`. The name is optional and falls

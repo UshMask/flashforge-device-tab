@@ -217,7 +217,7 @@ dialog.settings .caption { margin-top: 2px; }
       <ol>
         <li>This page is shown by the plugin inside OrcaSlicer: Device tab → <b>Speed Dial</b> → <b>FlashForge Device Tab</b>.</li>
         <li>Press <b>Settings</b> in the panel header.</li>
-        <li>Add one line per printer: <code>192.168.1.37 | 1a2b3c4d | Adventurer 5M</code> —
+        <li>Add one line per printer: <code>192.168.1.50 | 1a2b3c4d | Adventurer 5M</code> —
             address | CheckCode | name. The CheckCode is in the printer's network settings.</li>
         <li>Save and wait a few seconds: temperatures and progress appear here.</li>
       </ol>
@@ -345,7 +345,7 @@ dialog.settings .caption { margin-top: 2px; }
   <form id="settingsForm">
     <h2 id="settingsTitle">Printers</h2>
     <label for="printersText">One printer per line: address | CheckCode | name | serial number</label>
-    <textarea id="printersText" rows="5" spellcheck="false" placeholder="192.168.1.37 | 1a2b3c4d | Adventurer 5M"></textarea>
+    <textarea id="printersText" rows="5" spellcheck="false" placeholder="192.168.1.50 | 1a2b3c4d | Adventurer 5M"></textarea>
     <p class="caption">Creator 5 and 5 Pro require both CheckCode and the printer serial number.
       Adventurer 5M reads its serial number automatically.</p>
     <p class="caption" id="settingsStatus" role="status"></p>
