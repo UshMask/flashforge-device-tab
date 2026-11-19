@@ -1,5 +1,17 @@
 ﻿# Changelog
 
+## 1.7.1
+
+### Fixed
+
+- The Device tab opens the plugin panel automatically for configured FlashForge
+  profiles after restarting OrcaSlicer or selecting a profile. The page choice is
+  kept in plugin storage, so an unsaved printer preset cannot reset it.
+- Choosing **Printer Web Interface** is remembered for that profile and address.
+  The original native URL remains available when switching back.
+- Page restoration runs on a background worker instead of blocking lifecycle
+  callbacks on OrcaSlicer's UI thread.
+
 ## 1.7.0
 
 Monitoring grows up, and the panel can now stop a job.

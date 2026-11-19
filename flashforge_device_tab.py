@@ -4,7 +4,7 @@
 # name = "FlashForge Device Tab"
 # description = "FlashForge printer panel inside OrcaSlicer's Device tab: monitoring, files, camera, pause and cancel."
 # author = "Max"
-# version = "1.7.0"
+# version = "1.7.1"
 # ///
 import base64
 import hashlib
@@ -2219,8 +2219,10 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         # errors in plugin diagnostics instead of losing them in a worker.
         storage = Path(orca.host.plugin.storage())
         self._page_store = storage / "device-pages.json"
+        self._view_store = storage / "device-views.json"
         self._switch_lock = threading.Lock()
         self._stopping = threading.Event()
+        self._view_refresh = threading.Event()
         server = LoopbackServer((WEB_HOST, WEB_PORT), MonitorHandler)
         worker = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': 0.2},
                                   name='FlashForge Device Tab HTTP', daemon=True)
@@ -2250,6 +2252,58 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             self.adopt_profile_address()
         except Exception:
             pass
+        # Preset transactions block while Orca dispatches to the UI. Never run
+        # them inside on_load or a lifecycle callback, which may own that UI.
+        self._view_worker = threading.Thread(target=self._restore_views,
+                                            name='FlashForge Device page', daemon=True)
+        self._view_worker.start()
+        self._view_refresh.set()
+
+    def _restore_views(self):
+        while True:
+            self._view_refresh.wait()
+            self._view_refresh.clear()
+            if self._stopping.is_set():
+                return
+            for _ in range(10):
+                try:
+                    self.restore_selected_view()
+                    break
+                except (OSError, RuntimeError, ValueError):
+                    # Startup and rapid preset changes can briefly invalidate
+                    # the target. Retry with a fresh snapshot, off the UI thread.
+                    if self._stopping.wait(0.1):
+                        return
+
+    def saved_views(self):
+        try:
+            views = json.loads(self._view_store.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(views, dict):
+            return {}
+        return {name: view for name, view in views.items()
+                if isinstance(view, dict) and isinstance(view.get("host"), str)
+                and isinstance(view.get("monitor"), bool)}
+
+    def restore_selected_view(self):
+        server = self._server
+        if server is None or self._stopping.is_set():
+            return
+        preset = orca.host.preset_bundle().current_printer_preset()
+        if preset.config_value("host_type") != "flashforge":
+            return
+        endpoint = printer_endpoint(preset.config_value("print_host") or "")
+        if not any(item["host"] == endpoint for item in server.printers()):
+            return
+        choice = self.saved_views().get(preset.name, {})
+        show_monitor = choice.get("monitor", True) if choice.get("host") == endpoint else True
+        current_url = preset.config_value(DEVICE_UI_KEY) or ""
+        if (show_monitor and current_url == monitor_url(endpoint)
+                or not show_monitor and monitor_identity(current_url) is None):
+            return
+        expected = (preset.name, endpoint, current_url)
+        self.switch_view(show_monitor=show_monitor, remember=False, expected_profile=expected)
 
     def adopt_profile_address(self):
         """First run after an upgrade: take the address from the active profile."""
@@ -2269,12 +2323,15 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                                     ensure_ascii=False))
 
     def on_unload(self):
+        self._stopping.set()
+        self._view_refresh.set()
+        # Do not join the page worker here: it may be waiting for the UI thread
+        # that is unloading us. It checks _stopping before committing a change.
         for alias in getattr(self, "_aliases", []):
             alias.shutdown()
             alias.server_close()
         self._aliases = []
         if self._server is not None:
-            self._stopping.set()
             self._server.shutdown()
             self._server.server_close()
             self._server = None
@@ -2287,6 +2344,9 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             server.begin_upload()
         elif event == orca.LifecycleEvent.UploadFinished:
             server.uploading.clear()
+        elif event in (orca.LifecycleEvent.PresetSelected, orca.LifecycleEvent.ProjectOpened,
+                       orca.LifecycleEvent.NewProject):
+            self._view_refresh.set()
 
     def check_view(self, endpoint):
         preset = orca.host.preset_bundle().current_printer_preset()
@@ -2308,7 +2368,7 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             raise ValueError("Could not read the saved printer web interface URLs.")
         return pages
 
-    def switch_view(self, restore_view=None):
+    def switch_view(self, restore_view=None, *, show_monitor=None, remember=True, expected_profile=None):
         if not self._switch_lock.acquire(blocking=False):
             raise ValueError("A page switch is already in progress.")
         try:
@@ -2323,35 +2383,43 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                 raise ValueError("Select a printer profile that uses the FlashForge host.")
             current_url = preset.config_value(DEVICE_UI_KEY) or ""
             print_host = preset.config_value("print_host") or ""
+            endpoint = printer_endpoint(print_host)
+            if expected_profile is not None and expected_profile != (preset.name, endpoint, current_url):
+                raise ValueError("The active printer profile changed. Try again.")
             current_view = monitor_identity(current_url)
             if restore_view is not None and restore_view != current_view:
                 raise ValueError("This monitor page is not open for the current OrcaSlicer profile.")
-            if current_view:
+            if show_monitor is None:
+                show_monitor = current_view is None
+            if (show_monitor and current_url == monitor_url(endpoint)
+                    or not show_monitor and current_view is None):
+                return "The selected Device page is already open."
+            if not show_monitor:
                 # A damaged cache or an older URL can always fall back to Orca's profile.
                 fallback = presets.selected_preset().config_value(DEVICE_UI_KEY) or ""
-                if monitor_identity(fallback):
+                if monitor_identity(fallback) is not None:
                     fallback = ""
                 try:
                     pages = self.saved_pages()
                 except (OSError, ValueError):
                     pages = {}
                 target = pages.get(preset.name, fallback)
-                if monitor_identity(target):
+                if monitor_identity(target) is not None:
                     target = fallback
                 message = "Opened the printer web interface."
             else:
-                endpoint = printer_endpoint(print_host)
-                host, check_code = self._server.settings_for()
-                if not host or endpoint != printer_endpoint(host):
+                entry = next((item for item in self._server.printers() if item["host"] == endpoint), None)
+                if entry is None:
                     raise ValueError("The printer address in the plugin settings does not match the active profile.")
-                FlashForge(host, check_code)
+                FlashForge(endpoint, entry.get("code", ""))
                 try:
                     pages = self.saved_pages()
                 except ValueError:
                     archived = self._page_store.with_suffix(f".invalid-{time.time_ns()}.json")
                     self._page_store.rename(archived)
                     pages = {}
-                pages[preset.name] = current_url
+                if current_view is None:
+                    pages[preset.name] = current_url
                 pending = self._page_store.with_suffix(".tmp")
                 pending.write_text(json.dumps(pages, ensure_ascii=False), encoding="utf-8")
                 os.replace(pending, self._page_store)
@@ -2362,6 +2430,12 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                 raise ValueError("FlashForge Device Tab is shutting down.")
             transaction.set(DEVICE_UI_KEY, target)
             transaction.commit()
+            if remember:
+                views = self.saved_views()
+                views[preset.name] = {"host": endpoint, "monitor": show_monitor}
+                pending = self._view_store.with_suffix(".tmp")
+                pending.write_text(json.dumps(views, ensure_ascii=False), encoding="utf-8")
+                os.replace(pending, self._view_store)
             return message
         finally:
             self._switch_lock.release()
@@ -2391,6 +2465,7 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                                      "check_code": check_code,
                                      "serial_number": clean[0].get("serial", "")}, ensure_ascii=False))
         self._point_device_tab(host)
+        self._view_refresh.set()
         return host
 
     def _point_device_tab(self, host):
