@@ -26,7 +26,9 @@ orca = SimpleNamespace(
     plugin=lambda cls: cls,
     script=SimpleNamespace(ScriptPluginCapabilityBase=object),
     host=SimpleNamespace(),
-    LifecycleEvent=SimpleNamespace(UploadStarted="upload-started", UploadFinished="upload-finished"),
+    LifecycleEvent=SimpleNamespace(UploadStarted="upload-started", UploadFinished="upload-finished",
+                                   PresetSelected="preset-selected", ProjectOpened="project-opened",
+                                   NewProject="new-project"),
     ExecutionResult=SimpleNamespace(success=lambda message: ("ok", message),
                                     failure=lambda kind, message: ("error", message)),
     PluginResult=SimpleNamespace(RecoverableError="recoverable"),
@@ -706,8 +708,10 @@ class SwitchViewTests(unittest.TestCase):
         self.service = plugin.FlashForgeService()
         self.service.get_config = lambda: json.dumps({"flashforge_host": "127.0.0.1", "check_code": "code"})
         self.service._page_store = Path(self.folder.name) / "device-pages.json"
+        self.service._view_store = Path(self.folder.name) / "device-views.json"
         self.service._switch_lock = threading.Lock()
         self.service._stopping = threading.Event()
+        self.service._view_refresh = threading.Event()
         self.service._server = SimpleNamespace(
             settings_for=lambda: ("127.0.0.1", "code"),
             printers=lambda: [{"host": "127.0.0.1", "code": "code", "name": "Adventurer 5M"}],
@@ -728,6 +732,141 @@ class SwitchViewTests(unittest.TestCase):
         message = self.service.switch_view(restore_view="127.0.0.1")
         self.assertIn("printer web interface", message)
         self.assertEqual(self.preset.values["print_host_webui"], "")
+
+    def restart_service(self):
+        # Orca discards the edited profile on exit: only plugin storage survives.
+        previous = self.service
+        self.service = plugin.FlashForgeService()
+        for key in ("_page_store", "_view_store", "_server"):
+            setattr(self.service, key, getattr(previous, key))
+        self.service._switch_lock = threading.Lock()
+        self.service._stopping = threading.Event()
+        self.service._view_refresh = threading.Event()
+        self.transaction.values.clear()
+
+    def test_panel_restored_after_unsaved_profile_is_discarded_and_service_restarts(self):
+        self.preset.values["print_host_webui"] = "http://127.0.0.1:8080/"
+        self.service.switch_view()
+        self.preset.values["print_host_webui"] = "http://127.0.0.1:8080/"
+        self.restart_service()
+        self.service.restore_selected_view()
+        self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("127.0.0.1"))
+        self.service.restore_page("127.0.0.1")
+        self.assertEqual(self.preset.values["print_host_webui"], "http://127.0.0.1:8080/")
+
+    def test_native_choice_survives_restart_even_when_saved_profile_has_panel(self):
+        self.service.switch_view()
+        self.service.restore_page("127.0.0.1")
+        self.preset.values["print_host_webui"] = plugin.monitor_url("127.0.0.1")
+        self.restart_service()
+        self.service.restore_selected_view()
+        self.assertEqual(self.preset.values["print_host_webui"], "")
+        self.assertFalse(self.service.saved_views()[self.preset.name]["monitor"])
+
+    def test_configured_profile_defaults_to_panel_without_prior_choice(self):
+        self.service.restore_selected_view()
+        self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("127.0.0.1"))
+        self.assertFalse(self.service._view_store.exists())
+        with patch.object(self.transaction, "commit") as commit:
+            self.service.restore_selected_view()
+        commit.assert_not_called()
+
+    def test_restore_ignores_unconfigured_or_foreign_printers(self):
+        for changes in ({"host_type": "prusalink"},
+                        {"host_type": "flashforge", "print_host": "192.168.3.9"}):
+            self.preset.values.update(changes)
+            self.service.restore_selected_view()
+            self.assertEqual(self.preset.values["print_host_webui"], "")
+        self.assertEqual(self.transaction.values, {})
+
+    def test_restore_supports_second_configured_printer(self):
+        self.service._server.printers = lambda: [{"host": "192.168.3.37", "code": "first"},
+                                                  {"host": "127.0.0.1", "code": "code"}]
+        self.service.restore_selected_view()
+        self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("127.0.0.1"))
+
+    def test_native_preference_is_scoped_to_profile_and_address(self):
+        self.service.switch_view()
+        self.service.restore_page("127.0.0.1")
+        self.preset.name = "Creator 5 Pro"
+        self.transaction.target_name = self.preset.name
+        self.service.restore_selected_view()
+        self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("127.0.0.1"))
+        self.preset.name = "Adventurer 5M"
+        self.transaction.target_name = self.preset.name
+        self.preset.values.update(print_host="192.168.3.37", print_host_webui="")
+        self.service._server.printers = lambda: [{"host": "192.168.3.37", "code": "code"}]
+        self.service.restore_selected_view()
+        self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("192.168.3.37"))
+
+    def test_profile_change_between_read_and_transaction_does_not_write(self):
+        def begin_update():
+            self.preset.values["print_host"] = "192.168.3.9"
+            return self.transaction
+        orca.host.preset.printer.begin_update = begin_update
+        with self.assertRaisesRegex(ValueError, "profile changed"):
+            self.service.restore_selected_view()
+        self.assertEqual(self.transaction.values, {})
+        self.assertFalse(self.service._page_store.exists())
+
+    def test_failed_commit_does_not_remember_choice(self):
+        with patch.object(self.transaction, "commit", side_effect=RuntimeError("stale")):
+            with self.assertRaises(RuntimeError):
+                self.service.switch_view()
+        self.assertFalse(self.service._view_store.exists())
+
+    def test_root_panel_url_does_not_replace_saved_native_url(self):
+        self.service.switch_view()
+        self.preset.values["print_host_webui"] = plugin.monitor_url()
+        self.service.restore_selected_view()
+        self.assertEqual(json.loads(self.service._page_store.read_text()), {"Adventurer 5M": ""})
+        self.service.restore_page("127.0.0.1")
+        self.assertEqual(self.preset.values["print_host_webui"], "")
+
+    def test_startup_worker_and_preset_events_restore_page_without_manual_execution(self):
+        self.service._server = None
+        self.service.save_config = lambda value: None
+        self.service.on_load()
+        try:
+            for event in (None, orca.LifecycleEvent.PresetSelected, orca.LifecycleEvent.ProjectOpened):
+                if event is not None:
+                    self.preset.values["print_host_webui"] = ""
+                    self.service.on_lifecycle_event(event, SimpleNamespace())
+                deadline = time.monotonic() + 3
+                while (self.preset.values["print_host_webui"] != plugin.monitor_url("127.0.0.1")
+                       and time.monotonic() < deadline):
+                    time.sleep(0.01)
+                self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("127.0.0.1"))
+        finally:
+            self.service.on_unload()
+            self.service._view_worker.join(timeout=2)
+        self.assertFalse(self.service._view_worker.is_alive())
+
+    def test_startup_worker_retries_until_profile_becomes_available(self):
+        self.service._server = None
+        self.service.save_config = lambda value: None
+        original = orca.host.preset_bundle
+        calls = []
+
+        def bundle():
+            calls.append(True)
+            if len(calls) == 1:
+                raise RuntimeError("Preset bundle is not available")
+            return original()
+
+        with patch.object(orca.host, "preset_bundle", side_effect=bundle):
+            self.service.on_load()
+            try:
+                deadline = time.monotonic() + 3
+                while (self.preset.values["print_host_webui"] != plugin.monitor_url("127.0.0.1")
+                       and time.monotonic() < deadline):
+                    time.sleep(0.01)
+                self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("127.0.0.1"))
+                self.assertGreater(len(calls), 1)
+            finally:
+                self.service.on_unload()
+                self.service._view_worker.join(timeout=2)
+        self.assertFalse(self.service._view_worker.is_alive())
 
     def test_apply_settings_updates_profile(self):
         self.saved_config = []
