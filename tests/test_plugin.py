@@ -586,5 +586,98 @@ class SwitchViewTests(unittest.TestCase):
             self.service.switch_view(restore_view="10.0.0.9")
 
 
+class ControlTests(unittest.TestCase):
+    """The /control request shape documented for the 5M series."""
+
+    def setUp(self):
+        self.saved = (plugin.API_PORT,)
+        plugin.API_PORT = free_port()
+        self.requests = []
+        self.reply = {"code": 0, "message": "Success"}
+        self.status = 200
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                outer.requests.append(json.loads(self.rfile.read(length) or b"{}"))
+                body = json.dumps(outer.reply).encode()
+                self.send_response(outer.status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        self.server = ThreadingHTTPServer((plugin.WEB_HOST, plugin.API_PORT), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        plugin.API_PORT = self.saved[0]
+
+    def test_pause_uses_job_control(self):
+        plugin.control_job("127.0.0.1", "SN123", "code", "pause")
+        self.assertEqual(len(self.requests), 1)
+        body = self.requests[0]
+        self.assertEqual(body["serialNumber"], "SN123")
+        self.assertEqual(body["checkCode"], "code")
+        self.assertEqual(body["payload"]["cmd"], "jobCtl_cmd")
+        self.assertEqual(body["payload"]["args"]["action"], "pause")
+        self.assertEqual(body["payload"]["args"]["jobID"], "")
+
+    def test_resume_maps_to_continue(self):
+        plugin.control_job("127.0.0.1", "SN123", "code", "continue")
+        self.assertEqual(self.requests[0]["payload"]["args"]["action"], "continue")
+
+    def test_printer_error_is_reported(self):
+        self.reply = {"code": -3, "message": "Printer is busy"}
+        with self.assertRaises(ValueError) as raised:
+            plugin.control_job("127.0.0.1", "SN123", "code", "cancel")
+        self.assertIn("busy", str(raised.exception))
+
+    def test_http_error_is_reported(self):
+        self.status = 500
+        with self.assertRaises(ValueError):
+            plugin.control_job("127.0.0.1", "SN123", "code", "pause")
+
+
+class NotifyTests(unittest.TestCase):
+    def setUp(self):
+        self.sent = []
+        levels = SimpleNamespace(RegularNotificationLevel="regular",
+                                 WarningNotificationLevel="warning")
+        self.saved_host = getattr(orca, "host", None)
+        orca.host = SimpleNamespace(ui=SimpleNamespace(
+            NotificationLevel=levels,
+            push_notification=lambda level, text: self.sent.append((level, text))))
+        self.service = plugin.FlashForgeService()
+
+    def tearDown(self):
+        orca.host = self.saved_host
+
+    def monitor(self, state, file="bench.3mf", name="Adventurer"):
+        return SimpleNamespace(state_lock=threading.Lock(),
+                               latest={"state": state, "file": file}, name=name)
+
+    def test_finished_print_notifies_once(self):
+        monitor = self.monitor("COMPLETED")
+        self.service.notify(monitor)
+        self.service.notify(monitor)
+        self.assertEqual(self.sent, [("regular", "Adventurer: Print finished — bench.3mf")])
+
+    def test_error_uses_warning_level(self):
+        self.service.notify(self.monitor("ERROR", file=""))
+        self.assertEqual(self.sent, [("warning", "Adventurer: Printer error")])
+
+    def test_running_state_is_silent(self):
+        self.service.notify(self.monitor("PRINTING"))
+        self.assertEqual(self.sent, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
