@@ -144,7 +144,13 @@ class FakePrinter:
         if command == "M119":
             return (f"MachineStatus: {self.state}\r\nCurrentFile: /user/Fixture.3mf\r\nok\r\n").encode()
         if command == "M115":
-            return b"SN: SN12345\r\nok\r\n"
+            return (b"Machine Type: Flashforge Adventurer 5M\r\n"
+                    b"Machine Name: SN12345\r\n"
+                    b"Firmware: v0.0.0-demo\r\n"
+                    b"SN: SN12345\r\n"
+                    b"X: 220 Y: 220 Z: 220\r\n"
+                    b"Tool Count: 1\r\n"
+                    b"Mac Address:00:11:22:33:44:55\r\nok\r\n")
         if command == "M661":
             return b"ok\r\n" + file_list(*self.files)
         if command.startswith("M662 "):
