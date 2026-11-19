@@ -35,10 +35,17 @@ restarts — plus pause, resume and cancel when a job needs you.
 2. In OrcaSlicer open **Plugins → Install from file** and pick the file.
 3. Enable **FlashForge Device Tab**.
 4. Make sure the printer profile uses the **FlashForge** host type.
-5. Open **Device tab → Speed Dial → FlashForge Device Tab**.
+5. Open the **Device tab**. The plugin panel opens automatically for a configured
+   FlashForge printer. For initial setup, use **Speed Dial → FlashForge Device Tab**.
 
 OrcaSlicer 2.5.0 or newer, Windows x64. The plugin needs no extra software: no
 Node, no Docker, no Raspberry Pi, no second application.
+
+The selected Device page is remembered per printer profile and address. The plugin
+restores it after restarting OrcaSlicer or selecting that profile, even if you did
+not save the edited printer preset. **Printer Web Interface** switches back to the
+native page and remembers that choice; **Speed Dial → FlashForge Device Tab**
+switches back to the plugin panel.
 
 ## Settings
 
