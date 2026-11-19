@@ -4,7 +4,7 @@
 # name = "FlashForge Device Tab"
 # description = "FlashForge printer panel inside OrcaSlicer's Device tab: monitoring, files, camera, pause and cancel."
 # author = "Max"
-# version = "1.7.1"
+# version = "1.7.2"
 # ///
 import base64
 import hashlib

@@ -1,5 +1,17 @@
 ﻿# Changelog
 
+## 1.7.2
+
+Privacy scrub of the published material.
+
+- The in-app setup example and the README no longer show a real printer address
+  or CheckCode; they use `192.168.1.50 | 1a2b3c4d`.
+- The README screenshot is a synthetic demo capture, not a photo of a real
+  printer session.
+
+This release also brings the Creator 5 / 5 Pro support and the remembered
+Device page from 1.7.1 to the catalogue.
+
 ## 1.7.1
 
 ### Fixed
