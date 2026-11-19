@@ -22,8 +22,8 @@ restarts — plus pause, resume and cancel when a job needs you.
   its full panel.
 - **Pause, resume, cancel** — from the panel header. Cancel asks for a second
   click; nothing is sent until you confirm.
-- **Printer card** — model, firmware, serial number, MAC, build volume and light,
-  read from the printer itself (`M115`/`M119`).
+- **Printer card** — model, firmware, serial number, MAC, build volume and light
+  when available.
 - **Totals** — jobs, print time and success rate from the local history.
 - **Save snapshot** — one camera frame, saved by the browser.
 - **Host notifications** — “Print finished”, “Print cancelled”, “Printer error”
@@ -35,10 +35,17 @@ restarts — plus pause, resume and cancel when a job needs you.
 2. In OrcaSlicer open **Plugins → Install from file** and pick the file.
 3. Enable **FlashForge Device Tab**.
 4. Make sure the printer profile uses the **FlashForge** host type.
-5. Open **Device tab → Speed Dial → FlashForge Device Tab**.
+5. Open the **Device tab**. The plugin panel opens automatically for a configured
+   FlashForge printer. For initial setup, use **Speed Dial → FlashForge Device Tab**.
 
 OrcaSlicer 2.5.0 or newer, Windows x64. The plugin needs no extra software: no
 Node, no Docker, no Raspberry Pi, no second application.
+
+The selected Device page is remembered per printer profile and address. The plugin
+restores it after restarting OrcaSlicer or selecting that profile, even if you did
+not save the edited printer preset. **Printer Web Interface** switches back to the
+native page and remembers that choice; **Speed Dial → FlashForge Device Tab**
+switches back to the plugin panel.
 
 ## Settings
 
@@ -46,21 +53,35 @@ Press **Settings** in the panel header. One printer per line:
 
 ```
 192.168.1.37 | 1a2b3c4d | Adventurer 5M
-192.168.1.10 | 1a2b3c4d | Adventurer 5M #2
+192.168.1.10 | 1a2b3c4d | Creator 5 Pro | YOUR-SERIAL-NUMBER
 ```
 
-`address | CheckCode | name`. The name is optional and falls back to the address.
-The CheckCode is the one in the printer's own network settings; without it the
-panel cannot show the remaining time, filament estimate or camera address — the
-rest still works.
+`address | CheckCode | name | serial number`. The name is optional and falls
+back to the address. Use the CheckCode from the printer's network settings.
+
+- **Adventurer 5M / 5M Pro** reads the serial number over TCP. Basic monitoring
+  and the file catalog work without a CheckCode. Extra telemetry and job
+  controls use the CheckCode.
+- **Creator 5 / 5 Pro** requires the serial number and CheckCode. Enable LAN-only
+  mode on stock firmware. The Device tab can read print status, temperatures,
+  available progress and time fields, file names and thumbnails. It also uses
+  the reported MJPEG camera URL and the existing pause, resume and cancel
+  controls. Creator support has been tested with a simulated printer.
+
+Creator stock firmware returns a list of file names and serves thumbnails
+separately. It does not report the active tool, TCP endstops, or per-file material
+and time estimates. The temperature chart uses T1 and the bed. The readings
+panel also shows T2–T4 and the Pro chamber temperature when available. The
+plugin does not upload files, start prints or change material mappings.
 
 ## How it works
 
 OrcaSlicer shows a plugin page in the Device tab when the printer profile's
 `print_host_webui` points at it. The plugin runs a loopback HTTP server on
-`127.0.0.1:18771`, speaks the FlashForge TCP protocol on port 8899 and the
-printer's HTTP API on 8898, and renders a single HTML page. Everything is one
-Python file that ships its own HTML, CSS and JavaScript.
+`127.0.0.1:18771` and renders a single HTML page. It tries FlashForge TCP on
+port 8899 first. When that fails and the serial number and CheckCode are set,
+it checks the HTTP API on port 8898 and keeps using it after a successful
+status read. Creator cameras use a separate MJPEG stream on port 8080.
 
 ## Security
 
@@ -81,9 +102,9 @@ Python file that ships its own HTML, CSS and JavaScript.
 python -m unittest discover -s tests
 ```
 
-The tests start a fake FlashForge printer (TCP 8899 + HTTP 8898) and exercise the
-protocol client, the history file, the loopback server's guards, the settings
-endpoint and the page bridge.
+The tests use an Adventurer fixture with both transports and a Creator fixture
+with HTTP only. They exercise status, files, thumbnails, job controls, LAN mode
+and credential errors, history, settings and the Device page bridge.
 
 ## Releasing
 

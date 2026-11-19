@@ -4,6 +4,7 @@ Run with:  python -m unittest discover -s tests -v
 The fixture printer speaks the same TCP and HTTP dialects as an Adventurer 5M,
 so the plugin is exercised end to end without a real machine.
 """
+import base64
 import json
 import socket
 import sys
@@ -15,6 +16,7 @@ from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -24,7 +26,9 @@ orca = SimpleNamespace(
     plugin=lambda cls: cls,
     script=SimpleNamespace(ScriptPluginCapabilityBase=object),
     host=SimpleNamespace(),
-    LifecycleEvent=SimpleNamespace(UploadStarted="upload-started", UploadFinished="upload-finished"),
+    LifecycleEvent=SimpleNamespace(UploadStarted="upload-started", UploadFinished="upload-finished",
+                                   PresetSelected="preset-selected", ProjectOpened="project-opened",
+                                   NewProject="new-project"),
     ExecutionResult=SimpleNamespace(success=lambda message: ("ok", message),
                                     failure=lambda kind, message: ("error", message)),
     PluginResult=SimpleNamespace(RecoverableError="recoverable"),
@@ -355,6 +359,16 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(data["remaining"], 3600)
         self.assertEqual(data["percent"], 6)
 
+    def test_adventurer_keeps_tcp_without_http_credentials(self):
+        adapter = plugin.FlashForge("127.0.0.1", "", "unused-configured-serial")
+        data = adapter.status(False)
+        self.assertEqual(data["info"]["serial"], "SN12345")
+        self.assertEqual(data["percent"], 6)
+        self.assertIsNone(data["remaining"])
+        file_paths = [path for _, path in adapter.files().values()]
+        self.assertIn(b"/user/Fixture.3mf", file_paths)
+        self.assertEqual(adapter.preview(b"/user/Fixture.3mf"), PNG)
+
     def test_page_served(self):
         status, body, headers = request(plugin.WEB_PORT, self.url(""))
         self.assertEqual(status, 200)
@@ -504,6 +518,171 @@ class ServerTests(unittest.TestCase):
         self.wait_for_status(200)
 
 
+class CreatorHTTPTests(unittest.TestCase):
+    def setUp(self):
+        self.detail = {
+            "status": "printing", "model": "Creator 5 Pro", "pid": "29",
+            "firmwareVersion": "1.9.2", "measure": "256X256X256", "nozzleCnt": 4,
+            "nozzleTemps": [210, 28, 29, 30], "nozzleTargetTemps": [220, 0, 0, 0],
+            "rightTemp": 99, "rightTargetTemp": 99, "platTemp": 57, "platTargetTemp": 60,
+            "chamberTemp": 39, "chamberTargetTemp": 45, "lightStatus": "open",
+            "doorStatus": "close", "cameraStreamUrl": "http://127.0.0.1:8080/?action=stream",
+            "printFileName": "Тест 5.3mf", "printProgress": 0.42, "printLayer": 5,
+            "targetPrintLayer": 20, "estimatedTime": 180.2, "printDuration": 60,
+            "coolingFanSpeed": 80, "printSpeedAdjust": 100,
+        }
+        self.calls = []
+        self.lan_only = True
+        self.bad_detail = False
+        fixture = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                fixture.calls.append((self.path, body))
+                if not fixture.lan_only:
+                    result = {"code": -2, "message": "Lan mode error"}
+                elif body["serialNumber"] != "SN-C5P":
+                    result = {"code": 1, "message": "SN is different"}
+                elif body["checkCode"] != "abc01234":
+                    result = {"code": 1, "message": "Access code is different"}
+                elif self.path == "/detail":
+                    result = {"code": 0, "detail": fixture.detail}
+                elif self.path == "/gcodeList":
+                    result = {"code": 0, "gcodeList": ["Тест 5.3mf", "", 5, "../unexpected.gcode"]}
+                elif self.path == "/gcodeThumb":
+                    image = base64.b64encode(PNG).decode("ascii") if body["fileName"] == "Тест 5.3mf" else "%%"
+                    result = {"code": 0, "imageData": image}
+                elif self.path == "/control":
+                    args = body["payload"]["args"]
+                    fixture.detail["status"] = {"pause": "pause", "continue": "printing",
+                                                "cancel": "canceling"}[args["action"]]
+                    result = {"code": 0}
+                else:
+                    self.send_error(404)
+                    return
+                raw = b"<invalid>" if fixture.bad_detail and self.path == "/detail" else json.dumps(result).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "appliation/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def log_message(self, *args):
+                pass
+
+        http = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.addCleanup(http.server_close)
+        threading.Thread(target=http.serve_forever, daemon=True).start()
+        self.addCleanup(http.shutdown)
+        tcp = socket.socket()
+        self.addCleanup(tcp.close)
+        tcp.bind(("127.0.0.1", 0))  # Reserve a port without accepting connections.
+        ports = patch.multiple(plugin, API_PORT=http.server_port, PORT=tcp.getsockname()[1])
+        ports.start()
+        self.addCleanup(ports.stop)
+        self.adapter = plugin.FlashForge("127.0.0.1", "abc01234", "SN-C5P")
+
+    def test_fallback_caches_http_and_decodes_creator_status(self):
+        with patch.object(plugin, "read_status", wraps=plugin.read_status) as tcp:
+            data = self.adapter.status(False)
+            self.detail["status"] = "pause"
+            paused = self.adapter.status(False)
+            tcp.assert_called_once()
+        self.assertEqual(data["info"]["model"], "Creator 5 Pro")
+        self.assertEqual(data["info"]["volume"], [256, 256, 256])
+        self.assertEqual(data["nozzle"], 210)
+        self.assertEqual(data["tools"][3], {"actual": 30, "target": 0})
+        self.assertEqual(data["chamber"], {"actual": 39, "target": 45})
+        self.assertEqual(data["sensors"]["door"], "close")
+        self.assertEqual(data["percent"], 42)
+        self.assertEqual((data["layer"], data["layerTotal"]), (5, 20))
+        self.assertEqual((data["remaining"], data["elapsed"]), (181, 60))
+        self.assertEqual(data["cameraUrl"], self.detail["cameraStreamUrl"])
+        self.assertEqual(paused["state"], "PAUSED")
+        self.assertTrue(paused["active"])
+
+    def test_missing_invalid_credentials_and_lan_mode(self):
+        self.adapter.configure("abc01234", "")
+        with self.assertRaisesRegex(plugin.PrinterAPIError, "set the serial number and CheckCode"):
+            self.adapter.status(False)
+        self.assertEqual(self.calls, [])
+        self.adapter.configure("abc01234", "wrong")
+        with self.assertRaisesRegex(plugin.PrinterAPIError, "Check the printer serial number"):
+            self.adapter.status(False)
+        self.adapter.configure("wrong", "SN-C5P")
+        with self.assertRaisesRegex(plugin.PrinterAPIError, "Check the CheckCode"):
+            self.adapter.status(False)
+        self.lan_only = False
+        with self.assertRaisesRegex(plugin.PrinterAPIError, "Enable LAN-only mode"):
+            self.adapter.status(False)
+        self.lan_only = True
+        self.adapter.configure("abc01234", "SN-C5P")
+        self.assertEqual(self.adapter.status(False)["state"], "PRINTING")
+
+    def test_invalid_detail_recovers_and_preview_rejects_invalid_data(self):
+        self.bad_detail = True
+        with self.assertRaisesRegex(plugin.PrinterAPIError, "invalid HTTP data"):
+            self.adapter.status(False)
+        self.bad_detail = False
+        self.detail.update({"status": "completed", "printProgress": 2, "nozzleTemps": None,
+                            "nozzleTargetTemps": None, "cameraStreamUrl": "http://192.168.1.8:8080/"})
+        data = self.adapter.status(False)
+        self.assertEqual((data["complete"], data["percent"]), (True, 100))
+        self.assertIsNone(data["nozzle"])
+        self.assertEqual(data["cameraUrl"], "")
+        self.assertIsNone(self.adapter.preview("absent.3mf"))
+
+    def test_http_timeout_recovers_on_next_sample(self):
+        self.adapter.status(False)
+        with patch.object(plugin, "read_http_status", side_effect=TimeoutError):
+            with self.assertRaises(TimeoutError):
+                self.adapter.status(False)
+        self.assertEqual(self.adapter.status(False)["state"], "PRINTING")
+
+    def test_status_files_preview_and_controls_through_device_server(self):
+        web_port = free_port()
+        with patch.multiple(plugin, WEB_PORT=web_port, POLL_INTERVAL=0.1), tempfile.TemporaryDirectory() as folder:
+            server = plugin.LoopbackServer(("127.0.0.1", web_port), plugin.MonitorHandler)
+            preset = {"host": "127.0.0.1", "code": "abc01234", "serial": "SN-C5P"}
+            server.configure(lambda: {"printers": [preset]}, Path(folder))
+            service = plugin.FlashForgeService()
+            service._server = server
+            server.act = service.act
+            worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+            worker.start()
+            try:
+                path = "/127.0.0.1/"
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    status, body, _ = request(web_port, path + "status")
+                    if status == 200:
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(status, 200, body)
+                self.assertEqual(json.loads(body)["file"], "Тест 5.3mf")
+                status, body, _ = request(web_port, path + "files")
+                self.assertEqual(status, 200, body)
+                file, = json.loads(body)["files"]
+                self.assertEqual(file["name"], "Тест 5.3mf")
+                status, body, headers = request(web_port, path + "preview/" + file["id"])
+                self.assertEqual((status, body, headers["Content-Type"]), (200, PNG, "image/png"))
+                for action, state in (("pause", "PAUSED"), ("resume", "PRINTING"), ("cancel", "CANCELING")):
+                    status, body, _ = request(
+                        web_port, path + "action", method="POST", body=json.dumps({"action": action}),
+                        headers={"Origin": f"http://127.0.0.1:{web_port}", "Content-Type": "application/json",
+                                 "X-FlashForge-Tab-Action": "action"})
+                    self.assertEqual(status, 200, body)
+                    self.assertEqual(json.loads(body)["state"], state)
+                controls = [body["payload"] for path, body in self.calls if path == "/control"]
+                self.assertEqual([payload["args"]["action"] for payload in controls], ["pause", "continue", "cancel"])
+                self.assertTrue(all(payload["cmd"] == "jobCtl_cmd" for payload in controls))
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join(timeout=2)
+
+
 class SwitchViewTests(unittest.TestCase):
     def setUp(self):
         self.saved = (plugin.PORT, plugin.API_PORT, plugin.WEB_PORT)
@@ -529,8 +708,10 @@ class SwitchViewTests(unittest.TestCase):
         self.service = plugin.FlashForgeService()
         self.service.get_config = lambda: json.dumps({"flashforge_host": "127.0.0.1", "check_code": "code"})
         self.service._page_store = Path(self.folder.name) / "device-pages.json"
+        self.service._view_store = Path(self.folder.name) / "device-views.json"
         self.service._switch_lock = threading.Lock()
         self.service._stopping = threading.Event()
+        self.service._view_refresh = threading.Event()
         self.service._server = SimpleNamespace(
             settings_for=lambda: ("127.0.0.1", "code"),
             printers=lambda: [{"host": "127.0.0.1", "code": "code", "name": "Adventurer 5M"}],
@@ -552,6 +733,141 @@ class SwitchViewTests(unittest.TestCase):
         self.assertIn("printer web interface", message)
         self.assertEqual(self.preset.values["print_host_webui"], "")
 
+    def restart_service(self):
+        # Orca discards the edited profile on exit: only plugin storage survives.
+        previous = self.service
+        self.service = plugin.FlashForgeService()
+        for key in ("_page_store", "_view_store", "_server"):
+            setattr(self.service, key, getattr(previous, key))
+        self.service._switch_lock = threading.Lock()
+        self.service._stopping = threading.Event()
+        self.service._view_refresh = threading.Event()
+        self.transaction.values.clear()
+
+    def test_panel_restored_after_unsaved_profile_is_discarded_and_service_restarts(self):
+        self.preset.values["print_host_webui"] = "http://127.0.0.1:8080/"
+        self.service.switch_view()
+        self.preset.values["print_host_webui"] = "http://127.0.0.1:8080/"
+        self.restart_service()
+        self.service.restore_selected_view()
+        self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("127.0.0.1"))
+        self.service.restore_page("127.0.0.1")
+        self.assertEqual(self.preset.values["print_host_webui"], "http://127.0.0.1:8080/")
+
+    def test_native_choice_survives_restart_even_when_saved_profile_has_panel(self):
+        self.service.switch_view()
+        self.service.restore_page("127.0.0.1")
+        self.preset.values["print_host_webui"] = plugin.monitor_url("127.0.0.1")
+        self.restart_service()
+        self.service.restore_selected_view()
+        self.assertEqual(self.preset.values["print_host_webui"], "")
+        self.assertFalse(self.service.saved_views()[self.preset.name]["monitor"])
+
+    def test_configured_profile_defaults_to_panel_without_prior_choice(self):
+        self.service.restore_selected_view()
+        self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("127.0.0.1"))
+        self.assertFalse(self.service._view_store.exists())
+        with patch.object(self.transaction, "commit") as commit:
+            self.service.restore_selected_view()
+        commit.assert_not_called()
+
+    def test_restore_ignores_unconfigured_or_foreign_printers(self):
+        for changes in ({"host_type": "prusalink"},
+                        {"host_type": "flashforge", "print_host": "192.168.1.9"}):
+            self.preset.values.update(changes)
+            self.service.restore_selected_view()
+            self.assertEqual(self.preset.values["print_host_webui"], "")
+        self.assertEqual(self.transaction.values, {})
+
+    def test_restore_supports_second_configured_printer(self):
+        self.service._server.printers = lambda: [{"host": "192.168.1.37", "code": "first"},
+                                                  {"host": "127.0.0.1", "code": "code"}]
+        self.service.restore_selected_view()
+        self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("127.0.0.1"))
+
+    def test_native_preference_is_scoped_to_profile_and_address(self):
+        self.service.switch_view()
+        self.service.restore_page("127.0.0.1")
+        self.preset.name = "Creator 5 Pro"
+        self.transaction.target_name = self.preset.name
+        self.service.restore_selected_view()
+        self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("127.0.0.1"))
+        self.preset.name = "Adventurer 5M"
+        self.transaction.target_name = self.preset.name
+        self.preset.values.update(print_host="192.168.1.37", print_host_webui="")
+        self.service._server.printers = lambda: [{"host": "192.168.1.37", "code": "code"}]
+        self.service.restore_selected_view()
+        self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("192.168.1.37"))
+
+    def test_profile_change_between_read_and_transaction_does_not_write(self):
+        def begin_update():
+            self.preset.values["print_host"] = "192.168.1.9"
+            return self.transaction
+        orca.host.preset.printer.begin_update = begin_update
+        with self.assertRaisesRegex(ValueError, "profile changed"):
+            self.service.restore_selected_view()
+        self.assertEqual(self.transaction.values, {})
+        self.assertFalse(self.service._page_store.exists())
+
+    def test_failed_commit_does_not_remember_choice(self):
+        with patch.object(self.transaction, "commit", side_effect=RuntimeError("stale")):
+            with self.assertRaises(RuntimeError):
+                self.service.switch_view()
+        self.assertFalse(self.service._view_store.exists())
+
+    def test_root_panel_url_does_not_replace_saved_native_url(self):
+        self.service.switch_view()
+        self.preset.values["print_host_webui"] = plugin.monitor_url()
+        self.service.restore_selected_view()
+        self.assertEqual(json.loads(self.service._page_store.read_text()), {"Adventurer 5M": ""})
+        self.service.restore_page("127.0.0.1")
+        self.assertEqual(self.preset.values["print_host_webui"], "")
+
+    def test_startup_worker_and_preset_events_restore_page_without_manual_execution(self):
+        self.service._server = None
+        self.service.save_config = lambda value: None
+        self.service.on_load()
+        try:
+            for event in (None, orca.LifecycleEvent.PresetSelected, orca.LifecycleEvent.ProjectOpened):
+                if event is not None:
+                    self.preset.values["print_host_webui"] = ""
+                    self.service.on_lifecycle_event(event, SimpleNamespace())
+                deadline = time.monotonic() + 3
+                while (self.preset.values["print_host_webui"] != plugin.monitor_url("127.0.0.1")
+                       and time.monotonic() < deadline):
+                    time.sleep(0.01)
+                self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("127.0.0.1"))
+        finally:
+            self.service.on_unload()
+            self.service._view_worker.join(timeout=2)
+        self.assertFalse(self.service._view_worker.is_alive())
+
+    def test_startup_worker_retries_until_profile_becomes_available(self):
+        self.service._server = None
+        self.service.save_config = lambda value: None
+        original = orca.host.preset_bundle
+        calls = []
+
+        def bundle():
+            calls.append(True)
+            if len(calls) == 1:
+                raise RuntimeError("Preset bundle is not available")
+            return original()
+
+        with patch.object(orca.host, "preset_bundle", side_effect=bundle):
+            self.service.on_load()
+            try:
+                deadline = time.monotonic() + 3
+                while (self.preset.values["print_host_webui"] != plugin.monitor_url("127.0.0.1")
+                       and time.monotonic() < deadline):
+                    time.sleep(0.01)
+                self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("127.0.0.1"))
+                self.assertGreater(len(calls), 1)
+            finally:
+                self.service.on_unload()
+                self.service._view_worker.join(timeout=2)
+        self.assertFalse(self.service._view_worker.is_alive())
+
     def test_apply_settings_updates_profile(self):
         self.saved_config = []
         self.service.save_config = lambda value: self.saved_config.append(json.loads(value))
@@ -570,6 +886,17 @@ class SwitchViewTests(unittest.TestCase):
     def test_apply_settings_rejects_public_address(self):
         with self.assertRaises(ValueError):
             self.service.apply_settings([{"host": "1.1.1.1", "code": "code"}])
+
+    def test_apply_settings_preserves_creator_serial_and_older_entries(self):
+        saved = []
+        self.service.save_config = lambda value: saved.append(json.loads(value))
+        self.service.apply_settings([{"host": "127.0.0.1", "serial": " SN-C5P ", "code": "abc01234"},
+                                     {"host": "192.168.1.37"}])
+        self.assertEqual(saved[0]["serial_number"], "SN-C5P")
+        self.assertEqual(saved[0]["printers"][0]["serial"], "SN-C5P")
+        self.assertNotIn("serial", saved[0]["printers"][1])
+        with self.assertRaisesRegex(ValueError, "Enter a serial number"):
+            self.service.apply_settings([{"host": "127.0.0.1", "serial": "bad | serial"}])
 
     def test_apply_settings_rejects_bad_check_code(self):
         with self.assertRaises(ValueError):
@@ -638,7 +965,7 @@ class ControlTests(unittest.TestCase):
         self.reply = {"code": -3, "message": "Printer is busy"}
         with self.assertRaises(ValueError) as raised:
             plugin.control_job("127.0.0.1", "SN123", "code", "cancel")
-        self.assertIn("busy", str(raised.exception))
+        self.assertIn("code -3", str(raised.exception))
 
     def test_http_error_is_reported(self):
         self.status = 500
