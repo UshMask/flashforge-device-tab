@@ -1,9 +1,9 @@
-# FlashForge Device Tab
+# <img src="docs/icon.png" width="36" height="36" alt=""> FlashForge Device Tab
 
-A single-file OrcaSlicer plugin that fills the empty **Device tab** for FlashForge
-printers: job progress, temperatures, the printer's file list with previews, the
-camera stream, a 30-minute temperature chart, a print history that survives
-restarts — plus pause, resume and cancel when a job needs you.
+Follow a FlashForge print from OrcaSlicer's **Device tab**. See how much time
+is left, check nozzle and bed temperatures, or open the printer camera.
+Switch between your local printers and review completed jobs after a restart.
+Printers with a working authenticated control API also offer pause, resume and cancel.
 
 ![The Device tab with the printer panel](docs/panel.png)
 
@@ -73,6 +73,20 @@ separately. It does not report the active tool, TCP endstops, or per-file materi
 and time estimates. The temperature chart uses T1 and the bed. The readings
 panel also shows T2–T4 and the Pro chamber temperature when available. The
 plugin does not upload files, start prints or change material mappings.
+
+## Other FlashForge models
+
+| Family | Compatibility evidence and scope |
+| --- | --- |
+| Adventurer 3 | Experimental progress and temperature parsing, tested locally with documented TCP replies. The panel can show a percentage when the firmware omits layers. Basic monitoring is the initial scope. [Firmware protocol reference](https://github.com/Parallel-7/flashforge-api-docs/blob/main/endpoints/networkserver_commands_adventurer3.yaml) |
+| Adventurer 4 Pro / Lite | Candidates for the same monitoring path. Verify status, progress format and state transitions on each variant before claiming support. [Protocol reference](https://github.com/Parallel-7/flashforge-api-docs/wiki/Adventurer-4-Series) |
+| AD5X | Candidate for the existing TCP and HTTP adapters. Start with ordinary job telemetry, then verify read-only display of the four IFS filament slots on a known firmware. [Protocol research](https://github.com/Parallel-7/flashforge-api-docs/wiki/AD5X) · [Printer specifications](https://www.flashforge.com/products/flashforge-ad5x-3d-printer) |
+| Guider 3 Ultra | FlashForge lists this printer in Flash Studio Desktop. Compatibility with this plugin's LAN requests still needs sample responses. [Vendor software page](https://www.flashforge.com/pages/flash-studio-desktop) |
+| Finder | An existing Cura integration provides a starting point for research. Identify the specific Finder generation and capture its monitoring responses before adding it here. [Finder integration](https://github.com/ronoaldo/FlashforgeFinderIntegration) |
+
+For a compatibility report, include the exact model and firmware, which readings
+appeared while idle and printing, and what the panel showed when the job ended.
+Remove addresses, serial numbers and CheckCodes from any shared screenshots or logs.
 
 ## How it works
 

@@ -2,9 +2,9 @@
 # dependencies = []
 # [tool.orcaslicer.plugin]
 # name = "FlashForge Device Tab"
-# description = "FlashForge printer panel inside OrcaSlicer's Device tab: monitoring, files, camera, pause and cancel."
+# description = "Follow local FlashForge prints in the Device tab with live progress, temperatures, camera, print history and job controls."
 # author = "Max"
-# version = "1.7.2"
+# version = "1.8.0"
 # ///
 import base64
 import hashlib
@@ -88,7 +88,6 @@ PAGE = r'''<!doctype html>
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
-[hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 14px "Segoe UI", sans-serif; font-variant-numeric: tabular-nums; }
 main { max-width: 1280px; margin: auto; padding: 20px 24px 28px; }
 h1, h2, p, dl, dd { margin: 0; }
@@ -107,8 +106,11 @@ h2 { font-size: 14px; font-weight: 600; }
 .connection.connected { color: var(--ok); }
 .connection.disconnected { color: var(--warn); }
 .dashboard { display: grid; grid-template-columns: minmax(0, 1.75fr) minmax(280px, 1fr); gap: 12px; align-items: start; }
+.printer-sidebar { display: grid; gap: 12px; }
 .dashboard > * { min-width: 0; }
-.panel { background: var(--panel); }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+.panel > .panel-title:first-child { border-radius: 7px 7px 0 0; }
+.identity::before { content: ""; width: 24px; height: 24px; background: center / contain no-repeat url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAF7klEQVR4nK2XbYydRRXHf2dmnpd77/buu+lWtEJSsYsEP/mSiLEpVBpQGuFqjBE/GLUiRCWmxKSJRkOESBRsgn7R2KgQWdrFmLQFQ2hLjFUS24Dd1i3WUNB2F2F3u3f33vu8zPHD031pd7t2dznJ8+GZzMz5zX/OnJwjzJkAumbbtm4XB5u95zpBI1SF1ZiIKiYxRk8krey5qcHB0Qu+AFQu/Ajg22u1+8TIt8TIVYhZld8Fpop6fxb1u8affOqHMxBCrWYZGMjba3fstnHpLp8kkOceQeVtglD1oAjWGhOG+GbrqfH+/s8yNCQC0FH79DckLj+izUaCEogxYkRIswyvuirnRoTAOXyhgCKkplQKfaO1c3xg4AGp1mpdBn8SY7vJc8QYk+eeqWaDrmqVKAhYKYIASZbx5sQE5TjGWYuqKiKq3tedSzc64GaxrlezzBfOc5xzPHT3dj7z8U3E5WhVAK1GwtMvvMAPfrWbRpLgrBX1Xk0QVLOMW52F6zFGEdSIMNlq8ZOvfZV7Nm/h6ZeP8trICIFz6DKvQkRIs5y+nm7u2XILlbYy2x/8EUG5jAqKiOK53ik+FBARQzNNuaq3l89vvonfHPkTX/je93EuQFeogREhbSX87Ds7uGvTTTy07re8NjJCFIYzAoUG5nb33lMplShhOPbKK9BsEkchztrZL7COwF3ms+6iuVEYQpJwdPgUoUJbuUQRh7MyqbuUWoFEPe9b/24++pEP016pkHu/IgWsMUxMTfH+a64mlcVVXABgjaGuKXfeuInP3bhpwQKdL9klNpPRLh1LgDoZ1izMKwsA8jynakJ+8ex+HtszSGd1DXmeY61lfLLOl2//JNs/sZVxn2CtnV3TYUJ2H3yOnz65h441bXNrzk/yxVu3ct+ntpHn+f8HKAaF0bExhk+doq2jkzTPCJyjPjZGfXqayFjUF0EGkAGRsUy3WvxjeJi2zk7SLCOwjvr4OGf/+yYWWVS5RQEUCJzDlEqU44gsdxhjyKpVXjxxkrrPiG1ApkVsRMbRRDny9+PE1SqlMCR0RUBOl0qESySzyyZ7VcV7j1fFq5LlOZU4Zt+fj/Clhx/GqWARRCE2ju2PPsLe5w9TiWPSPJ9d571fMocsqsDlLPee7mqVvc8fRFF+ueN+AjF85dEf8/iBZ+np6CBb5J6XsmUBAOSqvKO7i8GDh2krl4mCgMef+SO9XV3Ldr48AAHNPa16gwZKxQT8evAPoFApl6mPnQeUoBRjnLn8W10pgOZKqb2N/i0foqgTFGMMAhclqn+9OMT0W+cRe2W1xBUBiBHSRgufxfRd+56F2WZ2nuH0X46TNhOitvLbBCDgk5yu9WtZ+971/PPIy4gsTqCqvOuGDYyWY8b+/QY2ClYPIGJoTTeJKiU2fOwDZK1kSYAgjpgcHePc8BmiOFo5gIggIuRJytpr11PprHLs94cRs3SRrF4JKzHr+q9m4vVRuLDPFQOICCikWYaxFryy/oYNbLz5gyRTzSsDKMecOnyUo2dGcNaQZhmoLgrimBdSRoRWkpAJrOvpIZ+sM9GmHHpiP4ee2A9LnORiiuIN2jAgn6zT19uDF6GZFNenc/PEiUgKqKonCgLOjIyy729/5e7NW2gmCa+eO1fkcr/MkswUVXVfTzffvu12Dgy9xOnX/0Mchah6pHjHqVPPkGhRpalA6Bw7dj1GcK/w9a23YWc2XJb7uTzkgQMvHeObu3YhRor2SxFUxeCPS1ut1uvwJxHTgfcixkiSpuTec03fOkpxtOKaUIBmK+H02bOICHEQ4OfK8oax2UYBaK/dcb8tlR70jbnGRIBGkuC9R5Z9/hkVimwZh2HR+81rTPJG44GJgT07i9asv187hoZ+Z+LoTt9qccGripgVup4PMa81M8aYKCJvNvdNdHZtY2zMX1TGddRqO7HmXhHpLSJeWf7tL4YgM83pW6r+5xMjb3yXQ4dy5u0+2y531WrvzI25RVSvU9W4GF1hiy5FKSyGlmBOaJo+M75376vzfOr/AJq6riJACkPeAAAAAElFTkSuQmCC); }
 .panel-title { padding: 9px 13px; background: var(--header); }
 .job { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: center; padding: 16px; min-height: 158px; }
 .job[data-preview="none"] { grid-template-columns: minmax(0, 1fr); }
@@ -199,13 +201,15 @@ dialog.settings .caption { margin-top: 2px; }
 <body>
 <main>
   <header class="device">
-    <div class="identity"><h1>{{printer}}</h1><span class="device-state" id="status"></span></div>
+    <div class="identity"><h1 id="deviceName">{{printer}}</h1><span class="device-state" id="status"></span></div>
     <div class="device-actions">
       <span class="connection" id="connection" role="status">Connecting…</span>
       <label class="fleet-toggle"><input type="checkbox" id="fleetToggle"> All printers</label>
+      <span class="device-actions" id="jobActions" hidden>
       <button id="pausePrint" type="button" hidden>Pause</button>
       <button id="resumePrint" type="button" hidden>Resume</button>
       <button id="cancelPrint" type="button" class="danger" hidden>Cancel</button>
+      </span>
       <button id="settingsButton" type="button" aria-haspopup="dialog">Settings</button>
       <button id="nativePage" type="button">Printer Web Interface</button>
     </div>
@@ -215,7 +219,6 @@ dialog.settings .caption { margin-top: 2px; }
     <h2 class="panel-title">Set up your first printer</h2>
     <div class="tool-body setup">
       <ol>
-        <li>This page is shown by the plugin inside OrcaSlicer: Device tab → <b>Speed Dial</b> → <b>FlashForge Device Tab</b>.</li>
         <li>Press <b>Settings</b> in the panel header.</li>
         <li>Add one line per printer: <code>192.168.1.50 | 1a2b3c4d | Adventurer 5M</code> —
             address | CheckCode | name. The CheckCode is in the printer's network settings.</li>
@@ -263,32 +266,7 @@ dialog.settings .caption { margin-top: 2px; }
       </dl>
     </section>
   </div>
-  <div class="dashboard monitor-tools">
-    <section class="panel" aria-labelledby="printer-title">
-      <h2 class="panel-title" id="printer-title">Printer</h2>
-      <div class="tool-body">
-        <dl class="readouts">
-          <div class="readout"><dt>Model</dt><dd id="printerModel"></dd></div>
-          <div class="readout"><dt>Firmware</dt><dd id="printerFirmware"></dd></div>
-          <div class="readout"><dt>Serial</dt><dd id="printerSerial"></dd></div>
-          <div class="readout"><dt>MAC</dt><dd id="printerMac"></dd></div>
-          <div class="readout"><dt>Build volume</dt><dd id="printerVolume"></dd></div>
-          <div class="readout"><dt>Light</dt><dd id="printerLight"></dd></div>
-        </dl>
-        <p class="caption" id="printerSensors"></p>
-      </div>
-    </section>
-    <section class="panel" aria-labelledby="totals-title">
-      <h2 class="panel-title" id="totals-title">Totals</h2>
-      <div class="tool-body">
-        <dl class="readouts">
-          <div class="readout"><dt>Jobs</dt><dd id="statJobs"></dd></div>
-          <div class="readout"><dt>Print time</dt><dd id="statHours"></dd></div>
-          <div class="readout"><dt>Finished cleanly</dt><dd id="statSuccess"></dd></div>
-        </dl>
-        <p class="caption">Counted from the print history on this computer.</p>
-      </div>
-    </section>
+  <div class="dashboard monitor-tools" id="printerTools">
     <section class="panel" aria-labelledby="chart-title">
       <h2 class="panel-title" id="chart-title">Temperatures · Last 30 Minutes</h2>
       <div class="tool-body">
@@ -299,20 +277,47 @@ dialog.settings .caption { margin-top: 2px; }
         </div>
       </div>
     </section>
-    <details class="panel" id="camera">
-      <summary class="panel-title">Camera</summary>
-      <div class="tool-body">
-        <label for="cameraUrl">MJPEG stream URL (HTTP or HTTPS)</label>
-        <form class="camera-form" id="cameraForm">
-          <input id="cameraUrl" type="url" maxlength="2048" placeholder="http://…" autocomplete="off">
-          <button id="cameraStart" type="submit">Connect</button>
-          <button id="cameraStop" type="button" hidden>Disconnect</button>
-        </form>
-        <p class="caption" id="cameraStatus" role="status"></p>
-        <button id="cameraSnapshot" type="button" hidden>Save snapshot</button>
-        <img class="camera-image" id="cameraImage" alt="Printer camera feed" referrerpolicy="no-referrer" hidden>
-      </div>
-    </details>
+    <div class="printer-sidebar">
+      <details class="panel" id="camera">
+        <summary class="panel-title">Camera</summary>
+        <div class="tool-body">
+          <label for="cameraUrl">MJPEG stream URL (HTTP or HTTPS)</label>
+          <form class="camera-form" id="cameraForm">
+            <input id="cameraUrl" type="url" maxlength="2048" placeholder="http://…" autocomplete="off">
+            <button id="cameraStart" type="submit">Connect</button>
+            <button id="cameraStop" type="button" hidden>Disconnect</button>
+          </form>
+          <p class="caption" id="cameraStatus" role="status"></p>
+          <button id="cameraSnapshot" type="button" hidden>Save snapshot</button>
+          <img class="camera-image" id="cameraImage" alt="Printer camera feed" referrerpolicy="no-referrer" hidden>
+        </div>
+      </details>
+      <section class="panel" aria-labelledby="totals-title">
+        <h2 class="panel-title" id="totals-title">Totals</h2>
+        <div class="tool-body">
+          <dl class="readouts">
+            <div class="readout"><dt>Jobs</dt><dd id="statJobs"></dd></div>
+            <div class="readout"><dt>Print time</dt><dd id="statHours"></dd></div>
+            <div class="readout"><dt>Finished cleanly</dt><dd id="statSuccess"></dd></div>
+          </dl>
+          <p class="caption">Counted from the print history on this computer.</p>
+        </div>
+      </section>
+      <details class="panel">
+        <summary class="panel-title">Printer details</summary>
+        <div class="tool-body">
+          <dl class="readouts">
+            <div class="readout"><dt>Model</dt><dd id="printerModel"></dd></div>
+            <div class="readout"><dt>Firmware</dt><dd id="printerFirmware"></dd></div>
+            <div class="readout"><dt>Serial</dt><dd id="printerSerial"></dd></div>
+            <div class="readout"><dt>MAC</dt><dd id="printerMac"></dd></div>
+            <div class="readout"><dt>Build volume</dt><dd id="printerVolume"></dd></div>
+            <div class="readout"><dt>Light</dt><dd id="printerLight"></dd></div>
+          </dl>
+          <p class="caption" id="printerSensors"></p>
+        </div>
+      </details>
+    </div>
   </div>
   <details class="panel monitor-tools" id="history">
     <summary class="panel-title">Print History</summary>
@@ -674,6 +679,7 @@ async function updateStatus() {
     connection.className = 'connection disconnected';
     connection.textContent = error.message === 'Failed to fetch' ? 'Disconnected' : error.message;
     el('monitor').classList.add('stale');
+    updateActions({});
     el('status').textContent = '';
     el('time').hidden = true;
     el('timeHint').hidden = true;
@@ -712,11 +718,11 @@ function updatePrinter(data) {
 
 function updateActions(data) {
   const state = data.state || '';
-  const paused = state === 'PAUSED';
-  const running = data.active && !paused;
+  const paused = data.jobControls && state === 'PAUSED';
+  const running = data.jobControls && data.active && !paused;
   el('pausePrint').hidden = !running;
   el('resumePrint').hidden = !paused;
-  el('cancelPrint').hidden = !(data.active || paused);
+  el('cancelPrint').hidden = !(running || paused);
   const cancel = el('cancelPrint');
   if (cancel.classList.contains('armed')) {
     cancel.classList.remove('armed');
@@ -890,10 +896,12 @@ function renderFleet() {
 function applyView() {
   const hasPrinters = fleetPrinters.length > 0;
   const showFleet = hasPrinters && fleetToggle.checked;
+  const current = fleetPrinters.find(item => item.current);
+  el('deviceName').textContent = showFleet ? 'FlashForge' : current?.name || 'FlashForge';
   el('setup').hidden = hasPrinters;
   el('fleet').hidden = !showFleet;
   el('monitor').hidden = !hasPrinters || showFleet;
-  for (const id of ['chart', 'history', 'camera', 'files-section']) {
+  for (const id of ['printerTools', 'history', 'files-section', 'jobActions']) {
     const node = el(id);
     if (node) node.hidden = !hasPrinters || showFleet;
   }
@@ -1030,6 +1038,7 @@ STATES = {
 ACTIVE_JOB = {"PRINTING", "BUILDING", "BUILDING_FROM_SD", "PAUSED", "HEATING", "PAUSING"}
 ENDED_JOB = {"CANCELLED": "cancelled", "CANCELED": "cancelled", "STOPPED": "cancelled", "ERROR": "error"}
 ACK = re.compile(rb"(?:^|\n)ok\r?\n")
+TEMP_ACK = re.compile(rb"(?:^|\n)ok[ \t]+T0:[^\r\n]+\r?\n")
 LIST_HEADER = b"D\xaa\xaaD"
 LIST_ENTRY = b"::\xa3\xa3"
 IMAGE_FRAME = b"**\xa2\xa2"
@@ -1056,6 +1065,10 @@ def command_reply(sock, request, deadline=None):
         ack = ACK.search(data)
         if ack:
             return bytes(data[:ack.start()]), bytearray(data[ack.end():])
+        if request == b"M105":
+            inline = TEMP_ACK.search(data)
+            if inline:
+                return bytes(data[:inline.end()]), bytearray(data[inline.end():])
     raise ValueError("Incomplete response from the printer")
 
 
@@ -1325,7 +1338,7 @@ def read_http_status(host, serial, check_code):
     layer = detail_number(detail, "printLayer", 0, total) if total is not None else None
     return {
         "status": STATES.get(state, state), "state": state, **readings,
-        "temperatures": readings, "tools": tools,
+        "temperatures": readings, "tools": tools, "jobControls": True,
         "chamber": chamber if creator_pro and any(value is not None for value in chamber.values()) else None,
         "layer": int(layer) if layer is not None else None,
         "layerTotal": int(total) if total is not None else None,
@@ -1365,7 +1378,7 @@ def read_status(host, check_code, include_details=False):
         except (OSError, ValueError):
             pass
         if machine:
-            serial = re.search(r"^SN:[ \t]*([\w-]+)", machine, re.M)
+            serial = re.search(r"^(?:SN|Serial Number):[ \t]*([\w-]+)", machine, re.M | re.I)
 
     def temperature(key):
         match = re.search(r"\b" + key + r":\s*(-?\d+(?:\.\d+)?)\s*/\s*(-?\d+(?:\.\d+)?)", temp)
@@ -1379,6 +1392,13 @@ def read_status(host, check_code, include_details=False):
     complete = state in {"COMPLETED", "BUILDING_COMPLETED"}
     active = state in ACTIVE_JOB
     percent = 100 if complete else min(100, round(current * 100 / total)) if active and total else None
+    if active and percent is None:
+        # Older firmware exposes progress through M27 without a layer count.
+        sd = re.search(r"^SD printing byte[ \t]+(\d{1,12})/(\d{1,12})\s*$", progress, re.M | re.I)
+        if sd:
+            done, size = map(int, sd.groups())
+            if 0 <= done <= size and size:
+                percent = round(done * 100 / size)
     detail, time_hint = {}, ""
     if serial:
         detail, time_hint = read_job_detail(serial[1], check_code, host)
@@ -1404,14 +1424,14 @@ def read_status(host, check_code, include_details=False):
         fields = {}
         for line in machine.splitlines():
             if ":" in line:
-                key, _, value = line.partition(":")
+                key, _, value = line.removeprefix("echo: ").partition(":")
                 fields[key.strip().lower()] = value.strip()
         build = re.search(r"^X:[ \t]*(\d+)\s*Y:\s*(\d+)\s*Z:\s*(\d+)", machine, re.M)
         info = {
             "model": fields.get("machine type", ""),
             "name": fields.get("machine name", ""),
             "firmware": fields.get("firmware", ""),
-            "serial": fields.get("sn", ""),
+            "serial": serial[1] if serial else "",
             "mac": fields.get("mac address", ""),
             "tools": detail_number({"tools": fields.get("tool count")}, "tools", 0, 16),
             "volume": [int(build[1]), int(build[2]), int(build[3])] if build else None,
@@ -1441,6 +1461,7 @@ def read_status(host, check_code, include_details=False):
         "percent": percent,
         "file": raw_name.rsplit("/", 1)[-1] if active or complete or state in ENDED_JOB else "",
         "active": active, "complete": complete,
+        "jobControls": bool(serial and check_code and not time_hint),
         "remaining": math.ceil(seconds) if seconds is not None else None,
         "timeHint": time_hint or ("The printer has not reported the remaining time yet" if active and seconds is None else ""),
         "elapsed": int(elapsed) if elapsed is not None else None,
@@ -1617,6 +1638,12 @@ class PrintHistory:
                 or (layer is not None and job["layer"] is not None and layer + 1 < job["layer"])
             )
             gap = now - job["seen"] > MAX_JOB_GAP
+            if (gap and (status["active"] or status["complete"]) and name and name == job["file"]
+                    and elapsed is not None and job["elapsed"] is not None):
+                # A continuing job advances by the time we were away. A new
+                # run of the same file has a different inferred start time.
+                gained = elapsed - job["elapsed"]
+                gap = abs(gained - (now - job["seen"])) > 10 or elapsed <= now - job["seen"]
             if changed or reset or gap:
                 job["result"] = "unknown"
             elif status["complete"]:

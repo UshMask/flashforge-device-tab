@@ -278,6 +278,17 @@ class HistoryTests(unittest.TestCase):
             self.assertTrue(history.error)
             self.assertEqual(path.read_text(encoding="utf-8"), "broken")
 
+    def test_same_print_after_sleep_is_counted_once(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "history.json"
+            history = plugin.PrintHistory(path)
+            history.observe(self.status("PRINTING", "Cube", 100, 5), 1000)
+            history = plugin.PrintHistory(path)
+            history.observe(self.status("PRINTING", "Cube", 300, 10), 1200)
+            history.observe(self.status("COMPLETED", "Cube", 400, 15), 1300)
+            stats = plugin.history_stats(history.jobs, 1300)
+            self.assertEqual((stats["jobs"], stats["complete"], stats["seconds"]), (1, 1, 400))
+
 
 class ServerTests(unittest.TestCase):
     @classmethod
@@ -364,6 +375,21 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(data["file"], "Fixture.3mf")
         self.assertEqual(data["remaining"], 3600)
         self.assertEqual(data["percent"], 6)
+        self.assertTrue(data["jobControls"])
+
+    def test_documented_adventurer_3_tcp_replies(self):
+        original = self.printer.reply
+        responses = {
+            "M105": b"CMD M105 Received.\r\nok T0:205/215 B:59/60\r\n",
+            "M27": b"CMD M27 Received.\r\nSD printing byte 45/100\r\nok\r\n",
+            "M119": b"MachineStatus: BUILDING_FROM_SD\r\nok\r\n",
+            "M115": b"echo: Machine Type: FlashForge Adventurer III\r\nSerial Number: DEMO3\r\nok\r\n",
+        }
+        with patch.object(self.printer, "reply", side_effect=lambda cmd: responses[cmd] if cmd in responses else original(cmd)):
+            status = plugin.read_status("127.0.0.1", "")
+        self.assertEqual((status["percent"], status["layer"], status["nozzle"]), (45, None, 205))
+        self.assertEqual(status["info"]["model"], "FlashForge Adventurer III")
+        self.assertFalse(status["jobControls"])
 
     def test_adventurer_keeps_tcp_without_http_credentials(self):
         adapter = plugin.FlashForge("127.0.0.1", "", "unused-configured-serial")

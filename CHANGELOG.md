@@ -1,5 +1,16 @@
 ﻿# Changelog
 
+## 1.8.0
+
+- Read legacy Adventurer-style TCP progress and inline temperature replies.
+  Adventurer 3 response samples are covered by the local test suite.
+- Preserve one history entry across a monitoring gap when the filename and
+  elapsed time identify a continuing job.
+- Bring the temperature chart and camera closer to the job. Printer details
+  expand on demand, and the fleet view hides single-printer controls.
+- Show the configured printer name in the header and hide job controls when
+  authenticated status is unavailable. Refresh the panel icon and overview.
+
 ## 1.7.2
 
 Privacy scrub of the published material.
