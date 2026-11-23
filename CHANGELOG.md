@@ -1,5 +1,22 @@
 ﻿# Changelog
 
+## 1.9.0
+
+- Navigate between Monitor, All printers and History. The job card shows the
+  estimated finishing time. Connection status includes the age of the last
+  reading and a check of the saved printer's telemetry and authentication.
+- Filter the fleet for printers needing attention. Switch monitored devices
+  within the active FlashForge profile. The visible printer gets faster polling.
+- Inspect actual and target temperatures on the chart. Creator users can
+  select T1–T4. Experimental AD5X support displays reported IFS slots, filament
+  and the selected slot from status telemetry.
+- Search history, filter errors and cancellations, and open a job for details.
+  Observed ending times are recorded for new entries.
+- Edit printer settings in individual fields or as a list. Camera and printer
+  details remember their expanded state per device.
+- Choose which host notifications to receive, including sustained loss of
+  connection. Connection reports can be copied without network identifiers.
+
 ## 1.8.0
 
 - Read legacy Adventurer-style TCP progress and inline temperature replies.

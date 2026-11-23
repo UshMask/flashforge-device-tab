@@ -175,6 +175,20 @@ def request(port, path, method="GET", headers=None, body=None):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_ifs_slots_are_ordered_and_missing_slots_stay_unknown(self):
+        detail = {"matlStationInfo": {"slotCnt": 4, "currentSlot": 2, "slotInfos": [
+            {"slotId": 4, "hasFilament": False},
+            {"slotId": 2, "materialName": "PLA", "hasFilament": True, "materialColor": "#28705F"},
+            {"slotId": 1, "materialColor": "not a color"}, {"slotId": True}]}}
+        slots = plugin.material_slots(detail)
+        self.assertEqual([s["id"] for s in slots], [1, 2, 3, 4])
+        self.assertEqual(slots[0]["color"], "")
+        self.assertTrue(slots[1]["active"])
+        self.assertEqual(slots[2], {"id": 3})
+        self.assertFalse(slots[3]["present"])
+        self.assertEqual(plugin.material_slots(dict(detail, hasMatlStation=0)), [])
+        self.assertEqual(plugin.material_slots({}), [])
+
     def test_file_list_roundtrip(self):
         files = plugin.decode_file_list(file_list("/user/A.3mf", "/user/B.3mf"))
         self.assertEqual(len(files), 2)
@@ -459,6 +473,36 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(data["printers"][0]["code"], "code")
         self.assertEqual(data["endpoint"], "127.0.0.1")
 
+    def test_fleet_selection_keeps_profile_validation(self):
+        self.server.check_view = lambda host: host if host == "profile" else self.fail("Wrong profile")
+        code, body, _ = request(plugin.WEB_PORT, "/profile/status?printer=127.0.0.1")
+        self.assertEqual(code, 200)
+        self.assertIn("observedAt", json.loads(body))
+        code, _, _ = request(plugin.WEB_PORT, "/profile/status?printer=127.0.0.2")
+        self.assertEqual(code, 409)
+
+    def test_connection_report_checks_saved_printer(self):
+        headers = {"Origin": f"http://{plugin.WEB_HOST}:{plugin.WEB_PORT}",
+                   "X-FlashForge-Tab-Action": "diagnostics"}
+        code, body, _ = request(plugin.WEB_PORT, self.url("diagnostics"), method="POST", headers=headers)
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(body), {"transport": "TCP + HTTP", "authenticated": True,
+                                           "cameraReported": False, "telemetry": True})
+        code, _, _ = request(plugin.WEB_PORT, "/127.0.0.2/diagnostics", method="POST", headers=headers)
+        self.assertEqual(code, 409)
+
+    def test_notifications_validate_and_persist(self):
+        headers = {"Origin": f"http://{plugin.WEB_HOST}:{plugin.WEB_PORT}",
+                   "X-FlashForge-Tab-Action": "notifications"}
+        prefs = dict(plugin.NOTIFICATIONS, offline=True, finished=False)
+        url = self.url("notifications")
+        code, _, _ = request(plugin.WEB_PORT, url, method="POST", headers=headers, body=json.dumps(prefs))
+        self.assertEqual(code, 200)
+        code, _, _ = request(plugin.WEB_PORT, url, method="POST", headers=headers, body='{"offline":0}')
+        self.assertEqual(code, 400)
+        self.assertEqual(json.loads((Path(self.folder.name) / "notifications.json").read_text()), prefs)
+
+
     def test_settings_post_requires_action_header(self):
         status, _, _ = request(plugin.WEB_PORT, self.url("settings"), method="POST",
                                headers={"Origin": f"http://{plugin.WEB_HOST}:{plugin.WEB_PORT}",
@@ -693,6 +737,10 @@ class CreatorHTTPTests(unittest.TestCase):
                     time.sleep(0.05)
                 self.assertEqual(status, 200, body)
                 self.assertEqual(json.loads(body)["file"], "Тест 5.3mf")
+                status, body, _ = request(web_port, path + "telemetry")
+                self.assertEqual(status, 200)
+                newest = json.loads(body)["temperatures"][-1]
+                self.assertEqual((newest["t1"], newest["t4"], newest["t4Target"]), (210, 30, 0))
                 status, body, _ = request(web_port, path + "files")
                 self.assertEqual(status, 200, body)
                 file, = json.loads(body)["files"]
@@ -1036,6 +1084,20 @@ class NotifyTests(unittest.TestCase):
     def test_running_state_is_silent(self):
         self.service.notify(self.monitor("PRINTING"))
         self.assertEqual(self.sent, [])
+
+    def test_offline_alert_after_one_minute_and_no_duplicate_finish(self):
+        monitor = self.monitor("COMPLETED")
+        monitor.notifications = dict(plugin.NOTIFICATIONS, offline=True)
+        self.service.notify(monitor)
+        last = monitor.latest
+        monitor.latest = None
+        with patch.object(plugin.time, "monotonic", side_effect=[10, 69, 70, 80]):
+            for _ in range(4):
+                self.service.notify(monitor)
+        monitor.latest = last
+        self.service.notify(monitor)
+        self.assertEqual(len(self.sent), 2)
+        self.assertIn("offline", self.sent[1][1])
 
 
 if __name__ == "__main__":

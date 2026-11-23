@@ -4,7 +4,7 @@
 # name = "FlashForge Device Tab"
 # description = "Follow local FlashForge prints in the Device tab with live progress, temperatures, camera, print history and job controls."
 # author = "Max"
-# version = "1.8.0"
+# version = "1.9.0"
 # ///
 import base64
 import hashlib
@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from socketserver import TCPServer, ThreadingMixIn
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import orca
 
@@ -43,6 +43,7 @@ IDLE_POLL_INTERVAL = 15
 HISTORY_LIMIT = 500
 HISTORY_CHECKPOINT = 30
 MAX_JOB_GAP = 180
+NOTIFICATIONS = {"finished": True, "cancelled": True, "error": True, "offline": False}
 
 # The Orca upload worker must not be held hostage by a monitor request that is
 # already talking to the printer, so the drain wait is short and best-effort.
@@ -196,31 +197,81 @@ button.danger.armed { background: #a4443f; color: #fff; }
 dialog.settings .caption { margin-top: 2px; }
 .settings-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .settings-actions button[type="submit"] { background: var(--blue); border-color: var(--blue); color: #fff; }
+/* Device panel */
+:root { --bg:#f5f5ef; --panel:#fffefa; --header:var(--panel); --text:#232c25; --muted:#5b665c; --line:#d7dcd1; --blue:#39745c; }
+@media(prefers-color-scheme:dark){:root { --bg:#1d2521; --panel:#29322d; --text:#f1f4ec; --muted:#bcc8bc; --line:#465449; --blue:#98d6b1; }}
+main {padding-top:0}
+.mast,.tabs{display:flex;align-items:center;gap:14px}
+.mast{background:#202824;color:#edf4ec;padding:12px 18px;margin:0 -12px}
+.mast strong{font-size:20px}
+.mast span{color:#c2cec3}
+.mast button,.hero button{background:#33453b;color:#f5f6ef;border-color:#65776a}
+.hero button.danger{background:#33453b;color:#ffc1a8}
+.mast button{margin-left:auto}
+.tabs{overflow:auto;border-bottom:1px solid var(--line);gap:18px}
+.tabs button{white-space:nowrap;border:0;border-bottom:3px solid transparent;border-radius:0;background:none;padding:13px 2px;color:var(--muted)}
+.tabs button[aria-current="page"]{border-color:var(--blue);color:var(--text)}
+#notificationsButton{margin-left:auto}
+.device{margin:22px 0 14px;border:0}
+.device h1{font-size:clamp(24px,3vw,40px);letter-spacing:-.04em}
+.panel{border-radius:12px}
+.panel-title{padding:13px 16px}
+.hero,.hero .panel-title{background:#24332b;color:#f5f6ed}
+.hero .filename{font-size:clamp(20px,2.5vw,34px);letter-spacing:-.03em}
+.hero .caption,.hero .job-meta{color:#c7d5c6}
+.hero .eta,.hero .percent{color:#ffac7d}
+.hero .percent{order:-1;min-width:0}
+.hero .progress-line{display:grid;gap:6px}
+.hero .percent{text-align:left;font-size:clamp(30px,4vw,46px);line-height:1.05}
+.hero .eta{font-size:21px}
+.hero .job-meta{margin-top:13px}
+.mast button,.hero button{color:#edf6ec;background:#304538}
+.hero progress::-webkit-progress-value{background:#fa9862}
+.hero .progress-line progress{height:6px}
+.hero .job{min-height:145px}
+#jobActions:has(button:not([hidden])){display:flex;padding:10px 16px;border-top:1px solid #526154}
+#jobActions:not(:has(button:not([hidden]))){display:none}
+#cancelPrint{margin-left:auto}
+.printer-sidebar{align-content:start}
+#slots{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;padding:8px 13px 15px}
+.slot{background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:8px 2px;text-align:center;font-size:12px;overflow-wrap:anywhere}
+.slot.active{border-color:var(--blue)}
+.spool{margin:5px auto;width:34px;height:34px;border-radius:50%;background:radial-gradient(circle,var(--panel) 0 14%,transparent 16%),repeating-radial-gradient(circle,var(--spool) 0 2px,color-mix(in srgb,var(--spool) 70%,#555) 3px)}
+#diagnose{margin-top:9px}
+.fleet-row{grid-template-columns:minmax(0,1fr) minmax(85px,.45fr) auto}
+.fleet-row progress{margin-top:5px}
+.printer-fields{display:grid;grid-template-columns:1fr 1fr;gap:6px;border:1px solid var(--line);border-radius:7px;margin:6px 0;padding:9px}
+.printer-fields label{min-width:0}
+.printer-fields input{min-width:0}
+.settings input[type="checkbox"]{width:auto}
+#infoBody{white-space:pre-line;overflow-wrap:anywhere;margin:12px 0}
+#settingsDialog{max-height:90vh;overflow:auto}
+.history-table button{padding:2px 4px;text-align:left}
+@media(max-width:640px){.tabs{gap:10px}
+.identity{min-width:0}
+.tabs button{font-size:12px}
+.mast{margin:0}
+.fleet-row{grid-template-columns:minmax(0,1fr) 80px auto}
+.device{margin:14px 0}
+.hero .job{min-height:100px}}
 </style>
 </head>
 <body>
 <main>
-  <header class="device">
-    <div class="identity"><h1 id="deviceName">{{printer}}</h1><span class="device-state" id="status"></span></div>
-    <div class="device-actions">
-      <span class="connection" id="connection" role="status">Connecting…</span>
-      <label class="fleet-toggle"><input type="checkbox" id="fleetToggle"> All printers</label>
-      <span class="device-actions" id="jobActions" hidden>
-      <button id="pausePrint" type="button" hidden>Pause</button>
-      <button id="resumePrint" type="button" hidden>Resume</button>
-      <button id="cancelPrint" type="button" class="danger" hidden>Cancel</button>
-      </span>
-      <button id="settingsButton" type="button" aria-haspopup="dialog">Settings</button>
-      <button id="nativePage" type="button">Printer Web Interface</button>
-    </div>
-  </header>
+  <div class="mast"><strong>FlashForge</strong><span>Device Tab</span><button id="nativePage" type="button">Printer Web Interface</button></div>
+  <nav class="tabs" aria-label="Device navigation">
+    <button id="monitorTab">Monitor</button><button id="fleetToggle">All printers</button><button id="historyTab">History</button>
+    <button id="notificationsButton">Notifications</button><button id="settingsButton" aria-haspopup="dialog">Settings</button>
+  </nav>
+  <header class="device"><div class="identity"><h1 id="deviceName">{{printer}}</h1><span id="status" class="device-state"></span></div>
+    <select id="devicePicker" aria-label="Open printer" hidden></select></header>
   <p class="device-message" id="viewMessage" role="status" hidden></p>
   <section class="panel" id="setup" hidden>
     <h2 class="panel-title">Set up your first printer</h2>
     <div class="tool-body setup">
       <ol>
         <li>Press <b>Settings</b> in the panel header.</li>
-        <li>Add one line per printer: <code>192.168.1.50 | 1a2b3c4d | Adventurer 5M</code> —
+        <li>Add a printer or use <b>Edit as text</b> for a list: <code>192.168.1.50 | 1a2b3c4d | Adventurer 5M</code> —
             address | CheckCode | name. The CheckCode is in the printer's network settings.</li>
         <li>Save and wait a few seconds: temperatures and progress appear here.</li>
       </ol>
@@ -229,22 +280,23 @@ dialog.settings .caption { margin-top: 2px; }
     </div>
   </section>
   <section class="panel" id="fleet" hidden>
-    <div class="row panel-title"><h2>Printers</h2><button id="fleetRefresh" type="button">Refresh</button></div>
+    <div class="row panel-title"><h2>Printers</h2><label><input type="checkbox" id="attention"> Needs attention</label><button id="fleetRefresh" type="button">Refresh</button></div>
     <div class="tool-body"><div class="fleet-list" id="fleetList"></div></div>
   </section>
   <div class="dashboard" id="monitor">
-    <section class="panel" aria-labelledby="job-title">
+    <div class="printer-sidebar">
+    <section class="panel hero" aria-labelledby="job-title">
       <h2 class="panel-title" id="job-title">Print Job</h2>
       <div class="job" id="job" data-preview="none">
         <div>
           <p class="filename" id="jobFile">—</p>
-          <div class="time" id="time" hidden>
-            <strong class="eta" id="remaining"></strong>
-            <span class="caption">Time Remaining</span>
-          </div>
           <div class="progress-line" id="progressLine" hidden>
             <progress id="bar" max="100" aria-label="Print progress"></progress>
             <strong class="percent" id="percent"></strong>
+          </div>
+          <div class="time" id="time" hidden>
+            <strong class="eta" id="remaining"></strong>
+            <span class="caption">Time remaining <b id="finishTime"></b></span>
           </div>
           <div class="job-meta" id="jobMeta" hidden>
             <span id="layers"></span><span id="elapsed"></span><span id="filament"></span>
@@ -253,7 +305,25 @@ dialog.settings .caption { margin-top: 2px; }
         </div>
         <img class="job-image" id="jobImage" alt="Current print job preview" hidden>
       </div>
+      <div class="device-actions" id="jobActions" hidden>
+      <button id="pausePrint" type="button" hidden>Pause</button>
+      <button id="resumePrint" type="button" hidden>Resume</button>
+      <button id="cancelPrint" type="button" class="danger" hidden>Cancel</button>
+      </div>
     </section>
+    <section class="panel" aria-labelledby="chart-title">
+      <div class="row panel-title"><h2 id="chart-title">Temperatures · Last 30 Minutes</h2><select id="chartTool" aria-label="Chart nozzle" hidden></select></div>
+      <div class="tool-body">
+        <canvas class="chart" id="chart" role="img" aria-label="Chart of actual and target temperatures for the nozzle and bed"></canvas>
+        <p class="caption" id="chartSample"></p><div class="chart-legend muted">
+          <span class="nozzle-series" id="chartNozzle">Nozzle</span><span class="nozzle-series target" id="chartNozzleTarget">Nozzle Target</span>
+          <span class="bed-series">Bed</span><span class="bed-series target">Bed Target</span>
+        </div>
+      </div>
+    </section>
+    </div>
+    <div class="printer-sidebar" id="printerTools">
+      <section id="materials" class="panel" hidden><h2 class="panel-title">Materials · IFS</h2><div id="slots"></div></section>
     <section class="panel" aria-labelledby="readouts-title">
       <h2 class="panel-title" id="readouts-title">Printer Readings</h2>
       <dl class="readouts">
@@ -265,19 +335,8 @@ dialog.settings .caption { margin-top: 2px; }
         <div class="readout" id="speedReading" hidden><dt>Print Speed</dt><dd><strong id="speed"></strong></dd></div>
       </dl>
     </section>
-  </div>
-  <div class="dashboard monitor-tools" id="printerTools">
-    <section class="panel" aria-labelledby="chart-title">
-      <h2 class="panel-title" id="chart-title">Temperatures · Last 30 Minutes</h2>
-      <div class="tool-body">
-        <canvas class="chart" id="chart" role="img" aria-label="Chart of actual and target temperatures for the nozzle and bed"></canvas>
-        <div class="chart-legend muted">
-          <span class="nozzle-series" id="chartNozzle">Nozzle</span><span class="nozzle-series target" id="chartNozzleTarget">Nozzle Target</span>
-          <span class="bed-series">Bed</span><span class="bed-series target">Bed Target</span>
-        </div>
-      </div>
-    </section>
-    <div class="printer-sidebar">
+      <section class="panel"><div class="row panel-title"><h2>Connection</h2><span class="connection" id="connection" role="status">Connecting…</span></div>
+        <div class="tool-body"><p id="freshness"></p><p id="transport" class="caption"></p><button id="diagnose" type="button">Check connection</button></div></section>
       <details class="panel" id="camera">
         <summary class="panel-title">Camera</summary>
         <div class="tool-body">
@@ -303,7 +362,7 @@ dialog.settings .caption { margin-top: 2px; }
           <p class="caption">Counted from the print history on this computer.</p>
         </div>
       </section>
-      <details class="panel">
+      <details class="panel" id="printerDetails">
         <summary class="panel-title">Printer details</summary>
         <div class="tool-body">
           <dl class="readouts">
@@ -323,6 +382,7 @@ dialog.settings .caption { margin-top: 2px; }
     <summary class="panel-title">Print History</summary>
     <div class="tool-body">
       <p class="muted" id="historyStatus" role="status">Print history is recorded while OrcaSlicer is open.</p>
+      <div class="file-controls"><input type="search" id="historySearch" placeholder="Find a file" aria-label="Find a history entry"> <label><input type="checkbox" id="failedJobs"> Errors and cancellations</label></div>
       <p class="history-summary" id="historySummary"></p>
       <div class="table-wrap" id="historyTable" hidden>
         <table class="history-table">
@@ -349,8 +409,9 @@ dialog.settings .caption { margin-top: 2px; }
 <dialog class="settings" id="settingsDialog" aria-labelledby="settingsTitle">
   <form id="settingsForm">
     <h2 id="settingsTitle">Printers</h2>
-    <label for="printersText">One printer per line: address | CheckCode | name | serial number</label>
-    <textarea id="printersText" rows="5" spellcheck="false" placeholder="192.168.1.50 | 1a2b3c4d | Adventurer 5M"></textarea>
+    <div id="printerFields"></div><button type="button" id="addPrinter">Add printer</button>
+    <details id="bulk"><summary>Edit as text</summary><label for="printersText">One printer per line: address | CheckCode | name | serial number</label>
+    <textarea id="printersText" rows="5" spellcheck="false" placeholder="192.168.1.50 | 1a2b3c4d | Adventurer 5M"></textarea></details>
     <p class="caption">Creator 5 and 5 Pro require both CheckCode and the printer serial number.
       Adventurer 5M reads its serial number automatically.</p>
     <p class="caption" id="settingsStatus" role="status"></p>
@@ -360,10 +421,106 @@ dialog.settings .caption { margin-top: 2px; }
     </div>
   </form>
 </dialog>
+<dialog class="settings" id="infoDialog"><div class="tool-body"><h2 id="infoTitle"></h2><div id="infoBody"></div>
+  <div class="settings-actions"><button id="copyReport" hidden>Copy report</button><button id="closeInfo">Close</button></div></div></dialog>
+<dialog class="settings" id="notifyDialog"><form id="notifyForm"><h2>Host notifications</h2>
+<label><input type="checkbox" name="finished"> Print finished</label><label><input type="checkbox" name="cancelled"> Print cancelled</label>
+<label><input type="checkbox" name="error"> Printer error</label><label><input type="checkbox" name="offline"> Offline for at least one minute</label>
+<p id="notifyStatus" role="status"></p><div class="settings-actions"><button type="button" id="closeNotify">Cancel</button><button type="submit">Save</button></div></form></dialog>
 <script>
 const el = id => document.getElementById(id);
 const pageSize = 12;
-const endpoint = path => new URL(path.replace(/^\//, ''), window.location.href);
+let view = localStorage.getItem('ff-fleet') === '1' ? 'fleet' : 'monitor';
+let lastObservation = null;
+let connectionFailure = '';
+let historyJobs = [];
+let chartKey = 'nozzle';
+const finishClock = new Intl.DateTimeFormat(undefined, {hour:'2-digit', minute:'2-digit'});
+function finishAt(seconds, stamp) {
+  return Number.isFinite(seconds) && Number.isFinite(stamp) ? finishClock.format((stamp + seconds) * 1000) : '';
+}
+function showInfo(title, body, copy = false) {
+  el('infoTitle').textContent = title;
+  el('infoBody').textContent = body;
+  el('copyReport').hidden = !copy;
+  el('copyReport').textContent = 'Copy report';
+  if (!el('infoDialog').open) el('infoDialog').showModal();
+}
+el('closeInfo').onclick = () => el('infoDialog').close();
+el('copyReport').onclick = async () => {
+  try { await navigator.clipboard.writeText(el('infoBody').textContent); el('copyReport').textContent = 'Copied'; }
+  catch { const range = document.createRange(); range.selectNodeContents(el('infoBody')); const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range); }
+};
+async function postLocal(route, url = endpoint('/' + route), payload) {
+  const response = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json','X-FlashForge-Tab-Action':route},
+    body: payload === undefined ? undefined : JSON.stringify(payload), signal:AbortSignal.timeout(15000)});
+  const result = await response.json();
+  if (!response.ok) throw Error(result.error || 'Request failed.');
+  return result;
+}
+async function diagnose(host) {
+  showInfo('Connection check', 'Reading printer status…');
+  try {
+    const url = host ? new URL('/' + encodeURIComponent(host) + '/diagnostics', location.origin) : endpoint('/diagnostics');
+    const data = await postLocal('diagnostics', url);
+    showInfo('Connection check', ['FlashForge Device Tab 1.9.0', 'Transport: ' + data.transport, 'Status: received',
+      'Authenticated readings: ' + (data.authenticated ? 'available' : 'unavailable'),
+      'Camera URL: ' + (data.cameraReported ? 'reported; stream not tested' : 'not reported')].join('\n'), true);
+  } catch (error) { showInfo('Connection check', error.message, true); }
+}
+el('diagnose').onclick = () => diagnose();
+el('notificationsButton').onclick = async () => {
+  const form = el('notifyForm'), save = form.querySelector('[type=submit]');
+  save.disabled = true;
+  el('notifyStatus').textContent = '';
+  el('notifyDialog').showModal();
+  try {const {notifications} = await getJson('/settings'); for (const [key,v] of Object.entries(notifications)) form.elements[key].checked = v; save.disabled = false;}
+  catch(error) {el('notifyStatus').textContent = error.message;}
+};
+el('closeNotify').onclick = () => el('notifyDialog').close();
+el('notifyForm').onsubmit = async event => {
+  event.preventDefault();
+  const checks = event.target.querySelectorAll('input[name]');
+  try { await postLocal('notifications', undefined, Object.fromEntries(Array.from(checks, c => [c.name,c.checked]))); el('notifyDialog').close(); }
+  catch(error) {el('notifyStatus').textContent = error.message;}
+};
+function showSlots(slots) {
+  el('materials').hidden = !slots?.length;
+  el('slots').replaceChildren(...(slots || []).map(slot => {
+    const box = document.createElement('div'), reel = document.createElement('div'), text = document.createElement('div');
+    box.className = 'slot' + (slot.active ? ' active' : '');
+    box.textContent = 'A' + slot.id;
+    reel.className = 'spool';
+    reel.style.setProperty('--spool', slot.present === false ? '#818681' : slot.color || '#889088');
+    text.textContent = slot.present === false ? 'Empty' : slot.name || 'Unknown';
+    if (slot.active && slot.present !== false) text.append(document.createElement('br'), 'Selected');
+    box.append(reel,text);return box;
+  }));
+}
+function updateAge() {
+  const age = lastObservation == null ? null : Math.max(0, Math.floor(Date.now()/1000-lastObservation));
+  el('freshness').textContent = age == null ? 'Waiting for the first reading' : 'Last reading: ' + age + ' s ago';
+  if (age > 30 && !connectionFailure) {
+    el('connection').textContent = 'Delayed';
+    el('connection').className = 'connection disconnected';
+    el('monitor').classList.add('stale');
+    updateActions({});
+  }
+}
+setInterval(updateAge,1000);
+
+const selectedPrinter = new URL(location.href).searchParams.get('printer');
+function endpoint(path) {
+  const url = new URL(path.replace(/^\//, ''), location.href);
+  if (selectedPrinter && !['/native','/settings','/notifications'].includes(path)) url.searchParams.set('printer',selectedPrinter);
+  return url;
+}
+function printerPage(host) {
+  const url = new URL(location.href);
+  if (url.pathname === '/' + host + '/') url.searchParams.delete('printer');
+  else url.searchParams.set('printer',host);
+  return url;
+}
 let files = [];
 let page = 0;
 let renderVersion = 0;
@@ -426,8 +583,8 @@ function drawChart() {
   ctx.scale(scale, scale);
   const colors = getComputedStyle(chart);
   const series = [
-    ['nozzle', colors.getPropertyValue('--blue').trim(), []],
-    ['nozzleTarget', colors.getPropertyValue('--blue').trim(), [5, 4]],
+    [chartKey, colors.getPropertyValue('--blue').trim(), []],
+    [chartKey + 'Target', colors.getPropertyValue('--blue').trim(), [5, 4]],
     ['bed', colors.colorScheme === 'dark' ? '#ffc08d' : '#a34a20', []],
     ['bedTarget', colors.colorScheme === 'dark' ? '#ffc08d' : '#a34a20', [5, 4]]
   ];
@@ -486,6 +643,18 @@ function drawChart() {
   }
 }
 
+el('chartTool').onchange = () => { chartKey = el('chartTool').value; updateLegend(); drawChart(); };
+function updateLegend() {
+  const label = chartKey === 'nozzle' ? el('nozzleLabel').textContent : chartKey.toUpperCase();
+  el('chartNozzle').textContent = label;
+  el('chartNozzleTarget').textContent = label + ' Target';
+}
+chart.onpointermove = event => {
+  const t = Date.now() - 1800000 + 1800000 * (event.offsetX - 41) / Math.max(1,chart.clientWidth-57);
+  const s = temperatures.reduce((a,b) => !a || Math.abs(b.t-t)<Math.abs(a.t-t) ? b:a,null);
+  el('chartSample').textContent = s && Math.abs(s.t-t)<18000 ? shortTime.format(s.t)+' · '+el('chartNozzle').textContent+' '+plain(s[chartKey])+' / '+plain(s[chartKey+'Target'])+' °C · Bed '+plain(s.bed)+' / '+plain(s.bedTarget)+' °C' : '';
+};
+chart.onpointerleave = () => {el('chartSample').textContent = '';};
 async function updateTools() {
   try {
     const data = await getJson('/telemetry');
@@ -516,6 +685,19 @@ async function updateTools() {
       ? 'Completed: ' + completed.length + ' of ' + jobs.length
         + (total ? ' · Total print time: ' + duration(total) : '')
       : '';
+    historyJobs = jobs;
+    el('historySummary').dataset.summary = el('historySummary').textContent;
+    renderHistory();
+  } catch {
+    drawChart();
+    el('historyStatus').textContent = 'Print history is temporarily unavailable.';
+  }
+}
+el('historySearch').oninput = renderHistory;
+el('failedJobs').onchange = renderHistory;
+function renderHistory() {
+    const jobs = historyJobs.filter(job => (job.file || '').toLowerCase().includes(el('historySearch').value.toLowerCase())
+      && (!el('failedJobs').checked || ['error','cancelled'].includes(job.result)));
     const results = {active: 'In Progress', complete: 'Completed', cancelled: 'Canceled',
                      error: 'Error', unknown: 'Unknown Result'};
     el('historyRows').replaceChildren(...jobs.map(job => {
@@ -525,19 +707,27 @@ async function updateTools() {
         const cell = row.insertCell();
         cell.textContent = value;
       }
+      const button = document.createElement('button');
+      button.textContent = row.cells[0].textContent;
+      button.onclick = () => showInfo(button.textContent, [
+        'Started: ' + historyTime.format(job.started * 1000),
+        'Ended: ' + (Number.isSafeInteger(job.ended) && job.ended >= 0 && job.ended <= 253402300799 ? historyTime.format(job.ended * 1000) : 'Not recorded'),
+        'Print time: ' + (job.elapsed == null ? '—' : duration(job.elapsed)), 'Result: ' + results[job.result],
+        job.result === 'unknown' ? 'The end of this job was not observed.' : ''
+      ].filter(Boolean).join('\n'));
+      row.cells[0].replaceChildren(button);
       return row;
     }));
     el('historyTable').hidden = !jobs.length;
-  } catch {
-    drawChart();
-    el('historyStatus').textContent = 'Print history is temporarily unavailable.';
-  }
+    if (!jobs.length && historyJobs.length) el('historySummary').textContent = 'No matching jobs.';
+    else el('historySummary').textContent = el('historySummary').dataset.summary || '';
+
 }
 
 const cameraImage = el('cameraImage');
 const cameraUrl = el('cameraUrl');
 const cameraStatus = el('cameraStatus');
-const cameraStorageKey = 'flashforge-device-tab-camera-' + window.location.pathname;
+const cameraStorageKey = 'flashforge-device-tab-camera-' + (selectedPrinter ? '/' + selectedPrinter + '/' : location.pathname);
 let cameraTimeout;
 try { cameraUrl.value = localStorage.getItem(cameraStorageKey) || ''; } catch {}
 
@@ -576,7 +766,12 @@ cameraImage.onerror = () => {
   if (cameraImage.hasAttribute('src')) stopCamera('Could not open the MJPEG stream. Check the camera URL.');
 };
 el('cameraStop').onclick = () => stopCamera();
-el('camera').ontoggle = () => { if (!el('camera').open) stopCamera(); };
+for (const id of ['camera','printerDetails']) {
+  const node = el(id), key='ff-layout:'+(selectedPrinter || location.pathname)+':'+id;
+  try {node.open=localStorage.getItem(key)==='open';} catch {}
+  node.ontoggle=()=>{ try {localStorage.setItem(key,node.open?'open':'closed');} catch {}
+    if (id==='camera' && !node.open) stopCamera(); };
+}
 el('history').ontoggle = () => { if (el('history').open) updateTools(); };
 new ResizeObserver(drawChart).observe(chart);
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', drawChart);
@@ -627,6 +822,8 @@ function updateJob(data) {
   el('percent').textContent = data.percent == null ? '' : data.percent + '%';
   el('bar').value = data.percent ?? 0;
   el('time').hidden = data.remaining == null;
+  const finish = data.state === 'PAUSED' ? '' : finishAt(data.remaining, data.observedAt);
+  el('finishTime').textContent = finish ? ' · Finish ≈ ' + finish : '';
   el('remaining').textContent = data.remaining == null ? '' : duration(data.remaining);
   el('timeHint').hidden = !data.active || !data.timeHint;
   el('timeHint').textContent = data.timeHint || '';
@@ -644,6 +841,10 @@ async function updateStatus() {
   const connection = el('connection');
   try {
     const data = await getJson('/status');
+    connectionFailure = '';
+    lastObservation = data.observedAt;
+    el('transport').textContent = data.transport || '';
+    showSlots(data.materials);
     connection.className = 'connection connected';
     connection.textContent = 'Connected';
     el('monitor').classList.remove('stale');
@@ -657,8 +858,13 @@ async function updateStatus() {
       ? (Number.isFinite(data.bed) ? '°C' : '') : '/ ' + celsius(data.bedTarget);
     const tools = data.tools || [];
     el('nozzleLabel').textContent = tools.length ? 'T1' : 'Nozzle';
-    el('chartNozzle').textContent = el('nozzleLabel').textContent;
-    el('chartNozzleTarget').textContent = el('nozzleLabel').textContent + ' Target';
+    const picker = el('chartTool');
+    if (picker.options.length !== tools.length) {
+      picker.replaceChildren(...tools.map((_,i) => new Option('T'+(i+1),'t'+(i+1))));
+      chartKey = tools.length ? picker.value : 'nozzle';
+    }
+    picker.hidden = tools.length < 2;
+    updateLegend();
     const temperatures = (actual, target) => [actual, target]
       .map(value => value == null ? '—' : celsius(value)).join(' / ');
     el('extraNozzlesReading').hidden = tools.length < 2;
@@ -674,13 +880,16 @@ async function updateStatus() {
     updateJob(data);
     updatePrinter(data);
     updateActions(data);
+    updateAge();
     if (!catalogLoaded) refreshFiles();
   } catch (error) {
     connection.className = 'connection disconnected';
+    connectionFailure = error.message;
     connection.textContent = error.message === 'Failed to fetch' ? 'Disconnected' : error.message;
     el('monitor').classList.add('stale');
+    el('status').hidden = false;
+    el('status').textContent = error.status === 409 ? 'Profile changed' : 'Monitoring paused';
     updateActions({});
-    el('status').textContent = '';
     el('time').hidden = true;
     el('timeHint').hidden = true;
     if (error.status === 409) {
@@ -724,7 +933,7 @@ function updateActions(data) {
   el('resumePrint').hidden = !paused;
   el('cancelPrint').hidden = !(running || paused);
   const cancel = el('cancelPrint');
-  if (cancel.classList.contains('armed')) {
+  if (cancel.classList.contains('armed') && (!data.jobControls || !data.active || cancel.dataset.job !== data.file)) {
     cancel.classList.remove('armed');
     cancel.textContent = 'Cancel';
   }
@@ -860,7 +1069,8 @@ const fleetToggle = el('fleetToggle');
 let fleetPrinters = [];
 
 function renderFleet() {
-  const rows = fleetPrinters.map(item => {
+  const visible = fleetPrinters.filter(item => !el('attention').checked || item.error || ['PAUSED','PAUSING','ERROR'].includes(item.state));
+  const rows = visible.map(item => {
     const row = document.createElement('div');
     row.className = 'fleet-row' + (item.current ? ' current' : '');
     const left = document.createElement('div');
@@ -871,48 +1081,70 @@ function renderFleet() {
     meta.className = 'meta';
     const state = item.status || (item.error ? 'No answer' : 'Waiting…');
 
-    const bits = [item.host, state];
+    const bits = [state];
     if (item.file) bits.push(item.file);
-    if (item.percent != null) bits.push(item.percent + '%');
-    if (item.remaining != null) bits.push(duration(item.remaining) + ' left');
+    const finish = item.state === 'PAUSED' ? '' : finishAt(item.remaining,item.observedAt);
+    if (finish) bits.push('Finish ≈ ' + finish);
     meta.textContent = bits.join(' · ');
     left.append(name, meta);
     const right = document.createElement('div');
     right.className = 'value';
     if (item.current) {
-      right.textContent = 'open';
+      const open = document.createElement('button'); open.textContent = 'Open'; open.onclick = () => switchTab('monitor'); right.append(open);
     } else {
       const link = document.createElement('a');
-      link.href = '/' + item.host + '/';
+      link.href = printerPage(item.host);
+      link.onclick = () => {try {localStorage.setItem('ff-fleet','0');} catch {}};
       link.textContent = 'Open';
       right.append(link);
     }
-    row.append(left, right);
+    const progress = document.createElement('div');
+    if (item.percent != null) {
+      progress.textContent = item.percent + '%';
+      const bar = document.createElement('progress');bar.max = 100;bar.value = item.percent;progress.append(bar);
+    }
+    row.append(left, progress, right);
     return row;
   });
   el('fleetList').replaceChildren(...rows);
+  if (!rows.length) el('fleetList').textContent = 'No printers need attention.';
 }
 
 function applyView() {
   const hasPrinters = fleetPrinters.length > 0;
-  const showFleet = hasPrinters && fleetToggle.checked;
+  const showFleet = hasPrinters && view === 'fleet';
+  const showMonitor = hasPrinters && view === 'monitor';
   const current = fleetPrinters.find(item => item.current);
-  el('deviceName').textContent = showFleet ? 'FlashForge' : current?.name || 'FlashForge';
+  const name = current?.name || 'FlashForge';
+  el('deviceName').textContent = showFleet ? 'All printers' : view === 'history' ? 'Print history · ' + name : name;
+  el('status').hidden = !showMonitor;
+  el('nativePage').hidden = Boolean(selectedPrinter && location.pathname !== '/' + selectedPrinter + '/');
   el('setup').hidden = hasPrinters;
   el('fleet').hidden = !showFleet;
-  el('monitor').hidden = !hasPrinters || showFleet;
-  for (const id of ['printerTools', 'history', 'files-section', 'jobActions']) {
-    const node = el(id);
-    if (node) node.hidden = !hasPrinters || showFleet;
+  el('history').hidden = !hasPrinters || view !== 'history';
+  if (!el('history').hidden) el('history').open = true;
+  for (const id of ['monitor','printerTools','files-section','jobActions']) el(id).hidden = !showMonitor;
+  for (const [id,key] of [['monitorTab','monitor'],['fleetToggle','fleet'],['historyTab','history']])
+    el(id).setAttribute('aria-current',view === key ? 'page' : 'false');
+  const picker=el('devicePicker');
+  const options = JSON.stringify(fleetPrinters.map(p=>[p.name,p.host,p.current]));
+  if (picker.dataset.options !== options) {
+    picker.replaceChildren(...fleetPrinters.map(p=>new Option(p.name||p.host,p.host,false,p.current)));
+    picker.dataset.options = options;
   }
+  picker.hidden = !showMonitor || fleetPrinters.length < 2;
   if (showFleet) renderFleet();
 }
-
-fleetToggle.checked = localStorage.getItem('ff-fleet') === '1';
-fleetToggle.onchange = () => {
-  try { localStorage.setItem('ff-fleet', fleetToggle.checked ? '1' : '0'); } catch {}
-  applyView();
-};
+function switchTab(next) {
+  view = next;
+  try {localStorage.setItem('ff-fleet',next === 'fleet' ? '1':'0');} catch {}
+  applyView();drawChart();
+}
+el('devicePicker').onchange = event => {location.href = printerPage(event.target.value);};
+el('monitorTab').onclick = () => switchTab('monitor');
+el('historyTab').onclick = () => switchTab('history');
+fleetToggle.onclick = () => switchTab('fleet');
+el('attention').onchange = renderFleet;
 el('fleetRefresh').onclick = () => updateStatus();
 el('pausePrint').onclick = () => runAction('pause');
 el('resumePrint').onclick = () => runAction('resume');
@@ -920,6 +1152,7 @@ el('cancelPrint').onclick = () => {
   const button = el('cancelPrint');
   if (!button.classList.contains('armed')) {
     button.classList.add('armed');
+    button.dataset.job = jobFile;
     button.textContent = 'Cancel print?';
     setTimeout(() => {
       if (button.classList.contains('armed')) {
@@ -935,13 +1168,51 @@ el('cancelPrint').onclick = () => {
 };
 el('cameraSnapshot').onclick = downloadSnapshot;
 
+function printerRow(entry = {}) {
+  const row = document.createElement('fieldset');
+  row.className = 'printer-fields';
+  for (const [key,title] of [['name','Name'],['host','IPv4 address'],['serial','Serial number'],['code','CheckCode']]) {
+    const label = document.createElement('label'), input = document.createElement('input');
+    label.textContent = title; input.dataset.key = key; input.value = entry[key] || '';
+    input.type = key === 'code' ? 'password' : 'text';input.autocomplete = 'off';
+    if (key === 'host') input.required = true;
+    label.append(input);row.append(label);
+  }
+  const check=document.createElement('button'), remove=document.createElement('button');
+  check.type=remove.type='button';check.textContent='Check saved connection';remove.textContent='Remove';
+  check.disabled=!entry.host;
+  row.oninput=()=>{check.disabled=true;};
+  check.onclick=()=>diagnose(entry.host);remove.onclick=()=>row.remove();
+  row.append(check,remove);return row;
+}
+function fieldPrinters() {
+  return Array.from(el('printerFields').children,row => Object.fromEntries(
+    Array.from(row.querySelectorAll('input'), input=>[input.dataset.key,input.value.trim()])));
+}
+function setRows(entries) {el('printerFields').replaceChildren(...entries.map(printerRow));}
+el('addPrinter').onclick=()=>el('printerFields').append(printerRow());
+let bulkActive=false;
+el('bulk').ontoggle=()=>{
+  const open=el('bulk').open;
+  if (open === bulkActive) return;
+  bulkActive=open;
+  if(open) el('printersText').value=formatPrinters(fieldPrinters());
+  else setRows(parsePrinters(el('printersText').value));
+  el('printerFields').hidden=open;el('addPrinter').hidden=open;
+  for(const field of el('printerFields').querySelectorAll('input')) field.disabled=open;
+};
 el('settingsButton').onclick = async () => {
   el('settingsStatus').textContent = '';
+  el('settingsSave').disabled=true;
+  el('printerFields').replaceChildren();
+  el('printersText').value='';
   settingsDialog.showModal();
   try {
     const data = await getJson('/settings');
     el('printersText').value = formatPrinters(data.printers);
-    el('printersText').focus();
+    setRows(data.printers.length ? data.printers : [{}]);
+    if (el('bulk').open) for (const field of el('printerFields').querySelectorAll('input')) field.disabled=true;
+    el('settingsSave').disabled=false;
   } catch (error) {
     el('settingsStatus').textContent = error.message || 'Could not read the settings.';
   }
@@ -954,16 +1225,21 @@ el('settingsForm').onsubmit = async event => {
   save.disabled = true;
   status.textContent = 'Saving…';
   try {
+    const printers = el('bulk').open ? parsePrinters(el('printersText').value) : fieldPrinters();
     const response = await fetch(endpoint('/settings'), {
       method: 'POST',
       headers: {'Content-Type': 'application/json', 'X-FlashForge-Tab-Action': 'settings'},
-      body: JSON.stringify({printers: parsePrinters(el('printersText').value)}),
+      body: JSON.stringify({printers}),
       signal: AbortSignal.timeout(12000),
     });
     const data = await response.json();
     if (!response.ok) throw Error(data.error || 'Could not save the settings.');
     settingsDialog.close();
-    await updateStatus();
+    if (data.moved && !printers.some(p => location.pathname === '/' + p.host + '/')) {
+      location.assign('/' + encodeURIComponent(data.endpoint) + '/');
+    } else if (selectedPrinter && !printers.some(p => p.host === selectedPrinter)) {
+      location.assign(location.pathname);
+    } else await updateStatus();
   } catch (error) {
     status.textContent = error.message || 'Could not save the settings.';
   } finally {
@@ -1282,6 +1558,32 @@ def detail_number(detail, key, lower, upper):
     return value if lower <= value <= upper else None
 
 
+def material_slots(detail):
+    if detail.get("hasMatlStation") in (0, "0"):
+        return []
+    station = detail.get("matlStationInfo")
+    if not isinstance(station, dict) or station.get("slotCnt") != 4:
+        return []
+    entries = station.get("slotInfos")
+    if not isinstance(entries, list):
+        return []
+    slots = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        slot = entry.get("slotId")
+        if type(slot) is not int or not 1 <= slot <= 4:
+            continue
+        color = entry.get("materialColor")
+        material = entry.get("materialName")
+        present = entry.get("hasFilament")
+        slots[slot] = {"id": slot, "present": present if type(present) is bool else None,
+                       "name": material[:48] if isinstance(material, str) else "",
+                       "color": color if isinstance(color, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", color) else "",
+                       "active": type(station.get("currentSlot")) is int and station["currentSlot"] == slot}
+    return [slots.get(i, {"id": i}) for i in range(1, 5)] if slots else []
+
+
 def read_http_status(host, serial, check_code):
     detail = read_http_detail(host, serial, check_code)
 
@@ -1339,6 +1641,7 @@ def read_http_status(host, serial, check_code):
     return {
         "status": STATES.get(state, state), "state": state, **readings,
         "temperatures": readings, "tools": tools, "jobControls": True,
+        "materials": material_slots(detail), "transport": "HTTP",
         "chamber": chamber if creator_pro and any(value is not None for value in chamber.values()) else None,
         "layer": int(layer) if layer is not None else None,
         "layerTotal": int(total) if total is not None else None,
@@ -1462,6 +1765,7 @@ def read_status(host, check_code, include_details=False):
         "file": raw_name.rsplit("/", 1)[-1] if active or complete or state in ENDED_JOB else "",
         "active": active, "complete": complete,
         "jobControls": bool(serial and check_code and not time_hint),
+        "materials": material_slots(detail), "transport": "TCP + HTTP" if detail else "TCP",
         "remaining": math.ceil(seconds) if seconds is not None else None,
         "timeHint": time_hint or ("The printer has not reported the remaining time yet" if active and seconds is None else ""),
         "elapsed": int(elapsed) if elapsed is not None else None,
@@ -1653,6 +1957,8 @@ class PrintHistory:
             elif state in {"READY", "IDLE"}:
                 job["result"] = "unknown"
             if job["result"] != "active":
+                if job["result"] != "unknown":
+                    job["ended"] = now
                 if job["result"] == "complete" and elapsed is not None:
                     job["elapsed"] = elapsed
                 self.dirty = write_now = True
@@ -1711,8 +2017,14 @@ class PrinterMonitor:
         else:
             self.history.observe(status, now)
             with self.state_lock:
+                self.error = ""
+                status["observedAt"] = now
                 self.latest = status
-                self.temperatures.append({"t": now * 1000, **status["temperatures"]})
+                sample = {"t": now * 1000, **status["temperatures"]}
+                for index, tool in enumerate(status.get("tools", []), 1):
+                    sample[f"t{index}"] = tool["actual"]
+                    sample[f"t{index}Target"] = tool["target"]
+                self.temperatures.append(sample)
                 self.history_snapshot = [job.copy() for job in self.history.jobs]
                 self.history_error = self.history.error
                 if probe_camera or status["cameraUrl"]:
@@ -1777,6 +2089,13 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
         self.uploaded_at = 0.0
         self.stopping = threading.Event()
         self.poller = None
+        self.viewed_host = ""
+        try:
+            saved = json.loads((storage / "notifications.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            saved = {}
+        self.notifications = {k: saved[k] if isinstance(saved, dict) and type(saved.get(k)) is bool else v
+                              for k, v in NOTIFICATIONS.items()}
 
     def printers(self):
         """Configured printers and their plugin credentials."""
@@ -1811,7 +2130,8 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
 
     def settings_payload(self):
         printers = self.printers()
-        return {"printers": printers, "endpoint": printers[0]["host"] if printers else ""}
+        return {"printers": printers, "endpoint": printers[0]["host"] if printers else "",
+                "notifications": self.notifications}
 
     def fleet_payload(self, current=None):
         items = []
@@ -1828,7 +2148,7 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
                     "file": "", "nozzle": None, "bed": None,
                     "printing": False, "complete": False}
             if data:
-                item.update(status=data.get("status"), percent=data.get("percent"),
+                item.update(state=data.get("state"), observedAt=data.get("observedAt"), status=data.get("status"), percent=data.get("percent"),
                             remaining=data.get("remaining"), file=data.get("file"),
                             nozzle=data.get("nozzle"), bed=data.get("bed"),
                             printing=bool(data.get("active")), complete=bool(data.get("complete")))
@@ -1885,18 +2205,19 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
                                 monitor.next_due = 0.0
                                 self.monitors[entry["host"]] = monitor
                             monitor.name = entry["name"]
-                    for position, entry in enumerate(entries):
+                    for entry in entries:
                         monitor = self.monitors.get(entry["host"])
                         if monitor is None or mono < getattr(monitor, "next_due", 0.0):
                             continue
-                        # The first printer is the one usually on screen.
-                        interval = POLL_INTERVAL if position == 0 or len(entries) <= 3 else IDLE_POLL_INTERVAL
+                        priority = self.viewed_host if self.viewed_host in hosts else entries[0]["host"]
+                        interval = POLL_INTERVAL if entry["host"] == priority or len(entries) <= 3 else IDLE_POLL_INTERVAL
                         monitor.next_due = mono + interval
                         with self.printer_io():
                             monitor.adapter.configure(entry["code"], entry["serial"])
-                            monitor.sample(now)
+                            monitor.sample(int(time.time()))
                         if self.notify is not None:
                             try:
+                                monitor.notifications = self.notifications
                                 self.notify(monitor)
                             except Exception:
                                 pass
@@ -1979,16 +2300,68 @@ class MonitorHandler(BaseHTTPRequestHandler):
         endpoint, _, route = path.lstrip("/").partition("/")
         return endpoint, route
 
+    def selected_printer(self, endpoint):
+        requested = parse_qs(urlsplit(self.path).query).get("printer", [])
+        if not requested:
+            return endpoint
+        if len(requested) != 1 or requested[0] not in {p["host"] for p in self.server.printers()}:
+            raise ValueError("This printer is not in the plugin settings.")
+        return requested[0]
+
     def do_POST(self):
         authority = f"{WEB_HOST}:{WEB_PORT}"
         action = self.headers.get("X-FlashForge-Tab-Action")
         if (self.headers.get("Host") != authority
                 or self.headers.get("Origin") != f"http://{authority}"
                 or self.headers.get("Sec-Fetch-Site") not in (None, "same-origin")
-                or action not in ("restore", "settings", "action")):
+                or action not in ("restore", "settings", "action", "diagnostics", "notifications")):
             self.reply_json({"error": "Open the monitor from the Device tab."}, 403)
             return
         endpoint, route = self.request_route()
+        if route in {"action", "diagnostics"} and "?" in self.path:
+            try:
+                if self.server.check_view is not None:
+                    endpoint = self.server.check_view(endpoint)
+                endpoint = self.selected_printer(endpoint)
+            except (OSError, RuntimeError, ValueError) as error:
+                self.reply_json({"error": str(error)}, 409)
+                return
+        if route == action == "notifications":
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                if not 0 < length <= 512:
+                    raise ValueError
+                prefs = json.loads(self.rfile.read(length))
+                if not isinstance(prefs, dict) or prefs.keys() != NOTIFICATIONS.keys() or any(type(v) is not bool for v in prefs.values()):
+                    raise ValueError
+                with self.server.state_lock:
+                    path = self.server.storage / "notifications.json"
+                    temp = path.with_suffix(".tmp")
+                    temp.write_text(json.dumps(prefs), encoding="utf-8")
+                    os.replace(temp, path)
+                    self.server.notifications = prefs
+            except (ValueError, TypeError):
+                self.reply_json({"error": "Invalid notification settings."}, 400)
+            except OSError:
+                self.reply_json({"error": "Could not save notification settings."}, 503)
+            else:
+                self.reply_json(prefs)
+            return
+        if route == action == "diagnostics":
+            entry = next((p for p in self.server.printers() if p["host"] == endpoint), None)
+            if not entry:
+                self.reply_json({"error": "Save this printer before checking the connection."}, 409)
+                return
+            try:
+                with self.server.printer_io():
+                    status = FlashForge(endpoint, entry["code"], entry["serial"]).status(True)
+                self.reply_json({"transport": status["transport"], "authenticated": status["jobControls"],
+                                 "cameraReported": bool(status["cameraUrl"]), "telemetry": True})
+            except UploadInProgress:
+                self.reply_json({"error": "Monitoring is paused during file transfer."}, 503)
+            except (OSError, ValueError) as error:
+                self.reply_json({"error": str(error) if isinstance(error, PrinterAPIError) else "Printer did not respond."}, 503)
+            return
         if route == "settings" and action == "settings":
             self.save_settings()
             return
@@ -2100,6 +2473,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
         try:
             if self.server.check_view is not None:
                 endpoint = self.server.check_view(endpoint)
+            endpoint = self.selected_printer(endpoint)
             if printers and endpoint not in {entry["host"] for entry in printers}:
                 raise ValueError("This printer is not in the plugin settings.")
         except (OSError, RuntimeError, ValueError) as error:
@@ -2108,6 +2482,8 @@ class MonitorHandler(BaseHTTPRequestHandler):
 
         try:
             monitor = self.server.monitors.get(endpoint)
+            if route == "status" and monitor is not None:
+                self.server.viewed_host = endpoint
             uploading = self.server.upload_active()
             if monitor is None:
                 if route == "telemetry":
@@ -2519,27 +2895,40 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         """Show a host notification when a job ends."""
         with monitor.state_lock:
             data = monitor.latest
+        preferences = getattr(monitor, "notifications", NOTIFICATIONS)
         if not data:
-            return
-        state = data.get("state")
+            now = time.monotonic()
+            if getattr(monitor, "offline_since", None) is None:
+                monitor.offline_since = now
+            if not preferences["offline"] or now - monitor.offline_since < 60 or getattr(monitor, "offline_notified", False):
+                return
+            monitor.offline_notified = True
+            state = "OFFLINE"
+        else:
+            monitor.offline_since = None
+            monitor.offline_notified = False
+            state = data.get("state")
         previous = getattr(monitor, "last_state", None)
-        monitor.last_state = state
+        if state != "OFFLINE":
+            monitor.last_state = state
         if previous == state:
             return
-        if state in ("COMPLETED", "BUILDING_COMPLETED"):
+        if state in ("COMPLETED", "BUILDING_COMPLETED", "FINISHED") and preferences["finished"]:
             message = "Print finished"
-        elif state in ("CANCELLED", "CANCELED", "STOPPED"):
+        elif state in ("CANCELLED", "CANCELED", "STOPPED") and preferences["cancelled"]:
             message = "Print cancelled"
-        elif state == "ERROR":
+        elif state == "ERROR" and preferences["error"]:
             message = "Printer error"
+        elif state == "OFFLINE":
+            message = "Printer offline for at least one minute"
         else:
             return
         name = getattr(monitor, "name", "") or "Printer"
-        file = data.get("file") or ""
+        file = (data or {}).get("file") or ""
         try:
             ui = orca.host.ui
             levels = ui.NotificationLevel
-            level = getattr(levels, "WarningNotificationLevel" if state == "ERROR"
+            level = getattr(levels, "WarningNotificationLevel" if state in {"ERROR", "OFFLINE"}
                             else "RegularNotificationLevel")
             ui.push_notification(level, f"{name}: {message}" + (f" — {file}" if file else ""))
         except (AttributeError, RuntimeError, TypeError):

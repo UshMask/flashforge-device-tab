@@ -23,8 +23,8 @@ The screenshots show the plugin running with demonstration data. Select an image
 - **Printer files** — the on-printer file list with previews, 10 per page.
 - **Print history** — jobs with start, end, duration and result, kept on disk so
   it survives OrcaSlicer restarts.
-- **Several printers** — every printer in the plugin settings is monitored; tick
-  **All printers** in the panel header to see them side by side, click one to open
+- **Several printers** — every printer in the plugin settings is monitored. Open
+  **All printers** to see them side by side or filter for attention, then open
   its full panel.
 - **Pause, resume, cancel** — from the panel header. Cancel asks for a second
   click; nothing is sent until you confirm.
@@ -55,7 +55,9 @@ switches back to the plugin panel.
 
 ## Settings
 
-Press **Settings** in the panel header. One printer per line:
+Open **Settings** and enter the printer address, optional display name, CheckCode
+and serial number. **Check saved connection** reads status from the saved
+device. **Edit as text** accepts one printer per line:
 
 ```
 192.168.1.50 | 1a2b3c4d | Adventurer 5M
@@ -76,7 +78,7 @@ back to the address. Use the CheckCode from the printer's network settings.
 
 Creator stock firmware returns a list of file names and serves thumbnails
 separately. It does not report the active tool, TCP endstops, or per-file material
-and time estimates. The temperature chart uses T1 and the bed. The readings
+and time estimates. The temperature chart compares the selected tool and the bed. The readings
 panel also shows T2–T4 and the Pro chamber temperature when available. The
 plugin does not upload files, start prints or change material mappings.
 
@@ -86,7 +88,7 @@ plugin does not upload files, start prints or change material mappings.
 | --- | --- |
 | Adventurer 3 | Experimental progress and temperature parsing, tested locally with documented TCP replies. The panel can show a percentage when the firmware omits layers. Basic monitoring is the initial scope. [Firmware protocol reference](https://github.com/Parallel-7/flashforge-api-docs/blob/main/endpoints/networkserver_commands_adventurer3.yaml) |
 | Adventurer 4 Pro / Lite | Candidates for the same monitoring path. Verify status, progress format and state transitions on each variant before claiming support. [Protocol reference](https://github.com/Parallel-7/flashforge-api-docs/wiki/Adventurer-4-Series) |
-| AD5X | Candidate for the existing TCP and HTTP adapters. Start with ordinary job telemetry, then verify read-only display of the four IFS filament slots on a known firmware. [Protocol research](https://github.com/Parallel-7/flashforge-api-docs/wiki/AD5X) · [Printer specifications](https://www.flashforge.com/products/flashforge-ad5x-3d-printer) |
+| AD5X | Experimental read-only display of four IFS slots when the status response includes station data. The material, color, occupancy and selected slot follow the reported fields. Tested with simulated data. Hardware verification is pending. [Protocol research](https://github.com/Parallel-7/flashforge-api-docs/wiki/AD5X-IFS-Material-Station) |
 | Guider 3 Ultra | FlashForge lists this printer in Flash Studio Desktop. Compatibility with this plugin's LAN requests still needs sample responses. [Vendor software page](https://www.flashforge.com/pages/flash-studio-desktop) |
 | Finder | An existing Cura integration provides a starting point for research. Identify the specific Finder generation and capture its monitoring responses before adding it here. [Finder integration](https://github.com/ronoaldo/FlashforgeFinderIntegration) |
 
