@@ -4,7 +4,7 @@
 # name = "FlashForge Device Tab"
 # description = "Follow local FlashForge prints in the Device tab with live progress, temperatures, camera, print history and job controls."
 # author = "Max"
-# version = "1.9.1"
+# version = "1.10.0"
 # ///
 import base64
 import hashlib
@@ -14,6 +14,7 @@ import json
 import math
 import os
 import re
+import select
 import socket
 import threading
 import time
@@ -28,6 +29,7 @@ import orca
 
 PORT = 8899
 API_PORT = 8898
+CAMERA_PORT = 8080
 MAX_PREVIEW = 2 * 1024 * 1024
 PNG_HEADER = b"\x89PNG\r\n\x1a\n"
 PNG_END = b"\x00\x00\x00\x00IEND\xaeB\x60\x82"
@@ -469,7 +471,7 @@ async function diagnose(host) {
     const url = host ? new URL('/' + encodeURIComponent(host) + '/diagnostics', location.origin) : endpoint('/diagnostics');
     const data = await postLocal('diagnostics', url);
     if (!current()) return;
-    showInfo('Connection check', ['FlashForge Device Tab 1.9.1', 'Transport: ' + data.transport, 'Status: received',
+    showInfo('Connection check', ['FlashForge Device Tab 1.10.0', 'Transport: ' + data.transport, 'Status: received',
       'Authenticated readings: ' + (data.authenticated ? 'available' : 'unavailable'),
       'Camera URL: ' + (data.cameraReported ? 'reported; stream not tested' : 'not reported')].join('\n'), true);
   } catch (error) { if (current()) showInfo('Connection check', error.message, true); }
@@ -735,11 +737,28 @@ const cameraUrl = el('cameraUrl');
 const cameraStatus = el('cameraStatus');
 const cameraStorageKey = 'flashforge-device-tab-camera-' + (selectedPrinter ? '/' + selectedPrinter + '/' : location.pathname);
 let cameraTimeout;
+let managedCamera = false;
+let cameraSession = null;
+let cameraFrame = null;
+let frameUrl = '';
+let resumeCamera = false;
+const resumeKey = cameraStorageKey + '-resume';
+try { resumeCamera = localStorage.getItem(resumeKey) === '1'; } catch {}
 try { cameraUrl.value = localStorage.getItem(cameraStorageKey) || ''; } catch {}
 
-function stopCamera(message = '') {
+function rememberCamera(value) {
+  resumeCamera = value;
+  try { localStorage.setItem(resumeKey, value ? '1' : '0'); } catch {}
+}
+function stopCamera(message = '', suspend = false) {
+  if (!suspend && managedCamera) rememberCamera(false);
+  cameraSession?.abort();
+  cameraSession = null;
+  cameraFrame = null;
   clearTimeout(cameraTimeout);
   cameraImage.removeAttribute('src');
+  if (frameUrl) URL.revokeObjectURL(frameUrl);
+  frameUrl = '';
   cameraImage.hidden = true;
   el('cameraSnapshot').hidden = true;
   el('cameraStop').hidden = true;
@@ -747,8 +766,94 @@ function stopCamera(message = '') {
   cameraStatus.textContent = message;
 }
 
+// Parse JPEG segment lengths so an embedded thumbnail cannot terminate the outer image.
+function* jpegFrames(chunk, state) {
+  for (const byte of chunk) {
+    if (state.length) {
+      if (state.length === state.bytes.length) throw Error('Camera frame exceeds the size limit.');
+      state.bytes[state.length++] = byte;
+      if (state.sizeBytes) {
+        state.size = state.size * 256 + byte;
+        if (--state.sizeBytes === 0) {
+          if (state.size < 2) throw Error('Invalid JPEG segment.');
+          state.skip = state.size - 2;
+        }
+      } else if (state.skip) {
+        state.skip--;
+      } else if (state.marker && byte === 217) {
+        yield new Blob([state.bytes.subarray(0,state.length)], {type:'image/jpeg'});
+        state.length = 0;
+      } else if (state.marker && byte > 1 && byte < 255 && !(byte >= 208 && byte <= 216)) {
+        state.sizeBytes = 2;
+        state.size = 0;
+      } else {
+        state.marker = byte === 255;
+        continue;
+      }
+      state.marker = false;
+    } else {
+      if (state.marker && byte === 216) {
+        state.bytes.set([255,216]);
+        state.length = 2;
+      }
+      state.marker = byte === 255;
+    }
+  }
+}
+
+async function startManagedCamera() {
+  if (cameraSession) return;
+  const session = new AbortController();
+  cameraSession = session;
+  rememberCamera(true);
+  el('cameraStart').disabled = true;
+  el('cameraStop').hidden = false;
+  cameraStatus.textContent = 'Opening Creator 5 Pro camera…';
+  const frameTimeout = () => stopCamera('No camera frame received. Connect to try again.');
+  cameraTimeout = setTimeout(frameTimeout, 20000);
+  try {
+    const response = await fetch(endpoint('/camera-stream'), {method:'POST', signal:session.signal,
+      headers:{'X-FlashForge-Tab-Action':'camera-stream'}});
+    if (!response.ok) throw Error((await response.json()).error);
+    const reader = response.body.getReader();
+    // The proxy forwards original MJPEG chunks. JPEG markers may straddle two reads.
+    const state = {bytes:new Uint8Array(2000000), length:0, marker:false, sizeBytes:0, skip:0};
+    while (cameraSession === session) {
+      const {done, value} = await reader.read();
+      if (done) throw Error('Camera stream ended. Connect to try again.');
+      for (const blob of jpegFrames(value, state)) {
+        const url = URL.createObjectURL(blob);
+        const decoded = new Image();
+        decoded.src = url;
+        try { await decoded.decode(); } catch (error) { URL.revokeObjectURL(url); throw error; }
+        if (cameraSession !== session) { URL.revokeObjectURL(url); return; }
+        cameraImage.src = url;
+        if (frameUrl) URL.revokeObjectURL(frameUrl);
+        frameUrl = url;
+        cameraFrame = blob;
+        cameraImage.hidden = false;
+        el('cameraSnapshot').hidden = false;
+        cameraStatus.textContent = '';
+        clearTimeout(cameraTimeout);
+        cameraTimeout = setTimeout(frameTimeout, 10000);
+      }
+    }
+  } catch (error) {
+    if (cameraSession === session) stopCamera(error.message || 'Could not open the camera.');
+  }
+}
+function syncCameraView() {
+  if (!managedCamera) return;
+  if (document.hidden || el('printerTools').hidden || !el('camera').open) {
+    if (cameraSession) stopCamera('', true);
+  } else if (resumeCamera) startManagedCamera();
+}
+document.addEventListener('visibilitychange', syncCameraView);
+window.addEventListener('pagehide', () => stopCamera('', true));
+window.addEventListener('pageshow', syncCameraView);
 el('cameraForm').onsubmit = event => {
   event.preventDefault();
+  if (managedCamera) { startManagedCamera(); return; }
   let url;
   try { url = new URL(cameraUrl.value.trim()); } catch {}
   if (!url || !['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
@@ -765,6 +870,7 @@ el('cameraForm').onsubmit = event => {
   cameraTimeout = setTimeout(() => stopCamera('No frame received. Check the URL and confirm the stream uses MJPEG.'), 12000);
 };
 cameraImage.onload = () => {
+  if (managedCamera) return;
   clearTimeout(cameraTimeout);
   cameraStatus.textContent = '';
 };
@@ -776,7 +882,7 @@ for (const id of ['camera','printerDetails']) {
   const node = el(id), key='ff-layout:'+(selectedPrinter || location.pathname)+':'+id;
   try {node.open=localStorage.getItem(key)==='open';} catch {}
   node.ontoggle=()=>{ try {localStorage.setItem(key,node.open?'open':'closed');} catch {}
-    if (id==='camera' && !node.open) stopCamera(); };
+    if (id==='camera') { if (!node.open) stopCamera('', true); else syncCameraView(); } };
 }
 el('history').ontoggle = () => { if (el('history').open) updateTools(); };
 new ResizeObserver(drawChart).observe(chart);
@@ -884,6 +990,11 @@ async function updateStatus() {
       el(key).textContent = data[key] == null ? '' : data[key] + ' %';
     }
     updateJob(data);
+    managedCamera = Boolean(data.managedCamera);
+    cameraUrl.hidden = managedCamera;
+    cameraUrl.disabled = managedCamera;
+    document.querySelector('label[for="cameraUrl"]').hidden = managedCamera;
+    syncCameraView();
     updatePrinter(data);
     updateActions(data);
     updateAge();
@@ -969,11 +1080,15 @@ async function runAction(action) {
   }
 }
 
-function downloadSnapshot() {
-  const url = endpoint('/snapshot');
-  fetch(url).then(async response => {
-    if (!response.ok) throw new Error('No snapshot');
-    const blob = await response.blob();
+async function downloadSnapshot() {
+  try {
+    let blob = cameraFrame;
+    if (!blob) {
+      if (managedCamera) return;
+      const response = await fetch(endpoint('/snapshot'));
+      if (!response.ok) throw new Error('No snapshot');
+      blob = await response.blob();
+    }
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
     link.download = 'printer-snapshot.jpg';
@@ -981,9 +1096,9 @@ function downloadSnapshot() {
     link.click();
     link.remove();
     setTimeout(() => URL.revokeObjectURL(link.href), 10000);
-  }).catch(() => {
+  } catch {
     el('cameraStatus').textContent = 'Could not read a snapshot from the printer.';
-  });
+  }
 }
 
 function fileCard(file) {
@@ -1145,6 +1260,7 @@ function applyView() {
   el('history').hidden = !hasPrinters || view !== 'history';
   if (!el('history').hidden) el('history').open = true;
   for (const id of ['monitor','printerTools','files-section','jobActions']) el(id).hidden = !showMonitor;
+  syncCameraView();
   for (const [id,key] of [['monitorTab','monitor'],['fleetToggle','fleet'],['historyTab','history']])
     el(id).setAttribute('aria-current',view === key ? 'page' : 'false');
   const picker=el('devicePicker');
@@ -1683,7 +1799,7 @@ def read_http_status(host, serial, check_code):
         "filament": None,
         "fan": detail_number(detail, "coolingFanSpeed", 0, 100),
         "speed": detail_number(detail, "printSpeedAdjust", 1, 1000),
-        "cameraUrl": camera,
+        "cameraUrl": camera, "managedCamera": creator_pro,
         "info": {"model": model, "name": field("name"), "firmware": field("firmwareVersion"),
                  "serial": serial, "mac": field("macAddr"), "volume": list(map(int, volume.groups())) if volume else None,
                  "tools": detail_number(detail, "nozzleCnt", 1, 16)},
@@ -2017,6 +2133,7 @@ class PrinterMonitor:
         self.files = {}
         self.latest = None
         self.camera_url = ""
+        self.camera_lock = threading.Lock()
         self.next_camera_probe = 0
         self.error = "Connecting to the printer…"
         self.permission_denied = False
@@ -2343,11 +2460,11 @@ class MonitorHandler(BaseHTTPRequestHandler):
         if (self.headers.get("Host") != authority
                 or self.headers.get("Origin") != f"http://{authority}"
                 or self.headers.get("Sec-Fetch-Site") not in (None, "same-origin")
-                or action not in ("restore", "settings", "action", "diagnostics", "notifications")):
+                or action not in ("restore", "settings", "action", "diagnostics", "notifications", "camera-stream")):
             self.reply_json({"error": "Open the monitor from the Device tab."}, 403)
             return
         endpoint, route = self.request_route()
-        if route in {"action", "diagnostics"} and "?" in self.path:
+        if route == "camera-stream" or (route in {"action", "diagnostics"} and "?" in self.path):
             try:
                 if self.server.check_view is not None:
                     endpoint = self.server.check_view(endpoint)
@@ -2355,6 +2472,9 @@ class MonitorHandler(BaseHTTPRequestHandler):
             except (OSError, RuntimeError, ValueError) as error:
                 self.reply_json({"error": str(error)}, 409)
                 return
+        if route == action == "camera-stream":
+            self.stream_camera(endpoint)
+            return
         if route == action == "notifications":
             try:
                 length = int(self.headers.get("Content-Length") or 0)
@@ -2406,6 +2526,80 @@ class MonitorHandler(BaseHTTPRequestHandler):
             self.reply_json({"error": str(error)}, 409)
         else:
             self.reply_json({})
+
+    def stream_camera(self, endpoint):
+        monitor = self.server.monitors.get(endpoint)
+        entry = next((p for p in self.server.printers() if p["host"] == endpoint), None)
+        if not monitor or not entry or not entry["code"] or not entry["serial"]:
+            self.reply_json({"error": "Save the printer serial and CheckCode first."}, 409)
+            return
+        with monitor.state_lock:
+            status = monitor.latest or {}
+        if not status.get("managedCamera"):
+            self.reply_json({"error": "The Creator 5 Pro camera is unavailable."}, 409)
+            return
+        if not monitor.camera_lock.acquire(timeout=6):
+            self.reply_json({"error": "Camera is in use. Close the other view and reconnect."}, 409)
+            return
+
+        def control(action):
+            printer_api(endpoint, entry["serial"], entry["code"], "/control",
+                        {"payload": {"cmd": "streamCtrl", "args": {"action": action}}})
+
+        def disconnected(timeout=0):
+            return (self.server.stopping.is_set() or self.server.monitors.get(endpoint) is not monitor
+                    or bool(select.select([self.connection], [], [], timeout)[0]))
+
+        started = attempted = False
+        try:
+            if disconnected():
+                return
+            parts = urlsplit(status.get("cameraUrl") or "/?action=stream")
+            path = (parts.path or "/") + ("?" + parts.query if parts.query else "")
+            # Some firmware acknowledges open before the video listener is ready.
+            for attempt in range(4):
+                if disconnected():
+                    return
+                with self.server.printer_io():
+                    attempted = True
+                    control("open")
+                if disconnected(2):
+                    return
+                upstream = http.client.HTTPConnection(endpoint, CAMERA_PORT, timeout=3)
+                try:
+                    upstream.request("GET", path)
+                    with upstream.getresponse() as response:
+                        if response.status != 200:
+                            raise OSError("Camera is warming up")
+                        chunk = response.read1(32768)
+                        if not chunk:
+                            raise OSError("Empty camera stream")
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/octet-stream")
+                        self.send_header("Cache-Control", "no-store")
+                        self.end_headers()
+                        started = True
+                        self.connection.settimeout(4)
+                        while chunk and not disconnected():
+                            self.wfile.write(chunk)
+                            chunk = response.read1(32768)
+                        return
+                except (OSError, http.client.HTTPException):
+                    if started or attempt == 3:
+                        raise
+                finally:
+                    upstream.close()
+        except (ValueError, OSError, http.client.HTTPException, UploadInProgress):
+            if not started and not disconnected():
+                self.reply_json({"error": "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect."}, 503)
+        finally:
+            try:
+                if attempted:
+                    control("close")
+            except (OSError, ValueError):
+                pass
+            finally:
+                monitor.camera_lock.release()
 
     def run_action(self, endpoint):
         try:
@@ -2550,6 +2744,9 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 self.reply_json({"files": [{"id": key, "name": name} for key, (name, _) in files.items()]})
                 return
             if route == "snapshot":
+                if data.get("managedCamera"):
+                    self.reply_json({"error": "Save a frame from the active camera view."}, 409)
+                    return
                 camera = monitor.camera_url
                 if not camera:
                     self.reply_json({"error": "This printer has no camera."}, 404)

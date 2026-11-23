@@ -5,6 +5,9 @@ is left, check nozzle and bed temperatures, or open the printer camera.
 Switch between your local printers and review completed jobs after a restart.
 Printers with a working authenticated control API also offer pause, resume and cancel.
 
+**1.10.0 is the stable release.** The feature set is frozen. Future maintenance
+is limited to bug fixes and compatibility updates for existing features.
+
 [![Live print monitoring in the Device tab](docs/01-live-monitor.png)](docs/panel.png)
 
 | All printers | Print history |
@@ -73,8 +76,13 @@ back to the address. Use the CheckCode from the printer's network settings.
 - **Creator 5 / 5 Pro** requires the serial number and CheckCode. Enable LAN-only
   mode on stock firmware. The Device tab can read print status, temperatures,
   available progress and time fields, file names and thumbnails. It also uses
-  the reported MJPEG camera URL and the existing pause, resume and cancel
-  controls. Creator support has been tested with a simulated printer.
+  the existing pause, resume and cancel controls. Creator support has been
+  tested with a simulated printer.
+
+On **Creator 5 Pro**, open **Camera → Connect** to start the built-in camera.
+**Save snapshot** downloads the displayed JPEG while video continues. Closing
+the Device tab releases the camera. Returning to the monitor reconnects when
+the Camera panel is open. Choose **Disconnect** to turn off automatic reopening.
 
 Creator stock firmware returns a list of file names and serves thumbnails
 separately. It does not report the active tool, TCP endstops, or per-file material
@@ -122,11 +130,18 @@ status read. Creator cameras use a separate MJPEG stream on port 8080.
 
 ```powershell
 python -m unittest discover -s tests
+node --test tests/panel-regressions.test.cjs
 ```
 
 The tests use an Adventurer fixture with both transports and a Creator fixture
 with HTTP only. They exercise status, files, thumbnails, job controls, LAN mode
 and credential errors, history, settings and the Device page bridge.
+
+With Chrome installed and the Playwright Node package available, run
+`node tests/camera-browser.cjs` for the Creator 5 Pro camera lifecycle test.
+It starts its own local printer simulator, compares the saved JPEG with the
+displayed frame and checks the camera commands across closing and reopening
+the browser tab.
 
 ## Releasing
 

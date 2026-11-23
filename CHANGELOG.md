@@ -1,5 +1,14 @@
 ﻿# Changelog
 
+## 1.10.0
+
+- Added LAN camera viewing for Creator 5 Pro. Save the displayed frame as a
+  JPEG during playback. Hiding or closing the monitor releases the camera.
+  Returning reconnects until the user chooses **Disconnect**.
+- Verified playback, snapshot continuity and reconnection with a simulated
+  Creator 5 Pro in Chrome. Physical printer verification is pending.
+- This stable release freezes the feature set and begins maintenance-only support.
+
 ## 1.9.1
 
 - Pause, resume and cancel now report the observed printer state. If a transition

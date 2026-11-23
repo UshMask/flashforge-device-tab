@@ -635,7 +635,9 @@ class CreatorHTTPTests(unittest.TestCase):
                     result = {"code": 0, "imageData": image}
                 elif self.path == "/control":
                     args = body["payload"]["args"]
-                    if fixture.control_readbacks is None:
+                    if body["payload"]["cmd"] == "streamCtrl":
+                        fixture.camera_control(args["action"])
+                    elif fixture.control_readbacks is None:
                         fixture.detail["status"] = {"pause": "pause", "continue": "printing",
                                                     "cancel": "canceling"}[args["action"]]
                     else:
