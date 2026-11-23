@@ -610,6 +610,8 @@ class CreatorHTTPTests(unittest.TestCase):
         self.calls = []
         self.lan_only = True
         self.bad_detail = False
+        self.control_readbacks = None
+        self.pending_states = []
         fixture = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -623,6 +625,8 @@ class CreatorHTTPTests(unittest.TestCase):
                 elif body["checkCode"] != "abc01234":
                     result = {"code": 1, "message": "Access code is different"}
                 elif self.path == "/detail":
+                    if fixture.pending_states:
+                        fixture.detail["status"] = fixture.pending_states.pop(0)
                     result = {"code": 0, "detail": fixture.detail}
                 elif self.path == "/gcodeList":
                     result = {"code": 0, "gcodeList": ["Тест 5.3mf", "", 5, "../unexpected.gcode"]}
@@ -631,8 +635,11 @@ class CreatorHTTPTests(unittest.TestCase):
                     result = {"code": 0, "imageData": image}
                 elif self.path == "/control":
                     args = body["payload"]["args"]
-                    fixture.detail["status"] = {"pause": "pause", "continue": "printing",
-                                                "cancel": "canceling"}[args["action"]]
+                    if fixture.control_readbacks is None:
+                        fixture.detail["status"] = {"pause": "pause", "continue": "printing",
+                                                    "cancel": "canceling"}[args["action"]]
+                    else:
+                        fixture.pending_states = list(fixture.control_readbacks)
                     result = {"code": 0}
                 else:
                     self.send_error(404)
@@ -658,6 +665,29 @@ class CreatorHTTPTests(unittest.TestCase):
         ports.start()
         self.addCleanup(ports.stop)
         self.adapter = plugin.FlashForge("127.0.0.1", "abc01234", "SN-C5P")
+
+    def act_with_readbacks(self, action, states):
+        with tempfile.TemporaryDirectory() as folder:
+            host = "127.0.0.1"
+            entry = {"host": host, "code": "abc01234", "serial": "SN-C5P"}
+            with plugin.LoopbackServer((host, 0), plugin.MonitorHandler) as server:
+                server.configure(lambda: {"printers": [entry]}, Path(folder))
+                monitor = plugin.PrinterMonitor(self.adapter, Path(folder) / "history.json")
+                server.monitors[host] = monitor
+                service = plugin.FlashForgeService()
+                service._server = server
+                monitor.sample(int(time.time()))
+                self.control_readbacks = states
+                return service.act(host, action)
+
+    def test_delayed_pause_checks_status_without_repeating_command(self):
+        self.assertEqual(self.act_with_readbacks("pause", ["printing", "pause"]), "PAUSED")
+        self.assertEqual(sum(path == "/control" for path, _ in self.calls), 1)
+
+    def test_ignored_cancel_reports_observed_state_and_sends_once(self):
+        with self.assertRaisesRegex(RuntimeError, "did not confirm cancel.*PRINTING"):
+            self.act_with_readbacks("cancel", [])
+        self.assertEqual(sum(path == "/control" for path, _ in self.calls), 1)
 
     def test_fallback_caches_http_and_decodes_creator_status(self):
         with patch.object(plugin, "read_status", wraps=plugin.read_status) as tcp:

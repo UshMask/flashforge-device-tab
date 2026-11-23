@@ -1,5 +1,14 @@
 ﻿# Changelog
 
+## 1.9.1
+
+- Pause, resume and cancel now report the observed printer state. If a transition
+  takes time, the panel checks status again and sends the command only once.
+- Switching between printer fields and bulk text preserves vertical bars in
+  CheckCodes and names. Existing pipe-delimited rows remain supported.
+- A late connection-check response can no longer reopen a dismissed dialog or
+  replace a newer report.
+
 ## 1.9.0
 
 - Navigate between Monitor, All printers and History. The job card shows the

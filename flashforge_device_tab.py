@@ -4,7 +4,7 @@
 # name = "FlashForge Device Tab"
 # description = "Follow local FlashForge prints in the Device tab with live progress, temperatures, camera, print history and job controls."
 # author = "Max"
-# version = "1.9.0"
+# version = "1.9.1"
 # ///
 import base64
 import hashlib
@@ -310,6 +310,7 @@ main {padding-top:0}
       <button id="resumePrint" type="button" hidden>Resume</button>
       <button id="cancelPrint" type="button" class="danger" hidden>Cancel</button>
       </div>
+      <p id="actionStatus" role="status" class="tool-body" hidden></p>
     </section>
     <section class="panel" aria-labelledby="chart-title">
       <div class="row panel-title"><h2 id="chart-title">Temperatures · Last 30 Minutes</h2><select id="chartTool" aria-label="Chart nozzle" hidden></select></div>
@@ -411,7 +412,8 @@ main {padding-top:0}
     <h2 id="settingsTitle">Printers</h2>
     <div id="printerFields"></div><button type="button" id="addPrinter">Add printer</button>
     <details id="bulk"><summary>Edit as text</summary><label for="printersText">One printer per line: address | CheckCode | name | serial number</label>
-    <textarea id="printersText" rows="5" spellcheck="false" placeholder="192.168.1.50 | 1a2b3c4d | Adventurer 5M"></textarea></details>
+    <textarea id="printersText" rows="5" spellcheck="false" placeholder="192.168.1.50 | 1a2b3c4d | Adventurer 5M"></textarea>
+    <p class="caption">Use a JSON array of four strings when a value contains a vertical bar.</p></details>
     <p class="caption">Creator 5 and 5 Pro require both CheckCode and the printer serial number.
       Adventurer 5M reads its serial number automatically.</p>
     <p class="caption" id="settingsStatus" role="status"></p>
@@ -439,12 +441,14 @@ const finishClock = new Intl.DateTimeFormat(undefined, {hour:'2-digit', minute:'
 function finishAt(seconds, stamp) {
   return Number.isFinite(seconds) && Number.isFinite(stamp) ? finishClock.format((stamp + seconds) * 1000) : '';
 }
+let infoRevision = 0;
 function showInfo(title, body, copy = false) {
   el('infoTitle').textContent = title;
   el('infoBody').textContent = body;
   el('copyReport').hidden = !copy;
   el('copyReport').textContent = 'Copy report';
   if (!el('infoDialog').open) el('infoDialog').showModal();
+  return ++infoRevision;
 }
 el('closeInfo').onclick = () => el('infoDialog').close();
 el('copyReport').onclick = async () => {
@@ -459,14 +463,16 @@ async function postLocal(route, url = endpoint('/' + route), payload) {
   return result;
 }
 async function diagnose(host) {
-  showInfo('Connection check', 'Reading printer status…');
+  const revision = showInfo('Connection check', 'Reading printer status…');
+  const current = () => el('infoDialog').open && revision === infoRevision;
   try {
     const url = host ? new URL('/' + encodeURIComponent(host) + '/diagnostics', location.origin) : endpoint('/diagnostics');
     const data = await postLocal('diagnostics', url);
-    showInfo('Connection check', ['FlashForge Device Tab 1.9.0', 'Transport: ' + data.transport, 'Status: received',
+    if (!current()) return;
+    showInfo('Connection check', ['FlashForge Device Tab 1.9.1', 'Transport: ' + data.transport, 'Status: received',
       'Authenticated readings: ' + (data.authenticated ? 'available' : 'unavailable'),
       'Camera URL: ' + (data.cameraReported ? 'reported; stream not tested' : 'not reported')].join('\n'), true);
-  } catch (error) { showInfo('Connection check', error.message, true); }
+  } catch (error) { if (current()) showInfo('Connection check', error.message, true); }
 }
 el('diagnose').onclick = () => diagnose();
 el('notificationsButton').onclick = async () => {
@@ -940,7 +946,12 @@ function updateActions(data) {
 }
 
 async function runAction(action) {
-  const connection = el('connection');
+  const status = el('actionStatus');
+  const buttons = el('jobActions').querySelectorAll('button');
+  if (Array.from(buttons).some(button => button.disabled)) return;
+  for (const button of buttons) button.disabled = true;
+  status.hidden = false;
+  status.textContent = 'Checking the result of ' + action + '…';
   try {
     const response = await fetch(endpoint('/action'), {
       method: 'POST',
@@ -949,12 +960,12 @@ async function runAction(action) {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || 'The printer did not accept the command.');
-    connection.className = 'connection connected';
-    connection.textContent = 'Connected';
+    status.textContent = 'Printer confirmed ' + action + ' · ' + data.state;
     await updateStatus();
   } catch (error) {
-    connection.className = 'connection disconnected';
-    connection.textContent = error.message || 'Command failed';
+    status.textContent = error.message || 'Command result unavailable.';
+  } finally {
+    for (const button of buttons) button.disabled = false;
   }
 }
 
@@ -1053,7 +1064,15 @@ const settingsDialog = el('settingsDialog');
 function parsePrinters(value) {
   const printers = [];
   for (const line of value.split(/\r?\n/)) {
-    const parts = line.split('|').map(part => part.trim());
+    let parts;
+    if (line.trimStart().startsWith('[')) {
+      try { parts = JSON.parse(line); } catch { throw Error('Invalid JSON printer row.'); }
+      if (!Array.isArray(parts) || parts.length !== 4 || !parts.every(p => typeof p === 'string'))
+        throw Error('A JSON printer row needs four strings: address, CheckCode, name and serial.');
+    } else {
+      parts = line.split('|').map(part => part.trim());
+      if (parts.length > 4) throw Error('Use a JSON array for values containing a vertical bar.');
+    }
     if (!parts[0]) continue;
     printers.push({host: parts[0], code: parts[1] || '', name: parts[2] || '', serial: parts[3] || ''});
   }
@@ -1061,8 +1080,10 @@ function parsePrinters(value) {
 }
 
 function formatPrinters(printers) {
-  return (printers || []).map(item => [item.host, item.code || '', item.name || '', item.serial || '']
-    .join(' | ').replace(/(?: \| )+$/, '')).join('\n');
+  return (printers || []).map(item => {
+    const parts = [item.host, item.code || '', item.name || '', item.serial || ''];
+    return parts.some(p => /[|\r\n]/.test(p)) ? JSON.stringify(parts) : parts.join(' | ').replace(/(?: \| )+$/, '');
+  }).join('\n');
 }
 
 const fleetToggle = el('fleetToggle');
@@ -1195,9 +1216,17 @@ let bulkActive=false;
 el('bulk').ontoggle=()=>{
   const open=el('bulk').open;
   if (open === bulkActive) return;
-  bulkActive=open;
   if(open) el('printersText').value=formatPrinters(fieldPrinters());
-  else setRows(parsePrinters(el('printersText').value));
+  else {
+    try { setRows(parsePrinters(el('printersText').value)); }
+    catch (error) {
+      el('settingsStatus').textContent = error.message;
+      el('bulk').open = true;
+      return;
+    }
+  }
+  bulkActive=open;
+  el('settingsStatus').textContent = '';
   el('printerFields').hidden=open;el('addPrinter').hidden=open;
   for(const field of el('printerFields').querySelectorAll('input')) field.disabled=open;
 };
@@ -2935,6 +2964,11 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             pass
 
     ACTIONS = {"pause": "pause", "resume": "continue", "cancel": "cancel"}
+    CONFIRMED_STATES = {
+        "pause": {"PAUSED"},
+        "resume": {"PRINTING", "BUILDING", "BUILDING_FROM_SD", "HEATING"},
+        "cancel": {"CANCELING", "CANCELLING", "CANCELLED", "CANCELED", "STOPPED"},
+    }
 
     def act(self, host, action):
         target = self.ACTIONS.get(action)
@@ -2957,11 +2991,25 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                 if monitor.adapter.http_only and serial != entry["serial"]:
                     raise ValueError("Wait for the printer to reconnect with the new settings.")
                 control_job(host, serial, entry["code"], target)
-                monitor.sample(int(time.time()))
+                deadline = time.monotonic() + 4
+                for attempt in range(4):
+                    if attempt and (time.monotonic() >= deadline or self._server.stopping.wait(0.6)):
+                        break
+                    if self._server.upload_active() or self._server.stopping.is_set():
+                        break
+                    monitor.sample(int(time.time()))
+                    with monitor.state_lock:
+                        observed = monitor.latest or {}
+                    state = observed.get("state", "")
+                    if data.get("file") and observed.get("file") and data["file"] != observed["file"]:
+                        raise RuntimeError(f"The current job changed before {action} could be confirmed.")
+                    if state in self.CONFIRMED_STATES[action]:
+                        return state
+                with monitor.state_lock:
+                    last = (monitor.latest or {}).get("state") or "unavailable"
+                raise RuntimeError(f"Printer did not confirm {action}. Last reported state: {last}.")
         except UploadInProgress as error:
             raise RuntimeError("OrcaSlicer is sending a print job. Try again when it finishes.") from error
-        with monitor.state_lock:
-            return (monitor.latest or {}).get("state", "")
 
     def restore_page(self, view):
         # Request threads are not joined during unload. They can wait for the
