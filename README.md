@@ -5,7 +5,13 @@ is left, check nozzle and bed temperatures, or open the printer camera.
 Switch between your local printers and review completed jobs after a restart.
 Printers with a working authenticated control API also offer pause, resume and cancel.
 
-![The Device tab with the printer panel](docs/panel.png)
+[![Live print monitoring in the Device tab](docs/01-live-monitor.png)](docs/panel.png)
+
+| All printers | Print history |
+| --- | --- |
+| [![Fleet view with printing, paused and ready printers](docs/02-printer-fleet.png)](docs/02-printer-fleet.png) | [![Print history with durations and outcomes](docs/03-print-history.png)](docs/03-print-history.png) |
+
+The screenshots show the plugin running with demonstration data. Select an image for a closer look.
 
 ## What it does
 
