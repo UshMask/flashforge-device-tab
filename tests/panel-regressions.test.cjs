@@ -6,6 +6,23 @@ const test = require('node:test');
 
 const source = readFileSync(path.join(__dirname, '..', 'flashforge_device_tab.py'), 'utf8');
 const script = source.split('<script>')[1].split('</script>')[0];
+
+test('manual panel hides unavailable model controls and locks supported controls while busy', () => {
+  const nodes = Object.fromEntries(['manualPanel','manualState','manualBody','jogStep','manualTimer'].map(id=>[id,{}]));
+  const motion = {dataset:{group:'motion'}}, calibration = {dataset:{group:'calibration'}};
+  const level = {dataset:{manual:'level'}, hasAttribute:()=>false};
+  nodes.manualBody.querySelectorAll = selector => selector === 'button' ? [level] : [motion,calibration];
+  const context = vm.createContext({el:id=>nodes[id]});
+  vm.runInContext(section('let manual =', 'async function sendManual'), context);
+  vm.runInContext("manual = {groups:['calibration'], allowed:['level']}; renderManual()", context);
+  assert.equal(motion.hidden, true);
+  assert.equal(calibration.hidden, false);
+  assert.equal(level.disabled, false);
+  vm.runInContext('manual.allowed = []; renderManual()', context);
+  assert.equal(level.disabled, true);
+  vm.runInContext('manual = null; renderManual()', context);
+  assert.equal(nodes.manualPanel.hidden, true);
+});
 function section(from, until) {
   const start = script.indexOf(from);
   const end = script.indexOf(until, start);

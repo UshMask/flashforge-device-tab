@@ -5,8 +5,8 @@ is left, check nozzle and bed temperatures, or open the printer camera.
 Switch between your local printers and review completed jobs after a restart.
 Printers with a working authenticated control API also offer pause, resume and cancel.
 
-**1.10.0 is the stable release.** The feature set is frozen. Future maintenance
-is limited to bug fixes and compatibility updates for existing features.
+**Stable release 1.11.0** adds model-specific manual controls for Adventurer,
+AD5X and Creator printers.
 
 [![Live print monitoring in the Device tab](docs/01-live-monitor.png)](docs/panel.png)
 
@@ -15,6 +15,21 @@ is limited to bug fixes and compatibility updates for existing features.
 | [![Fleet view with printing, paused and ready printers](docs/02-printer-fleet.png)](docs/02-printer-fleet.png) | [![Print history with durations and outcomes](docs/03-print-history.png)](docs/03-print-history.png) |
 
 The screenshots show the plugin running with demonstration data. Select an image for a closer look.
+
+## Manual control by model
+
+![Manual control panel on a simulated idle AD5X](docs/04-manual-control.jpg)
+
+| Printer | Commands in the manual panel |
+| --- | --- |
+| Adventurer 3, 3 Lite, 3 Pro, 3 Pro 2, 4, 4 Pro and 4 Lite | Home, XYZ jogs (1 or 10 mm), feed and retract (10 mm) via TCP. |
+| Adventurer 5M and 5M Pro | Home, XYZ jogs and filament via TCP with authenticated telemetry. Level bed, input shaper and the firmware-reported shutdown timer via HTTP. |
+| AD5X | Home, XYZ jogs, feed and retract when enabled by firmware, level bed, input shaper, clear the active error and the firmware-reported shutdown timer. |
+| Creator 5 and Creator 5 Pro | Level bed, input shaper and the firmware-reported shutdown timer via HTTP. Stock firmware has no manual motion or extrusion API. |
+
+Manual commands require an idle printer. Filament controls require at least
+180 °C at the nozzle. Where available, the shutdown timer offers Off, 30, 60
+and 120 minutes. The manual controls were verified with simulated printers.
 
 ## What it does
 
@@ -94,9 +109,10 @@ plugin does not upload files, start prints or change material mappings.
 
 | Family | Compatibility evidence and scope |
 | --- | --- |
-| Adventurer 3 | Experimental progress and temperature parsing, tested locally with documented TCP replies. The panel can show a percentage when the firmware omits layers. Basic monitoring is the initial scope. [Firmware protocol reference](https://github.com/Parallel-7/flashforge-api-docs/blob/main/endpoints/networkserver_commands_adventurer3.yaml) |
-| Adventurer 4 Pro / Lite | Candidates for the same monitoring path. Verify status, progress format and state transitions on each variant before claiming support. [Protocol reference](https://github.com/Parallel-7/flashforge-api-docs/wiki/Adventurer-4-Series) |
-| AD5X | Experimental read-only display of four IFS slots when the status response includes station data. The material, color, occupancy and selected slot follow the reported fields. Tested with simulated data. Hardware verification is pending. [Protocol research](https://github.com/Parallel-7/flashforge-api-docs/wiki/AD5X-IFS-Material-Station) |
+| Adventurer 3 / 4 families | Experimental TCP control for recognized models: Home, XYZ jogging and filament feed/retraction. [Adventurer 3 protocol](https://github.com/Parallel-7/flashforge-api-docs/blob/main/endpoints/networkserver_commands_adventurer3.yaml) · [Adventurer 4 protocol](https://github.com/Parallel-7/flashforge-api-docs/wiki/Adventurer-4-Series) |
+| Adventurer 5M / 5M Pro | TCP motion controls plus leveling and input shaping with authenticated HTTP telemetry. [5M protocol](https://github.com/Parallel-7/flashforge-api-docs/wiki/Adventurer-5M-Series) |
+| Creator 5 / 5 Pro | Leveling and input shaping over HTTP. The stock API has no manual motion, Home, extrusion or error-clear command. [Creator protocol](https://github.com/Parallel-7/flashforge-api-docs/wiki/Creator-5-Series) |
+| AD5X | IFS slot monitoring, Home, XYZ jogging, filament feed/retraction, leveling, input shaping and clearing an active error. [AD5X protocol](https://github.com/Parallel-7/flashforge-api-docs/wiki/AD5X) |
 | Guider 3 Ultra | FlashForge lists this printer in Flash Studio Desktop. Compatibility with this plugin's LAN requests still needs sample responses. [Vendor software page](https://www.flashforge.com/pages/flash-studio-desktop) |
 | Finder | An existing Cura integration provides a starting point for research. Identify the specific Finder generation and capture its monitoring responses before adding it here. [Finder integration](https://github.com/ronoaldo/FlashforgeFinderIntegration) |
 
@@ -115,10 +131,12 @@ status read. Creator cameras use a separate MJPEG stream on port 8080.
 
 ## Security
 
-- The plugin talks to the printers you configured and to OrcaSlicer's UI. It
-  never starts a print, never deletes files and never changes printer settings;
-  the only write commands are pause, resume and cancel, and each one needs a
-  click in the panel.
+- Manual commands require a fresh idle-state check on the selected printer.
+  Modern printers use authenticated telemetry. Legacy Adventurer motion uses
+  the printer's TCP control session. The shutdown timer appears on supported
+  HTTP models when the firmware reports the setting. Manual controls have been
+  tested against simulated printers. Physical verification is pending.
+  Filament jogging requires a reported nozzle temperature of at least 180 °C.
 - Reads **only its own configuration** from OrcaSlicer; printer profiles are
   never read for credentials.
 - Talks to the local network: the printers you configure, nothing else.

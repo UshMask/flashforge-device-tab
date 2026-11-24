@@ -4,7 +4,7 @@
 # name = "FlashForge Device Tab"
 # description = "Follow local FlashForge prints in the Device tab with live progress, temperatures, camera, print history and job controls."
 # author = "Max"
-# version = "1.10.0"
+# version = "1.11.0"
 # ///
 import base64
 import hashlib
@@ -149,6 +149,12 @@ progress::-moz-progress-bar { background: var(--blue); border-radius: 5px; }
 .bed-series { --series: #a34a20; }
 @media (prefers-color-scheme: dark) { .bed-series { --series: #ffc08d; } }
 summary.panel-title { cursor: pointer; font-weight: 600; }
+.manual-body {display:grid;gap:12px}
+.manual-row {display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.jog-pad {display:grid;grid-template-columns:repeat(3,minmax(42px,1fr));gap:4px;max-width:210px}
+.jog-pad button:first-child,.jog-pad button:last-child {grid-column:2}
+.jog-pad button:nth-child(2) {grid-column:1}
+.jog-pad button {min-height:36px}
 details .tool-body { border-top: 1px solid var(--line); }
 .camera-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
 .camera-form input { flex: 1 1 220px; width: auto; }
@@ -326,6 +332,28 @@ main {padding-top:0}
     </section>
     </div>
     <div class="printer-sidebar" id="printerTools">
+      <details class="panel" id="manualPanel" hidden>
+        <summary class="panel-title">Manual control</summary>
+        <div class="tool-body manual-body" id="manualBody" tabindex="0" aria-label="Manual control keyboard area">
+          <p class="caption" id="manualState"></p>
+          <label data-group="motion">XY step <select id="jogStep"><option value="1">1 mm</option><option value="10">10 mm</option></select></label>
+          <div class="jog-pad" data-group="motion">
+            <button data-jog="y+">Y +</button><button data-jog="x-">X −</button>
+            <button data-manual="home">Home</button><button data-jog="x+">X +</button><button data-jog="y-">Y −</button>
+          </div>
+          <p class="caption" data-group="motion">Focus this panel for arrow keys · Shift for 10 mm · Enter for Home</p>
+          <div class="manual-row" data-group="motion"><strong>Z axis</strong><button data-manual="z-10">−10</button><button data-manual="z-1">−1</button>
+            <button data-manual="z+1">+1</button><button data-manual="z+10">+10</button><small>mm</small></div>
+          <div class="manual-row" data-group="filament"><strong>Filament</strong><button data-manual="e+10">Feed 10 mm</button>
+            <button data-manual="e-10">Retract 10 mm</button></div>
+          <div class="manual-row" data-group="calibration"><button data-manual="level">Level bed</button>
+            <button data-manual="shaper">Input shaper</button><button data-group="clear" data-manual="clear">Clear error</button></div>
+          <div class="manual-row" data-group="timer"><label>Auto shutdown <select id="manualTimer"><option value="">Choose delay…</option><option value="0">Off</option>
+            <option value="30">30 min</option><option value="60">60 min</option><option value="120">120 min</option></select></label>
+            <button data-timer>Apply</button></div>
+          <p id="manualResult" role="status" class="caption"></p>
+        </div>
+      </details>
       <section id="materials" class="panel" hidden><h2 class="panel-title">Materials · IFS</h2><div id="slots"></div></section>
     <section class="panel" aria-labelledby="readouts-title">
       <h2 class="panel-title" id="readouts-title">Printer Readings</h2>
@@ -471,7 +499,7 @@ async function diagnose(host) {
     const url = host ? new URL('/' + encodeURIComponent(host) + '/diagnostics', location.origin) : endpoint('/diagnostics');
     const data = await postLocal('diagnostics', url);
     if (!current()) return;
-    showInfo('Connection check', ['FlashForge Device Tab 1.10.0', 'Transport: ' + data.transport, 'Status: received',
+    showInfo('Connection check', ['FlashForge Device Tab 1.11.0', 'Transport: ' + data.transport, 'Status: received',
       'Authenticated readings: ' + (data.authenticated ? 'available' : 'unavailable'),
       'Camera URL: ' + (data.cameraReported ? 'reported; stream not tested' : 'not reported')].join('\n'), true);
   } catch (error) { if (current()) showInfo('Connection check', error.message, true); }
@@ -1042,7 +1070,51 @@ function updatePrinter(data) {
   set('printerSensors', (Object.keys(ends).length ? 'Endstops: ' : '') + parts.join('  '));
 }
 
+let manual = null, manualPending = false;
+const manualBody = el('manualBody');
+function manualKey(button) {
+  if (button.dataset.jog) return button.dataset.jog + el('jogStep').value;
+  if (button.hasAttribute('data-timer')) return 'timer' + el('manualTimer').value;
+  return button.dataset.manual;
+}
+function renderManual() {
+  el('manualPanel').hidden = !manual;
+  for (const node of manualBody.querySelectorAll('[data-group]'))
+    node.hidden = !manual?.groups.includes(node.dataset.group);
+  for (const button of manualBody.querySelectorAll('button'))
+    button.disabled = manualPending || !manual?.allowed.includes(manualKey(button));
+  el('manualState').textContent = manual?.description || '';
+}
+async function sendManual(key) {
+  if (manualPending || !manual?.allowed.includes(key)) return;
+  manualPending = true;
+  renderManual();
+  try {
+    const data = await postLocal('action', endpoint('/action'), {action:'manual/' + key});
+    el('manualResult').textContent = data.state;
+  } catch (error) {
+    el('manualResult').textContent = error.message;
+  } finally {
+    await updateStatus();
+    manualPending = false;
+    renderManual();
+  }
+}
+manualBody.onclick = event => {
+  const button = event.target.closest('button');
+  if (button) sendManual(manualKey(button));
+};
+el('jogStep').onchange = el('manualTimer').onchange = renderManual;
+manualBody.onkeydown = event => {
+  if (event.target !== manualBody || event.altKey || event.ctrlKey || event.metaKey) return;
+  const axis = {ArrowLeft:'x-',ArrowRight:'x+',ArrowDown:'y-',ArrowUp:'y+'}[event.key];
+  if (!axis && event.key !== 'Enter') return;
+  event.preventDefault();
+  if (!event.repeat) sendManual(axis ? axis + (event.shiftKey ? '10' : '1') : 'home');
+};
 function updateActions(data) {
+  manual = data.manual || null;
+  renderManual();
   const state = data.state || '';
   const paused = data.jobControls && state === 'PAUSED';
   const running = data.jobControls && data.active && !paused;
@@ -1729,6 +1801,134 @@ def material_slots(detail):
     return [slots.get(i, {"id": i}) for i in range(1, 5)] if slots else []
 
 
+def manual_family(model):
+    name = re.sub(r"[\s_-]+", "", str(model).casefold()).removeprefix("flashforge")
+    if name in {"ad5x", "adventurer5x"}:
+        return "ad5x"
+    if name in {"adventurer5m", "adventurer5mpro", "ad5m", "ad5mpro"}:
+        return "5m"
+    if name in {"creator5", "creator5pro"}:
+        return "creator"
+    if name in {"adventureriii", "adventurer3", "adventurer3lite", "adventurer3pro",
+                "adventurer3pro2", "adventurer4", "adventurer4pro", "adventurer4lite"}:
+        return "legacy"
+    return None
+
+
+def manual_controls(detail, state, tcp_model="", nozzle=None):
+    tcp = manual_family(tcp_model)
+    pid = detail.get("pid")
+    if pid is None:
+        family = manual_family(detail.get("model") or tcp_model)
+    else:
+        if isinstance(pid, str) and re.fullmatch(r"(?:0x)?[0-9a-f]{1,4}", pid.lower()):
+            pid = int(pid, 16)
+        family = {35:"5m", 36:"5m", 38:"ad5x", 40:"creator", 41:"creator"}.get(pid) if type(pid) is int else None
+    if not family or (tcp and tcp != family) or (family == "legacy" and tcp != family):
+        return None
+    legacy = family == "legacy"
+    if not legacy and not detail:
+        return None
+    idle = state in {"READY", "IDLE"} and (legacy or str(detail.get("status", "")).upper() in {"READY", "IDLE"})
+    error = detail.get("errorCode")
+    tcp_motion = tcp == family and family in {"legacy", "5m"}
+    motion = tcp_motion or family == "ad5x"
+    filament = tcp_motion or (family == "ad5x" and detail.get("extrudeCtrl") == 1)
+    hot = (nozzle if nozzle is not None else detail_number(detail, "rightTemp", 0, 500)) or 0
+    groups = []
+    if motion:
+        groups.append("motion")
+    if filament:
+        groups.append("filament")
+    if not legacy:
+        groups.append("calibration")
+    if family == "ad5x":
+        groups.append("clear")
+    if not legacy and detail.get("autoShutdown") in ("open", "close"):
+        groups.append("timer")
+    allowed = []
+    if idle:
+        if isinstance(error, str) and error.strip():
+            if family == "ad5x":
+                allowed.append("clear")
+        else:
+            if motion:
+                allowed.append("home")
+            if not legacy:
+                allowed.extend(("level", "shaper"))
+            if tcp_motion or (family == "ad5x" and detail.get("moveCtrl") == 1):
+                allowed.extend(f"{axis}{delta:+d}" for axis in "xyz" for delta in (-10, -1, 1, 10))
+            if filament and hot >= 180:
+                allowed.extend(("e+10", "e-10"))
+        if "timer" in groups:
+            allowed.extend(("timer0", "timer30", "timer60", "timer120"))
+    timer = detail.get("autoShutdown")
+    notes = ["Ready" if idle else "Locked · printer must be idle"]
+    if idle and error:
+        notes.append(str(error))
+    if idle and filament and "e+10" not in allowed and not error:
+        notes.append("Filament feed requires a nozzle temperature of at least 180 °C")
+    if timer == "close":
+        notes.append("Auto shutdown off")
+    elif timer == "open":
+        notes.append(f"Auto shutdown on · {detail.get('autoShutdownTime', '—')} min")
+    return {"allowed": allowed, "groups": groups, "tcpMotion": tcp_motion, "description": " · ".join(notes), "errorCode": error}
+
+
+def tcp_manual_move(host, key, volume):
+    """Keep the idle check and the single move in the same printer control session."""
+    with socket.create_connection((host, PORT), timeout=2) as sock:
+        def send(code):
+            reply = command(sock, code)
+            if re.search(r"\b(?:error|failed|denied|unknown)\b", reply, re.I):
+                raise ValueError("Printer rejected " + code.split()[0] + ".")
+            return reply
+
+        if "control success" not in send("M601 S1").casefold():
+            raise ValueError("Printer did not grant control.")
+        try:
+            if not re.search(r"^MachineStatus:\s*(?:READY|IDLE)\s*$", send("M119"), re.M | re.I):
+                raise ValueError("Printer must be idle.")
+            if key == "home":
+                send("G28")
+            elif key.startswith("e"):
+                temp = re.search(r"\bT0:\s*(\d+(?:\.\d+)?)\s*/", send("M105"))
+                if not temp or float(temp[1]) < 180:
+                    raise ValueError("Heat the nozzle to at least 180 °C.")
+                send(f"G1 E{int(key[1:])} F120")
+            else:
+                axis = key[0].upper()
+                pos = re.search(r"\b" + axis + r":\s*(-?\d+(?:\.\d+)?)(?=\s|$)", send("M114"))
+                if not pos:
+                    raise ValueError("Printer did not report the axis position.")
+                target = float(pos[1]) + int(key[1:])
+                if volume and not 0 <= target <= volume["XYZ".index(axis)]:
+                    raise ValueError("Move exceeds the reported build volume.")
+                send("G90")
+                send(f"G1 {axis}{target:.3f} F300")
+        finally:
+            send("M602")
+    return "Move sent to the printer."
+
+
+def manual_payload(key, controls):
+    if not controls or key not in controls["allowed"]:
+        raise ValueError("Command unavailable for the current printer state.")
+    if key == "clear":
+        return {"cmd": "errorCodeCtrl_cmd", "args": {"action": "clearErrorCode", "errorCode": controls["errorCode"]}}
+    if key == "home":
+        return {"cmd": "homingCtrl_cmd"}
+    if key in ("level", "shaper"):
+        return {"cmd": "calibration_cmd", "args": {"levelingDetection": "open" if key == "level" else "close",
+                                                   "vibrationCompensation": "open" if key == "shaper" else "close"}}
+    if key.startswith("timer"):
+        minutes = int(key[5:])
+        return {"cmd": "delayClose_cmd", "args": {"automaticShutdown": "open" if minutes else "close",
+                                                  "shutdownAfterTime": minutes}}
+    return {"cmd": "extrudeCtrl_cmd" if key[0] == "e" else "moveCtrl_cmd",
+            "args": {"axis": key[0], "delta": int(key[1:])}}
+
+
 def read_http_status(host, serial, check_code):
     detail = read_http_detail(host, serial, check_code)
 
@@ -1799,7 +1999,7 @@ def read_http_status(host, serial, check_code):
         "filament": None,
         "fan": detail_number(detail, "coolingFanSpeed", 0, 100),
         "speed": detail_number(detail, "printSpeedAdjust", 1, 1000),
-        "cameraUrl": camera, "managedCamera": creator_pro,
+        "cameraUrl": camera, "managedCamera": creator_pro, "manual": manual_controls(detail, state),
         "info": {"model": model, "name": field("name"), "firmware": field("firmwareVersion"),
                  "serial": serial, "mac": field("macAddr"), "volume": list(map(int, volume.groups())) if volume else None,
                  "tools": detail_number(detail, "nozzleCnt", 1, 16)},
@@ -1911,6 +2111,7 @@ def read_status(host, check_code, include_details=False):
         "active": active, "complete": complete,
         "jobControls": bool(serial and check_code and not time_hint),
         "materials": material_slots(detail), "transport": "TCP + HTTP" if detail else "TCP",
+        "manual": manual_controls(detail, state, info.get("model", ""), readings["nozzle"]),
         "remaining": math.ceil(seconds) if seconds is not None else None,
         "timeHint": time_hint or ("The printer has not reported the remaining time yet" if active and seconds is None else ""),
         "elapsed": int(elapsed) if elapsed is not None else None,
@@ -2464,7 +2665,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
             self.reply_json({"error": "Open the monitor from the Device tab."}, 403)
             return
         endpoint, route = self.request_route()
-        if route == "camera-stream" or (route in {"action", "diagnostics"} and "?" in self.path):
+        if route in {"camera-stream", "action"} or (route == "diagnostics" and "?" in self.path):
             try:
                 if self.server.check_view is not None:
                     endpoint = self.server.check_view(endpoint)
@@ -3169,7 +3370,8 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
 
     def act(self, host, action):
         target = self.ACTIONS.get(action)
-        if target is None:
+        manual = action.startswith("manual/")
+        if target is None and not manual:
             raise ValueError("Unknown printer command.")
         printers = self._server.printers()
         entry = next((item for item in printers if item["host"] == host), None)
@@ -3180,6 +3382,36 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             raise ValueError("The printer is not connected yet.")
         try:
             with self._server.printer_io():
+                if manual:
+                    current = monitor.adapter.status(include_details=True)
+                    key = action[7:]
+                    controls = current.get("manual")
+                    if not controls or key not in controls["allowed"]:
+                        raise ValueError("Command unavailable for the current printer state.")
+                    if controls["tcpMotion"] and (key == "home" or re.fullmatch(r"[xyze][+-](?:1|10)", key)):
+                        if entry["serial"] and entry["serial"] != current["info"].get("serial"):
+                            raise ValueError("Check the printer serial number.")
+                        if self._server.upload_active() or self._server.stopping.is_set():
+                            raise UploadInProgress
+                        return tcp_manual_move(host, key, current["info"].get("volume"))
+                    serial = current["info"].get("serial")
+                    if not serial or not entry["code"] or (entry["serial"] and entry["serial"] != serial):
+                        raise ValueError("Check the printer serial number and CheckCode.")
+                    payload = manual_payload(key, controls)
+                    if self._server.upload_active() or self._server.stopping.is_set():
+                        raise UploadInProgress
+                    printer_api(host, serial, entry["code"], "/control", {"payload": payload})
+                    if key == "clear" or key.startswith("timer"):
+                        detail = read_http_detail(host, serial, entry["code"])
+                        if key == "clear" and detail.get("errorCode") == "":
+                            return "Printer reports the error cleared."
+                        if key.startswith("timer"):
+                            minutes = int(key[5:])
+                            if (detail.get("autoShutdown") == ("open" if minutes else "close")
+                                    and (not minutes or detail.get("autoShutdownTime") == minutes)):
+                                return "Printer confirmed the shutdown timer setting."
+                        return "Command accepted. The printer has not confirmed the change."
+                    return "Printer accepted the command."
                 with monitor.state_lock:
                     data = monitor.latest
                 serial = ((data or {}).get("info") or {}).get("serial") or ""

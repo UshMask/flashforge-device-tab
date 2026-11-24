@@ -1,5 +1,18 @@
 ﻿# Changelog
 
+## 1.11.0
+
+- Added model-specific manual controls. Adventurer 3/4 and 5M-series printers
+  use TCP for motion, while AD5X uses its HTTP motion commands. Creator 5 and
+  Creator 5 Pro expose calibration and the firmware-reported shutdown timer.
+  Available controls follow the detected printer and its current state.
+- Adventurer 3/4: Home, XYZ jogging and filament feed/retraction. Adventurer
+  5M/5M Pro also support leveling, input shaping and the reported shutdown timer.
+- AD5X: Home, XYZ jogging, feed/retraction, leveling, input shaping, clearing
+  an active error and the reported shutdown timer. Creator 5/5 Pro: leveling,
+  input shaping and the reported timer. Manual commands require an idle printer.
+- Tested with simulated printers. Physical verification of manual controls is pending.
+
 ## 1.10.0
 
 - Added LAN camera viewing for Creator 5 Pro. Save the displayed frame as a

@@ -594,6 +594,80 @@ class ServerTests(unittest.TestCase):
         self.wait_for_status(200)
 
 
+class ManualTransportTests(unittest.TestCase):
+    def setUp(self):
+        ports = patch.multiple(plugin, PORT=free_port(), API_PORT=free_port())
+        ports.start()
+        self.addCleanup(ports.stop)
+        self.printer = FakePrinter(plugin.PORT, plugin.API_PORT)
+        self.addCleanup(self.printer.close)
+        self.printer.state = "READY"
+        self.printer.detail.update(status="ready", pid="0023")
+        self.model = "FlashForge Adventurer 5M"
+        self.commands = []
+        self.grant = True
+        self.control_state = "READY"
+        original = self.printer.reply
+
+        def reply(cmd):
+            self.commands.append(cmd)
+            if cmd == "M601 S1":
+                return b"Control Success V2.1.\r\nok\r\n" if self.grant else b"Control Failed.\r\nok\r\n"
+            if cmd == "M119" and self.commands[-2:] == ["M601 S1", "M119"]:
+                return f"MachineStatus: {self.control_state}\r\nok\r\n".encode()
+            if cmd == "M114":
+                return b"X:100 Y:20 Z:5 A:0\r\nok\r\n"
+            if cmd == "M115":
+                return original(cmd).replace(b"Flashforge Adventurer 5M", self.model.encode())
+            return original(cmd)
+        self.printer.reply = reply
+        storage = tempfile.TemporaryDirectory()
+        self.addCleanup(storage.cleanup)
+        self.server = plugin.LoopbackServer(("127.0.0.1", 0), plugin.MonitorHandler)
+        self.addCleanup(self.server.server_close)
+        self.entry = {"host": "127.0.0.1", "code": "code", "serial": ""}
+        self.server.configure(lambda: {"printers": [self.entry]}, Path(storage.name))
+        self.adapter = plugin.FlashForge("127.0.0.1", "code")
+        self.server.monitors["127.0.0.1"] = plugin.PrinterMonitor(self.adapter, Path(storage.name) / "history.json")
+        self.service = plugin.FlashForgeService()
+        self.service._server = self.server
+
+    def act(self, key):
+        return self.service.act("127.0.0.1", "manual/" + key)
+
+    def test_5m_jog_and_reject_out_of_bounds_pause_or_denied_control(self):
+        self.act("x-10")
+        self.assertEqual(self.commands[-6:], ["M601 S1", "M119", "M114", "G90", "G1 X90.000 F300", "M602"])
+        for key, state, grant in (("z-10", "READY", True), ("home", "PAUSED", True), ("home", "READY", False)):
+            self.commands.clear()
+            self.control_state, self.grant = state, grant
+            with self.assertRaises(ValueError):
+                self.act(key)
+            self.assertFalse(any(c.startswith(("G1 ", "G28")) for c in self.commands))
+
+    def test_legacy_tcp_without_checkcode(self):
+        self.entry["code"] = self.adapter.check_code = ""
+        for self.model in ("FlashForge Adventurer III", "FlashForge Adventurer 4 Pro"):
+            with self.subTest(model=self.model):
+                self.act("home")
+                self.assertEqual(self.commands[-2:], ["G28", "M602"])
+                self.act("e-10")
+                self.assertEqual(self.commands[-3:], ["M105", "G1 E-10 F120", "M602"])
+                with self.assertRaises(ValueError):
+                    self.act("shaper")
+
+    def test_model_capability_matrix(self):
+        for pid in ("0023", "0024", "0028", "0029", 35, 36, 40, 41):
+            d = dict(pid=pid, status="ready", autoShutdown="close", moveCtrl=1, extrudeCtrl=1)
+            controls = plugin.manual_controls(d, "READY")
+            self.assertCountEqual(controls["groups"], ["calibration", "timer"])
+            self.assertIn("shaper", controls["allowed"])
+            self.assertNotIn("home", controls["allowed"])
+            self.assertFalse(plugin.manual_controls(d, "PAUSED")["allowed"])
+        self.assertIsNone(plugin.manual_controls({"pid":"9999", "model":"AD5X"}, "READY"))
+        self.assertIsNone(plugin.manual_controls({"pid":"0028"}, "READY", "Adventurer 5M"))
+
+
 class CreatorHTTPTests(unittest.TestCase):
     def setUp(self):
         self.detail = {
@@ -634,8 +708,14 @@ class CreatorHTTPTests(unittest.TestCase):
                     image = base64.b64encode(PNG).decode("ascii") if body["fileName"] == "Тест 5.3mf" else "%%"
                     result = {"code": 0, "imageData": image}
                 elif self.path == "/control":
-                    args = body["payload"]["args"]
-                    if body["payload"]["cmd"] == "streamCtrl":
+                    args = body["payload"].get("args", {})
+                    if fixture.detail.get("pid") == "0026" or body["payload"]["cmd"] in ("calibration_cmd", "delayClose_cmd"):
+                        cmd = body["payload"]["cmd"]
+                        if cmd == "errorCodeCtrl_cmd" and args["errorCode"] == fixture.detail["errorCode"]:
+                            fixture.detail["errorCode"] = ""
+                        elif cmd == "delayClose_cmd":
+                            fixture.detail.update(autoShutdown=args["automaticShutdown"], autoShutdownTime=args["shutdownAfterTime"])
+                    elif body["payload"]["cmd"] == "streamCtrl":
                         fixture.camera_control(args["action"])
                     elif fixture.control_readbacks is None:
                         fixture.detail["status"] = {"pause": "pause", "continue": "printing",
@@ -681,6 +761,53 @@ class CreatorHTTPTests(unittest.TestCase):
                 monitor.sample(int(time.time()))
                 self.control_readbacks = states
                 return service.act(host, action)
+
+    def test_ad5x_manual_controls_over_http(self):
+        self.detail.update(pid="0026", model="AD5X", status="ready", rightTemp=195,
+                           moveCtrl=1, extrudeCtrl=1, autoShutdown="close", errorCode="")
+        for key, cmd, args in (
+            ("home", "homingCtrl_cmd", None),
+            ("x-10", "moveCtrl_cmd", {"axis": "x", "delta": -10}),
+            ("y+1", "moveCtrl_cmd", {"axis": "y", "delta": 1}),
+            ("z-1", "moveCtrl_cmd", {"axis": "z", "delta": -1}),
+            ("z+10", "moveCtrl_cmd", {"axis": "z", "delta": 10}),
+            ("e+10", "extrudeCtrl_cmd", {"axis": "e", "delta": 10}),
+            ("e-10", "extrudeCtrl_cmd", {"axis": "e", "delta": -10}),
+            ("level", "calibration_cmd", {"levelingDetection": "open", "vibrationCompensation": "close"}),
+            ("shaper", "calibration_cmd", {"levelingDetection": "close", "vibrationCompensation": "open"}),
+            ("timer60", "delayClose_cmd", {"automaticShutdown": "open", "shutdownAfterTime": 60}),
+            ("clear", "errorCodeCtrl_cmd", {"action": "clearErrorCode", "errorCode": "E0048"}),
+        ):
+            with self.subTest(key=key):
+                if key == "clear":
+                    self.detail["errorCode"] = "E0048"
+                self.calls.clear()
+                result = self.act_with_readbacks("manual/" + key, [])
+                commands = [body["payload"] for path, body in self.calls if path == "/control"]
+                self.assertEqual(commands, [{"cmd": cmd, **({"args": args} if args else {})}])
+                if key in ("timer60", "clear"):
+                    self.assertNotIn("not confirmed", result)
+
+    def test_ad5x_blocks_stale_idle_and_invalid_commands(self):
+        self.detail.update(pid="0026", model="AD5X", status="ready", rightTemp=25, moveCtrl=1, extrudeCtrl=1)
+        for state, key in (("pause","home"), ("printing","z-10"), ("unknown","level"),
+                           ("ready","e+10"), ("ready","z+100"), ("ready","clear")):
+            with self.subTest(state=state, key=key):
+                self.pending_states = ["ready", state]
+                with self.assertRaises(ValueError):
+                    self.act_with_readbacks("manual/" + key, [])
+        self.detail.update(pid="29", model="Creator 5 Pro", status="ready")
+        with self.assertRaises(ValueError):
+            self.act_with_readbacks("manual/home", [])
+        self.assertFalse(any(path == "/control" for path, _ in self.calls))
+
+    def test_creator_calibration_and_timer(self):
+        for pid in ("0028", "0029"):
+            self.detail.update(pid=pid, status="ready", autoShutdown="close")
+            self.assertIn("accepted", self.act_with_readbacks("manual/level", []))
+            self.assertIn("confirmed", self.act_with_readbacks("manual/timer30", []))
+            with self.assertRaises(ValueError):
+                self.act_with_readbacks("manual/e+10", [])
 
     def test_delayed_pause_checks_status_without_repeating_command(self):
         self.assertEqual(self.act_with_readbacks("pause", ["printing", "pause"]), "PAUSED")
