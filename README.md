@@ -1,12 +1,12 @@
 # <img src="docs/icon.png" width="36" height="36" alt=""> FlashForge Device Tab
 
-Follow a FlashForge print from OrcaSlicer's **Device tab**. See how much time
+Follow a FlashForge print from OrcaSlicer's **Device** or **FlashForge** tab. See how much time
 is left, check nozzle and bed temperatures, or open the printer camera.
 Switch between your local printers and review completed jobs after a restart.
 Printers with a working authenticated control API also offer pause, resume and cancel.
 
-**Stable release 1.11.0** adds model-specific manual controls for Adventurer,
-AD5X and Creator printers.
+**Stable release 1.12.0** updates the monitor layout, opens the printer web
+interface in the system browser, and adds an optional dedicated FlashForge tab.
 
 [![Live print monitoring in the Device tab](docs/01-live-monitor.png)](docs/panel.png)
 
@@ -18,7 +18,7 @@ The screenshots show the plugin running with demonstration data. Select an image
 
 ## Manual control by model
 
-![Manual control panel on a simulated idle AD5X](docs/04-manual-control.jpg)
+![Manual control and the file catalog on a simulated idle Adventurer 5M](docs/04-manual-control.jpg)
 
 | Printer | Commands in the manual panel |
 | --- | --- |
@@ -65,13 +65,17 @@ and 120 minutes. The manual controls were verified with simulated printers.
 OrcaSlicer 2.5.0 or newer, Windows x64. The plugin needs no extra software: no
 Node, no Docker, no Raspberry Pi, no second application.
 
-The selected Device page is remembered per printer profile and address. The plugin
-restores it after restarting OrcaSlicer or selecting that profile, even if you did
-not save the edited printer preset. **Printer Web Interface** switches back to the
-native page and remembers that choice; **Speed Dial → FlashForge Device Tab**
-switches back to the plugin panel.
+**Open Printer Interface in Browser** opens the printer's own web page in the
+system browser and keeps the monitor open in OrcaSlicer. If an earlier release
+left the Device tab on a connection error, the plugin restores the monitor
+when it loads for the configured FlashForge profile.
 
 ## Settings
+
+In **Plugins → FlashForge Device Tab → Config**, choose **Show monitor in** and
+save, then restart OrcaSlicer. **Printer tab** is the default and hides the extra
+tab. **FlashForge tab** adds a dedicated tab for the configured printers and
+restores OrcaSlicer's original Device page for the active FlashForge profile.
 
 Open **Settings** and enter the printer address, optional display name, CheckCode
 and serial number. **Check saved connection** reads status from the saved
@@ -122,9 +126,10 @@ Remove addresses, serial numbers and CheckCodes from any shared screenshots or l
 
 ## How it works
 
-OrcaSlicer shows a plugin page in the Device tab when the printer profile's
+OrcaSlicer shows the monitor in the Device tab when the printer profile's
 `print_host_webui` points at it. The plugin runs a loopback HTTP server on
-`127.0.0.1:18771` and renders a single HTML page. It tries FlashForge TCP on
+`127.0.0.1:18771` and serves the same monitor to the FlashForge tab via OrcaSlicer's
+Pages capability. It tries FlashForge TCP on
 port 8899 first. When that fails and the serial number and CheckCode are set,
 it checks the HTTP API on port 8898 and keeps using it after a successful
 status read. Creator cameras use a separate MJPEG stream on port 8080.

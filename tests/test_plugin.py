@@ -25,6 +25,8 @@ orca = SimpleNamespace(
     base=object,
     plugin=lambda cls: cls,
     script=SimpleNamespace(ScriptPluginCapabilityBase=object),
+    pages=SimpleNamespace(PagesPluginCapabilityBase=object),
+    PluginType=SimpleNamespace(Pages="pages"),
     host=SimpleNamespace(),
     LifecycleEvent=SimpleNamespace(UploadStarted="upload-started", UploadFinished="upload-finished",
                                    PresetSelected="preset-selected", ProjectOpened="project-opened",
@@ -326,7 +328,6 @@ class ServerTests(unittest.TestCase):
         self.applied = []
         self.server = plugin.LoopbackServer((plugin.WEB_HOST, plugin.WEB_PORT), plugin.MonitorHandler)
         self.server.configure(lambda: dict(self.config), Path(self.folder.name))
-        self.server.restore_page = None
 
         def apply_settings(printers):
             if not isinstance(printers, list) or not printers:
@@ -472,6 +473,32 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(data["printers"][0]["host"], "127.0.0.1")
         self.assertEqual(data["printers"][0]["code"], "code")
         self.assertEqual(data["endpoint"], "127.0.0.1")
+        self.assertEqual(data["placement"], "device")
+
+    def test_separate_tab_uses_configured_printers_and_obeys_placement(self):
+        def reject_preset(host):
+            self.fail("The FlashForge tab must work without a matching OrcaSlicer profile")
+
+        self.server.check_view = reject_preset
+        path = "/flashforge/status"
+        status, _, _ = request(plugin.WEB_PORT, path)
+        self.assertEqual(status, 409)
+        self.server.placement = "flashforge"
+        status, body, _ = request(plugin.WEB_PORT, path + "?printer=127.0.0.1")
+        self.assertEqual(status, 200)
+        self.assertIn("observedAt", json.loads(body))
+        status, _, _ = request(plugin.WEB_PORT, path + "?printer=127.0.0.2")
+        self.assertEqual(status, 409)
+
+    def test_old_native_request_cannot_change_the_profile(self):
+        self.server.native_page = lambda host: "http://127.0.0.1:8080/"
+        status, body, _ = request(plugin.WEB_PORT, self.url("native"))
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["url"], "http://127.0.0.1:8080/")
+        headers = {"Origin": f"http://{plugin.WEB_HOST}:{plugin.WEB_PORT}",
+                   "X-FlashForge-Tab-Action": "restore"}
+        status, _, _ = request(plugin.WEB_PORT, self.url("native"), method="POST", headers=headers)
+        self.assertEqual(status, 403)
 
     def test_fleet_selection_keeps_profile_validation(self):
         self.server.check_view = lambda host: host if host == "profile" else self.fail("Wrong profile")
@@ -945,9 +972,9 @@ class SwitchViewTests(unittest.TestCase):
             preset_bundle=lambda: SimpleNamespace(printers=presets, current_printer_preset=lambda: self.preset),
         )
         self.service = plugin.FlashForgeService()
-        self.service.get_config = lambda: json.dumps({"flashforge_host": "127.0.0.1", "check_code": "code"})
+        self.config = {"flashforge_host": "127.0.0.1", "check_code": "code"}
+        self.service.get_config = lambda: json.dumps(self.config)
         self.service._page_store = Path(self.folder.name) / "device-pages.json"
-        self.service._view_store = Path(self.folder.name) / "device-views.json"
         self.service._switch_lock = threading.Lock()
         self.service._stopping = threading.Event()
         self.service._view_refresh = threading.Event()
@@ -955,28 +982,29 @@ class SwitchViewTests(unittest.TestCase):
             settings_for=lambda: ("127.0.0.1", "code"),
             printers=lambda: [{"host": "127.0.0.1", "code": "code", "name": "Adventurer 5M"}],
             monitors={})
-        self.service.restore_page = self.service.restore_page
 
     def tearDown(self):
         plugin.PORT, plugin.API_PORT, plugin.WEB_PORT = self.saved
         self.folder.cleanup()
 
-    def test_switch_to_monitor_and_back(self):
+    def test_native_browser_url_keeps_monitor_open(self):
         message = self.service.switch_view()
         self.assertIn("FlashForge Device Tab", message)
         monitor = self.preset.values["print_host_webui"]
         self.assertEqual(monitor, plugin.monitor_url("127.0.0.1"))
         self.assertEqual(json.loads(self.service._page_store.read_text()), {"Adventurer 5M": ""})
 
-        message = self.service.switch_view(restore_view="127.0.0.1")
-        self.assertIn("printer web interface", message)
-        self.assertEqual(self.preset.values["print_host_webui"], "")
+        self.transaction.values.clear()
+        self.assertEqual(self.service.native_page("127.0.0.1"), "http://127.0.0.1")
+        self.assertEqual(self.preset.values["print_host_webui"], monitor)
+        self.assertEqual(self.transaction.values, {})
+        self.assertIn("Printer tab", self.service.switch_view())
 
     def restart_service(self):
         # Orca discards the edited profile on exit: only plugin storage survives.
         previous = self.service
         self.service = plugin.FlashForgeService()
-        for key in ("_page_store", "_view_store", "_server"):
+        for key in ("_page_store", "_server", "get_config"):
             setattr(self.service, key, getattr(previous, key))
         self.service._switch_lock = threading.Lock()
         self.service._stopping = threading.Event()
@@ -990,22 +1018,19 @@ class SwitchViewTests(unittest.TestCase):
         self.restart_service()
         self.service.restore_selected_view()
         self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("127.0.0.1"))
-        self.service.restore_page("127.0.0.1")
-        self.assertEqual(self.preset.values["print_host_webui"], "http://127.0.0.1:8080/")
+        self.assertEqual(self.service.native_page("127.0.0.1"), "http://127.0.0.1:8080/")
 
-    def test_native_choice_survives_restart_even_when_saved_profile_has_panel(self):
-        self.service.switch_view()
-        self.service.restore_page("127.0.0.1")
-        self.preset.values["print_host_webui"] = plugin.monitor_url("127.0.0.1")
+    def test_legacy_native_choice_is_recovered_on_startup(self):
+        (Path(self.folder.name) / "device-views.json").write_text(json.dumps({
+            self.preset.name: {"host": "127.0.0.1", "monitor": False}}), encoding="utf-8")
+        self.preset.values["print_host_webui"] = "http://127.0.0.1"
         self.restart_service()
         self.service.restore_selected_view()
-        self.assertEqual(self.preset.values["print_host_webui"], "")
-        self.assertFalse(self.service.saved_views()[self.preset.name]["monitor"])
+        self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("127.0.0.1"))
 
     def test_configured_profile_defaults_to_panel_without_prior_choice(self):
         self.service.restore_selected_view()
         self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("127.0.0.1"))
-        self.assertFalse(self.service._view_store.exists())
         with patch.object(self.transaction, "commit") as commit:
             self.service.restore_selected_view()
         commit.assert_not_called()
@@ -1024,19 +1049,23 @@ class SwitchViewTests(unittest.TestCase):
         self.service.restore_selected_view()
         self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("127.0.0.1"))
 
-    def test_native_preference_is_scoped_to_profile_and_address(self):
-        self.service.switch_view()
-        self.service.restore_page("127.0.0.1")
-        self.preset.name = "Creator 5 Pro"
-        self.transaction.target_name = self.preset.name
+    def test_placement_restores_native_page_and_survives_restart(self):
+        native = "http://127.0.0.1:8080/"
+        self.preset.values["print_host_webui"] = native
         self.service.restore_selected_view()
         self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("127.0.0.1"))
-        self.preset.name = "Adventurer 5M"
-        self.transaction.target_name = self.preset.name
-        self.preset.values.update(print_host="192.168.1.37", print_host_webui="")
-        self.service._server.printers = lambda: [{"host": "192.168.1.37", "code": "code"}]
+        self.config["placement"] = "flashforge"
         self.service.restore_selected_view()
-        self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("192.168.1.37"))
+        self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("127.0.0.1"))
+        self.restart_service()
+        self.service.active_placement = "flashforge"
+        self.service.restore_selected_view()
+        self.assertEqual(self.preset.values["print_host_webui"], native)
+        self.assertEqual(self.service.config()["placement"], "flashforge")
+        self.config["placement"] = "device"
+        self.service.active_placement = "device"
+        self.service.restore_selected_view()
+        self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("127.0.0.1"))
 
     def test_profile_change_between_read_and_transaction_does_not_write(self):
         def begin_update():
@@ -1048,19 +1077,44 @@ class SwitchViewTests(unittest.TestCase):
         self.assertEqual(self.transaction.values, {})
         self.assertFalse(self.service._page_store.exists())
 
-    def test_failed_commit_does_not_remember_choice(self):
+    def test_failed_commit_leaves_native_page_intact(self):
         with patch.object(self.transaction, "commit", side_effect=RuntimeError("stale")):
             with self.assertRaises(RuntimeError):
                 self.service.switch_view()
-        self.assertFalse(self.service._view_store.exists())
+        self.assertEqual(self.preset.values["print_host_webui"], "")
 
     def test_root_panel_url_does_not_replace_saved_native_url(self):
         self.service.switch_view()
         self.preset.values["print_host_webui"] = plugin.monitor_url()
         self.service.restore_selected_view()
         self.assertEqual(json.loads(self.service._page_store.read_text()), {"Adventurer 5M": ""})
-        self.service.restore_page("127.0.0.1")
+        self.service.active_placement = "flashforge"
+        self.service.restore_selected_view()
         self.assertEqual(self.preset.values["print_host_webui"], "")
+
+    def test_plugin_settings_register_flashforge_page_only_after_reload(self):
+        self.service._placement_lock = threading.Lock()
+        self.service._next_placement = "device"
+        path = Path(self.folder.name) / "monitor-placement.txt"
+        with patch.object(plugin, "PLACEMENT_FILE", path), patch.object(orca, "register_capability") as register, \
+                patch.object(plugin.FlashForgeService, "active_placement", "device"):
+            package = plugin.FlashForgeDeviceTab()
+            package.register_capabilities()
+            register.assert_called_once_with(plugin.FlashForgeService)
+
+            self.config["placement"] = "flashforge"
+            self.service.sync_next_placement()
+            self.assertEqual(plugin.FlashForgeService.active_placement, "device")
+            register.reset_mock()
+            package.register_capabilities()
+            self.assertEqual([call.args[0] for call in register.call_args_list],
+                             [plugin.FlashForgeService, plugin.FlashForgePage])
+
+            self.config["placement"] = "device"
+            self.service.sync_next_placement()
+            register.reset_mock()
+            package.register_capabilities()
+            register.assert_called_once_with(plugin.FlashForgeService)
 
     def test_startup_worker_and_preset_events_restore_page_without_manual_execution(self):
         self.service._server = None
@@ -1146,10 +1200,10 @@ class SwitchViewTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.service.switch_view()
 
-    def test_switch_rejects_foreign_restore(self):
+    def test_native_browser_url_rejects_stale_profile(self):
         self.service.switch_view()
         with self.assertRaises(ValueError):
-            self.service.switch_view(restore_view="10.0.0.9")
+            self.service.native_page("10.0.0.9")
 
 
 class ControlTests(unittest.TestCase):

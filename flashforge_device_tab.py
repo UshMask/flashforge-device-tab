@@ -2,9 +2,9 @@
 # dependencies = []
 # [tool.orcaslicer.plugin]
 # name = "FlashForge Device Tab"
-# description = "Follow local FlashForge prints in the Device tab with live progress, temperatures, camera, print history and job controls."
+# description = "Follow local FlashForge prints in OrcaSlicer's Device or FlashForge tab."
 # author = "Max"
-# version = "1.11.0"
+# version = "1.12.0"
 # ///
 import base64
 import hashlib
@@ -99,7 +99,6 @@ h2 { font-size: 14px; font-weight: 600; }
 .muted { color: var(--muted); }
 .device { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; padding: 0 0 10px; margin-bottom: 12px; border-bottom: 2px solid var(--panel); }
 .identity, .connection, .device-actions, .row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
-.device-message { margin: -4px 0 12px; font-size: 12px; color: var(--warn); }
 .row { justify-content: space-between; }
 .device-state { font-size: 13px; color: var(--muted); }
 .device-state[data-state="active"] { color: var(--blue); }
@@ -108,9 +107,8 @@ h2 { font-size: 14px; font-weight: 600; }
 .connection::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .connection.connected { color: var(--ok); }
 .connection.disconnected { color: var(--warn); }
-.dashboard { display: grid; grid-template-columns: minmax(0, 1.75fr) minmax(280px, 1fr); gap: 12px; align-items: start; }
-.printer-sidebar { display: grid; gap: 12px; }
-.dashboard > * { min-width: 0; }
+.dashboard { display: grid; grid-template-columns: minmax(0, 3fr) minmax(380px, 2fr); gap: 16px; align-items: start; }
+.monitor-main, .printer-sidebar { display: grid; gap: 16px; min-width: 0; align-content: start; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
 .panel > .panel-title:first-child { border-radius: 7px 7px 0 0; }
 .identity::before { content: ""; width: 24px; height: 24px; background: center / contain no-repeat url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAF7klEQVR4nK2XbYydRRXHf2dmnpd77/buu+lWtEJSsYsEP/mSiLEpVBpQGuFqjBE/GLUiRCWmxKSJRkOESBRsgn7R2KgQWdrFmLQFQ2hLjFUS24Dd1i3WUNB2F2F3u3f33vu8zPHD031pd7t2dznJ8+GZzMz5zX/OnJwjzJkAumbbtm4XB5u95zpBI1SF1ZiIKiYxRk8krey5qcHB0Qu+AFQu/Ajg22u1+8TIt8TIVYhZld8Fpop6fxb1u8affOqHMxBCrWYZGMjba3fstnHpLp8kkOceQeVtglD1oAjWGhOG+GbrqfH+/s8yNCQC0FH79DckLj+izUaCEogxYkRIswyvuirnRoTAOXyhgCKkplQKfaO1c3xg4AGp1mpdBn8SY7vJc8QYk+eeqWaDrmqVKAhYKYIASZbx5sQE5TjGWYuqKiKq3tedSzc64GaxrlezzBfOc5xzPHT3dj7z8U3E5WhVAK1GwtMvvMAPfrWbRpLgrBX1Xk0QVLOMW52F6zFGEdSIMNlq8ZOvfZV7Nm/h6ZeP8trICIFz6DKvQkRIs5y+nm7u2XILlbYy2x/8EUG5jAqKiOK53ik+FBARQzNNuaq3l89vvonfHPkTX/je93EuQFeogREhbSX87Ds7uGvTTTy07re8NjJCFIYzAoUG5nb33lMplShhOPbKK9BsEkchztrZL7COwF3ms+6iuVEYQpJwdPgUoUJbuUQRh7MyqbuUWoFEPe9b/24++pEP016pkHu/IgWsMUxMTfH+a64mlcVVXABgjaGuKXfeuInP3bhpwQKdL9klNpPRLh1LgDoZ1izMKwsA8jynakJ+8ex+HtszSGd1DXmeY61lfLLOl2//JNs/sZVxn2CtnV3TYUJ2H3yOnz65h441bXNrzk/yxVu3ct+ntpHn+f8HKAaF0bExhk+doq2jkzTPCJyjPjZGfXqayFjUF0EGkAGRsUy3WvxjeJi2zk7SLCOwjvr4OGf/+yYWWVS5RQEUCJzDlEqU44gsdxhjyKpVXjxxkrrPiG1ApkVsRMbRRDny9+PE1SqlMCR0RUBOl0qESySzyyZ7VcV7j1fFq5LlOZU4Zt+fj/Clhx/GqWARRCE2ju2PPsLe5w9TiWPSPJ9d571fMocsqsDlLPee7mqVvc8fRFF+ueN+AjF85dEf8/iBZ+np6CBb5J6XsmUBAOSqvKO7i8GDh2krl4mCgMef+SO9XV3Ldr48AAHNPa16gwZKxQT8evAPoFApl6mPnQeUoBRjnLn8W10pgOZKqb2N/i0foqgTFGMMAhclqn+9OMT0W+cRe2W1xBUBiBHSRgufxfRd+56F2WZ2nuH0X46TNhOitvLbBCDgk5yu9WtZ+971/PPIy4gsTqCqvOuGDYyWY8b+/QY2ClYPIGJoTTeJKiU2fOwDZK1kSYAgjpgcHePc8BmiOFo5gIggIuRJytpr11PprHLs94cRs3SRrF4JKzHr+q9m4vVRuLDPFQOICCikWYaxFryy/oYNbLz5gyRTzSsDKMecOnyUo2dGcNaQZhmoLgrimBdSRoRWkpAJrOvpIZ+sM9GmHHpiP4ee2A9LnORiiuIN2jAgn6zT19uDF6GZFNenc/PEiUgKqKonCgLOjIyy729/5e7NW2gmCa+eO1fkcr/MkswUVXVfTzffvu12Dgy9xOnX/0Mchah6pHjHqVPPkGhRpalA6Bw7dj1GcK/w9a23YWc2XJb7uTzkgQMvHeObu3YhRor2SxFUxeCPS1ut1uvwJxHTgfcixkiSpuTec03fOkpxtOKaUIBmK+H02bOICHEQ4OfK8oax2UYBaK/dcb8tlR70jbnGRIBGkuC9R5Z9/hkVimwZh2HR+81rTPJG44GJgT07i9asv187hoZ+Z+LoTt9qccGripgVup4PMa81M8aYKCJvNvdNdHZtY2zMX1TGddRqO7HmXhHpLSJeWf7tL4YgM83pW6r+5xMjb3yXQ4dy5u0+2y531WrvzI25RVSvU9W4GF1hiy5FKSyGlmBOaJo+M75376vzfOr/AJq6riJACkPeAAAAAElFTkSuQmCC); }
@@ -138,10 +136,9 @@ progress::-moz-progress-bar { background: var(--blue); border-radius: 5px; }
 .readout dd { margin-top: 4px; font-size: 14px; overflow-wrap: anywhere; }
 .readout strong { color: var(--blue); font-size: 19px; font-weight: 600; }
 .stale .job, .stale .readouts { opacity: .65; }
-.catalog { margin-top: 16px; }
 .monitor-tools { margin-top: 12px; }
 .tool-body { padding: 12px 13px; }
-.chart { display: block; width: 100%; height: 207px; }
+.chart { display: block; width: 100%; height: 168px; }
 .chart-legend { display: flex; flex-wrap: wrap; gap: 5px 12px; margin: 4px 0 1px; font-size: 12px; }
 .chart-legend span::before { content: ""; display: inline-block; width: 15px; border-top: 2px solid var(--series); margin-right: 5px; vertical-align: 3px; }
 .chart-legend .target::before { border-top-style: dashed; }
@@ -149,12 +146,6 @@ progress::-moz-progress-bar { background: var(--blue); border-radius: 5px; }
 .bed-series { --series: #a34a20; }
 @media (prefers-color-scheme: dark) { .bed-series { --series: #ffc08d; } }
 summary.panel-title { cursor: pointer; font-weight: 600; }
-.manual-body {display:grid;gap:12px}
-.manual-row {display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.jog-pad {display:grid;grid-template-columns:repeat(3,minmax(42px,1fr));gap:4px;max-width:210px}
-.jog-pad button:first-child,.jog-pad button:last-child {grid-column:2}
-.jog-pad button:nth-child(2) {grid-column:1}
-.jog-pad button {min-height:36px}
 details .tool-body { border-top: 1px solid var(--line); }
 .camera-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
 .camera-form input { flex: 1 1 220px; width: auto; }
@@ -180,7 +171,13 @@ button:disabled { opacity: .55; cursor: default; }
 .pager { border-top: 1px solid var(--line); padding: 8px 12px; }
 @media (max-width: 740px) {
   main { padding: 14px 12px; }
-  .dashboard { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 820px) {
+  .dashboard { grid-template-columns: minmax(0, 1fr); reading-flow: grid-rows; }
+  .monitor-main, .printer-sidebar { display: contents; }
+  .dashboard .hero { order: -2; }
+  .dashboard .readings { order: -1; }
+  .dashboard .catalog { order: 1; }
 }
 dialog.settings { width: min(420px, calc(100vw - 32px)); padding: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text); }
 dialog.settings::backdrop { background: rgba(10, 14, 16, .55); }
@@ -213,9 +210,9 @@ main {padding-top:0}
 .mast{background:#202824;color:#edf4ec;padding:12px 18px;margin:0 -12px}
 .mast strong{font-size:20px}
 .mast span{color:#c2cec3}
-.mast button,.hero button{background:#33453b;color:#f5f6ef;border-color:#65776a}
+.mast a,.hero button{background:#33453b;color:#f5f6ef;border-color:#65776a}
 .hero button.danger{background:#33453b;color:#ffc1a8}
-.mast button{margin-left:auto}
+.mast a{margin-left:auto;padding:5px 9px;border:1px solid #65776a;border-radius:6px;text-decoration:none}
 .tabs{overflow:auto;border-bottom:1px solid var(--line);gap:18px}
 .tabs button{white-space:nowrap;border:0;border-bottom:3px solid transparent;border-radius:0;background:none;padding:13px 2px;color:var(--muted)}
 .tabs button[aria-current="page"]{border-color:var(--blue);color:var(--text)}
@@ -233,19 +230,88 @@ main {padding-top:0}
 .hero .percent{text-align:left;font-size:clamp(30px,4vw,46px);line-height:1.05}
 .hero .eta{font-size:21px}
 .hero .job-meta{margin-top:13px}
-.mast button,.hero button{color:#edf6ec;background:#304538}
+.mast a,.hero button{color:#edf6ec;background:#304538}
 .hero progress::-webkit-progress-value{background:#fa9862}
 .hero .progress-line progress{height:6px}
 .hero .job{min-height:145px}
+.hero .job:has(#progressLine[hidden]):has(#time[hidden]){min-height:88px}
 #jobActions:has(button:not([hidden])){display:flex;padding:10px 16px;border-top:1px solid #526154}
 #jobActions:not(:has(button:not([hidden]))){display:none}
 #cancelPrint{margin-left:auto}
-.printer-sidebar{align-content:start}
+.readings .panel-title {gap:4px 12px}
+.readings .readouts {grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:12px;padding:4px 16px 12px}
+.readings .readout {padding:0;border:0}
+.connection-footer {display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;
+  padding:8px 16px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
+.connection-meta {display:flex;gap:4px 12px;align-items:center;flex-wrap:wrap}
+.connection-footer button {margin-left:auto}
+.totals .readouts {grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;padding:0}
+.totals .readout {padding:0;border:0}
+#manualPanel {overflow:hidden; container-type:inline-size}
+#manualPanel summary {display:flex;align-items:center;gap:8px;list-style:none;font-size:16px}
+#manualPanel summary::-webkit-details-marker {display:none}
+#manualPanel summary::after {content:'';width:6px;height:6px;border:solid var(--muted);border-width:0 1px 1px 0;
+  transform:translateY(-2px) rotate(45deg);margin:0 4px}
+#manualPanel[open] summary::after {transform:translateY(2px) rotate(225deg)}
+#manualBadge {margin-left:auto;font-size:12px;font-weight:600;color:var(--muted)}
+#manualBadge::before {content:'';display:inline-block;width:7px;height:7px;border-radius:50%;background:currentColor;margin-right:6px}
+#manualBadge[data-ready="true"] {color:var(--blue)}
+#manualPanel .manual-body {display:grid;gap:12px;padding:12px 16px 16px}
+.manual-body p {margin:0}
+.manual-surface {display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:16px;
+  background:#22312c;color:#f0f6f1;border:1px solid #394c43;border-radius:8px;padding:12px}
+.manual-xy,.motion-side {display:grid;align-content:start;gap:12px;min-width:0}
+.manual-xy {justify-items:center}
+.manual-bar,.manual-row {display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.manual-bar {width:100%;justify-content:space-between}
+.manual-bar strong,.motion-side strong {font-size:13px;font-weight:600}
+.step-switch {display:inline-flex;background:#17241f;border-radius:6px;padding:3px;gap:2px}
+.step-switch label {position:relative;cursor:pointer}
+.step-switch input {position:absolute;opacity:0;width:1px;height:1px}
+.step-switch span {display:block;padding:5px 9px;border-radius:4px;font-size:12px;color:#d7e3db}
+.step-switch input:checked + span {background:#c2e9ce;color:#183025;font-weight:700}
+.step-switch input:focus-visible + span {outline:2px solid white;outline-offset:1px}
+.jog-pad {position:relative;width:min(100%,148px);aspect-ratio:1;border-radius:50%;background:#16231e;
+  border:2px solid #15211c;box-shadow:0 0 0 1px #53675c}
+.jog-pad button[data-jog] {position:absolute;inset:0;width:100%;height:100%;padding:0;border:0;border-radius:50%;
+  transform:rotate(var(--angle));clip-path:polygon(0 0,100% 0,50% 49%);color:#eff8ef;
+  background:radial-gradient(circle,transparent 51%,#4c6257 52%,transparent 54%),#35493e}
+.jog-pad [data-jog="y+"] {--angle:0deg}
+.jog-pad [data-jog="x+"] {--angle:90deg}
+.jog-pad [data-jog="y-"] {--angle:180deg}
+.jog-pad [data-jog="x-"] {--angle:270deg}
+.jog-pad [data-jog] span {position:absolute;top:10%;left:50%;transform:translateX(-50%) rotate(calc(0deg - var(--angle)));font-weight:700}
+.jog-pad button[data-jog]:is(:hover,:focus-visible):enabled {background:#52745f}
+.jog-pad button[data-jog]:active:enabled {background:#658a71}
+.jog-pad button[data-manual="home"] {position:absolute;inset:32%;border:2px solid #17251e;border-radius:50%;padding:0;
+  background:#c2e9ce;color:#173024;display:grid;align-content:center;justify-items:center;font-size:11px;font-weight:700}
+.home-symbol {font-size:20px;line-height:1}
+.motion-side {border-left:1px solid #475a4f;padding-left:12px}
+.motion-group {display:grid;gap:4px;min-width:0}
+.motion-group small {font-size:11px;color:#d0ded3}
+.motion-buttons {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px}
+.manual-surface .filament-pad button {border:1px solid #5b7163;background:#304439;color:#f0f6f1;min-height:32px}
+.manual-surface .z-row button {color:#eef4ef;background:#304439;border-color:#5b7163;min-height:32px}
+.motion-buttons button {padding:4px}
+.manual-surface :is(.filament-pad,.z-row) button:hover:enabled {background:#476350}
+.manual-surface button:disabled {opacity:.5}
+.manual-row button,.manual-row select {min-height:34px}
+.manual-services {display:flex;flex-wrap:wrap;gap:8px}
+.manual-services button {flex:1 1 auto;min-height:36px}
+.timer-row {border-top:1px solid var(--line);padding-top:8px}
+.timer-row label {display:flex;align-items:center;justify-content:space-between;flex:1;gap:8px;flex-wrap:wrap}
+#manualResult:empty,#manualState:empty {display:none}
+@container (max-width:360px) {
+  #manualPanel .manual-body {padding-inline:12px}
+  .manual-surface {grid-template-columns:minmax(0,1fr);gap:12px}
+  .motion-side {grid-template-columns:repeat(2,minmax(0,1fr));border:0;border-top:1px solid #475a4f;
+    padding:8px 0 0}
+  .motion-side:has(.filament-pad[hidden]) {grid-template-columns:minmax(0,1fr)}
+}
 #slots{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;padding:8px 13px 15px}
 .slot{background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:8px 2px;text-align:center;font-size:12px;overflow-wrap:anywhere}
 .slot.active{border-color:var(--blue)}
 .spool{margin:5px auto;width:34px;height:34px;border-radius:50%;background:radial-gradient(circle,var(--panel) 0 14%,transparent 16%),repeating-radial-gradient(circle,var(--spool) 0 2px,color-mix(in srgb,var(--spool) 70%,#555) 3px)}
-#diagnose{margin-top:9px}
 .fleet-row{grid-template-columns:minmax(0,1fr) minmax(85px,.45fr) auto}
 .fleet-row progress{margin-top:5px}
 .printer-fields{display:grid;grid-template-columns:1fr 1fr;gap:6px;border:1px solid var(--line);border-radius:7px;margin:6px 0;padding:9px}
@@ -266,14 +332,13 @@ main {padding-top:0}
 </head>
 <body>
 <main>
-  <div class="mast"><strong>FlashForge</strong><span>Device Tab</span><button id="nativePage" type="button">Printer Web Interface</button></div>
+  <div class="mast"><strong>FlashForge</strong><span>Device Tab</span><a id="nativePage" target="_blank" rel="noopener noreferrer" hidden>Open Printer Interface in Browser</a></div>
   <nav class="tabs" aria-label="Device navigation">
     <button id="monitorTab">Monitor</button><button id="fleetToggle">All printers</button><button id="historyTab">History</button>
     <button id="notificationsButton">Notifications</button><button id="settingsButton" aria-haspopup="dialog">Settings</button>
   </nav>
   <header class="device"><div class="identity"><h1 id="deviceName">{{printer}}</h1><span id="status" class="device-state"></span></div>
     <select id="devicePicker" aria-label="Open printer" hidden></select></header>
-  <p class="device-message" id="viewMessage" role="status" hidden></p>
   <section class="panel" id="setup" hidden>
     <h2 class="panel-title">Set up your first printer</h2>
     <div class="tool-body setup">
@@ -292,7 +357,7 @@ main {padding-top:0}
     <div class="tool-body"><div class="fleet-list" id="fleetList"></div></div>
   </section>
   <div class="dashboard" id="monitor">
-    <div class="printer-sidebar">
+    <div class="monitor-main">
     <section class="panel hero" aria-labelledby="job-title">
       <h2 class="panel-title" id="job-title">Print Job</h2>
       <div class="job" id="job" data-preview="none">
@@ -330,44 +395,80 @@ main {padding-top:0}
         </div>
       </div>
     </section>
+    <section class="panel catalog" id="files-section" aria-labelledby="files-title">
+      <div class="row panel-title"><h2 id="files-title">Printer Files</h2><button id="refresh">Refresh</button></div>
+      <div class="row file-controls">
+        <input id="search" type="search" placeholder="Search files" aria-label="Search files">
+        <span class="muted" id="fileCount" role="status"></span>
+      </div>
+      <div class="files" id="files"></div>
+      <div class="row pager" id="pager" hidden>
+        <button id="previous">Previous</button>
+        <span class="muted" id="pageNumber"></span>
+        <button id="next">Next</button>
+      </div>
+    </section>
     </div>
     <div class="printer-sidebar" id="printerTools">
+      <section class="panel readings" aria-labelledby="readouts-title">
+        <div class="row panel-title"><h2 id="readouts-title">Printer Readings</h2><span class="connection" id="connection" role="status">Connecting…</span></div>
+        <dl class="readouts">
+          <div class="readout"><dt id="nozzleLabel">Nozzle</dt><dd><strong id="nozzle">—</strong> <span class="muted" id="nozzleTarget"></span></dd></div>
+          <div class="readout"><dt>Bed</dt><dd><strong id="bed">—</strong> <span class="muted" id="bedTarget"></span></dd></div>
+          <div class="readout" id="extraNozzlesReading" hidden><dt>Other tools</dt><dd id="extraNozzles"></dd></div>
+          <div class="readout" id="chamberReading" hidden><dt>Chamber</dt><dd id="chamber"></dd></div>
+          <div class="readout" id="fanReading" hidden><dt>Part Cooling Fan</dt><dd><strong id="fan"></strong></dd></div>
+          <div class="readout" id="speedReading" hidden><dt>Print Speed</dt><dd><strong id="speed"></strong></dd></div>
+        </dl>
+        <div class="connection-footer">
+          <div class="connection-meta"><p id="freshness"></p><p id="transport"></p></div>
+          <button id="diagnose" type="button">Check connection</button>
+        </div>
+      </section>
       <details class="panel" id="manualPanel" hidden>
-        <summary class="panel-title">Manual control</summary>
+        <summary class="panel-title">Manual control <span id="manualBadge"></span></summary>
         <div class="tool-body manual-body" id="manualBody" tabindex="0" aria-label="Manual control keyboard area">
           <p class="caption" id="manualState"></p>
-          <label data-group="motion">XY step <select id="jogStep"><option value="1">1 mm</option><option value="10">10 mm</option></select></label>
-          <div class="jog-pad" data-group="motion">
-            <button data-jog="y+">Y +</button><button data-jog="x-">X −</button>
-            <button data-manual="home">Home</button><button data-jog="x+">X +</button><button data-jog="y-">Y −</button>
+          <div class="manual-surface" data-group="motion">
+            <div class="manual-xy">
+              <div class="manual-bar"><strong>XY axes</strong>
+                <div class="step-switch" id="jogStep" role="radiogroup" aria-label="XY step">
+                  <label><input name="xyStep" type="radio" value="1" checked><span>1 mm</span></label>
+                  <label><input name="xyStep" type="radio" value="10"><span>10 mm</span></label>
+                </div>
+              </div>
+              <div class="jog-pad" tabindex="0" role="group" aria-label="XY movement. Arrow keys move 1 mm, Shift moves 10 mm, Enter homes.">
+                <button data-jog="y+" aria-label="Move Y positive"><span>Y+</span></button>
+                <button data-jog="x-" aria-label="Move X negative"><span>X−</span></button>
+                <button data-jog="x+" aria-label="Move X positive"><span>X+</span></button>
+                <button data-jog="y-" aria-label="Move Y negative"><span>Y−</span></button>
+                <button data-manual="home"><span class="home-symbol" aria-hidden="true">⌂</span>Home</button>
+              </div>
+            </div>
+            <div class="motion-side">
+              <div class="motion-group z-row" role="group" aria-label="Z axis, millimeters">
+                <strong>Z axis <small>mm</small></strong>
+                <div class="motion-buttons">
+                  <button data-manual="z-10">−10</button><button data-manual="z-1">−1</button>
+                  <button data-manual="z+10">+10</button><button data-manual="z+1">+1</button>
+                </div>
+              </div>
+              <div class="motion-group filament-pad" data-group="filament" role="group" aria-label="Filament, 10 millimeters">
+                <strong>Filament <small>10 mm</small></strong>
+                <div class="motion-buttons"><button data-manual="e+10">Feed</button><button data-manual="e-10">Retract</button></div>
+              </div>
+            </div>
           </div>
-          <p class="caption" data-group="motion">Focus this panel for arrow keys · Shift for 10 mm · Enter for Home</p>
-          <div class="manual-row" data-group="motion"><strong>Z axis</strong><button data-manual="z-10">−10</button><button data-manual="z-1">−1</button>
-            <button data-manual="z+1">+1</button><button data-manual="z+10">+10</button><small>mm</small></div>
-          <div class="manual-row" data-group="filament"><strong>Filament</strong><button data-manual="e+10">Feed 10 mm</button>
-            <button data-manual="e-10">Retract 10 mm</button></div>
-          <div class="manual-row" data-group="calibration"><button data-manual="level">Level bed</button>
+          <p class="caption" data-group="motion">Arrow keys 1 mm · Shift 10 mm · Enter Home</p>
+          <div class="manual-services" data-group="calibration"><button data-manual="level">Level bed</button>
             <button data-manual="shaper">Input shaper</button><button data-group="clear" data-manual="clear">Clear error</button></div>
-          <div class="manual-row" data-group="timer"><label>Auto shutdown <select id="manualTimer"><option value="">Choose delay…</option><option value="0">Off</option>
+          <div class="manual-row timer-row" data-group="timer"><label>Auto shutdown <select id="manualTimer"><option value="">Choose delay…</option><option value="0">Off</option>
             <option value="30">30 min</option><option value="60">60 min</option><option value="120">120 min</option></select></label>
             <button data-timer>Apply</button></div>
           <p id="manualResult" role="status" class="caption"></p>
         </div>
       </details>
       <section id="materials" class="panel" hidden><h2 class="panel-title">Materials · IFS</h2><div id="slots"></div></section>
-    <section class="panel" aria-labelledby="readouts-title">
-      <h2 class="panel-title" id="readouts-title">Printer Readings</h2>
-      <dl class="readouts">
-        <div class="readout"><dt id="nozzleLabel">Nozzle</dt><dd><strong id="nozzle">—</strong> <span class="muted" id="nozzleTarget"></span></dd></div>
-        <div class="readout"><dt>Bed</dt><dd><strong id="bed">—</strong> <span class="muted" id="bedTarget"></span></dd></div>
-        <div class="readout" id="extraNozzlesReading" hidden><dt>Other tools</dt><dd id="extraNozzles"></dd></div>
-        <div class="readout" id="chamberReading" hidden><dt>Chamber</dt><dd id="chamber"></dd></div>
-        <div class="readout" id="fanReading" hidden><dt>Part Cooling Fan</dt><dd><strong id="fan"></strong></dd></div>
-        <div class="readout" id="speedReading" hidden><dt>Print Speed</dt><dd><strong id="speed"></strong></dd></div>
-      </dl>
-    </section>
-      <section class="panel"><div class="row panel-title"><h2>Connection</h2><span class="connection" id="connection" role="status">Connecting…</span></div>
-        <div class="tool-body"><p id="freshness"></p><p id="transport" class="caption"></p><button id="diagnose" type="button">Check connection</button></div></section>
       <details class="panel" id="camera">
         <summary class="panel-title">Camera</summary>
         <div class="tool-body">
@@ -382,7 +483,7 @@ main {padding-top:0}
           <img class="camera-image" id="cameraImage" alt="Printer camera feed" referrerpolicy="no-referrer" hidden>
         </div>
       </details>
-      <section class="panel" aria-labelledby="totals-title">
+      <section class="panel totals" aria-labelledby="totals-title">
         <h2 class="panel-title" id="totals-title">Totals</h2>
         <div class="tool-body">
           <dl class="readouts">
@@ -390,7 +491,6 @@ main {padding-top:0}
             <div class="readout"><dt>Print time</dt><dd id="statHours"></dd></div>
             <div class="readout"><dt>Finished cleanly</dt><dd id="statSuccess"></dd></div>
           </dl>
-          <p class="caption">Counted from the print history on this computer.</p>
         </div>
       </section>
       <details class="panel" id="printerDetails">
@@ -423,19 +523,6 @@ main {padding-top:0}
       </div>
     </div>
   </details>
-  <section class="panel catalog" id="files-section" aria-labelledby="files-title">
-    <div class="row panel-title"><h2 id="files-title">Printer Files</h2><button id="refresh">Refresh</button></div>
-    <div class="row file-controls">
-      <input id="search" type="search" placeholder="Search files" aria-label="Search files">
-      <span class="muted" id="fileCount" role="status"></span>
-    </div>
-    <div class="files" id="files"></div>
-    <div class="row pager" id="pager" hidden>
-      <button id="previous">Previous</button>
-      <span class="muted" id="pageNumber"></span>
-      <button id="next">Next</button>
-    </div>
-  </section>
 </main>
 <dialog class="settings" id="settingsDialog" aria-labelledby="settingsTitle">
   <form id="settingsForm">
@@ -499,7 +586,7 @@ async function diagnose(host) {
     const url = host ? new URL('/' + encodeURIComponent(host) + '/diagnostics', location.origin) : endpoint('/diagnostics');
     const data = await postLocal('diagnostics', url);
     if (!current()) return;
-    showInfo('Connection check', ['FlashForge Device Tab 1.11.0', 'Transport: ' + data.transport, 'Status: received',
+    showInfo('Connection check', ['FlashForge Device Tab 1.12.0', 'Transport: ' + data.transport, 'Status: received',
       'Authenticated readings: ' + (data.authenticated ? 'available' : 'unavailable'),
       'Camera URL: ' + (data.cameraReported ? 'reported; stream not tested' : 'not reported')].join('\n'), true);
   } catch (error) { if (current()) showInfo('Connection check', error.message, true); }
@@ -546,6 +633,8 @@ function updateAge() {
 setInterval(updateAge,1000);
 
 const selectedPrinter = new URL(location.href).searchParams.get('printer');
+const separateTab = location.pathname === '/flashforge/';
+const nativePage = el('nativePage');
 function endpoint(path) {
   const url = new URL(path.replace(/^\//, ''), location.href);
   if (selectedPrinter && !['/native','/settings','/notifications'].includes(path)) url.searchParams.set('printer',selectedPrinter);
@@ -573,24 +662,14 @@ async function getJson(path) {
   return data;
 }
 
-el('nativePage').onclick = async () => {
-  const button = el('nativePage');
-  const message = el('viewMessage');
-  button.disabled = true;
-  message.hidden = true;
-  try {
-    const response = await fetch(endpoint('/native'), {method: 'POST',
-      headers: {'X-FlashForge-Tab-Action': 'restore'}, signal: AbortSignal.timeout(12000)});
-    if (!response.ok) throw Error((await response.json()).error);
-    message.textContent = 'Opening the printer web interface…';
-    message.hidden = false;
-    setTimeout(() => { button.disabled = false; message.hidden = true; }, 5000);
-  } catch (error) {
-    message.textContent = error.message || 'Could not open the printer web interface.';
-    message.hidden = false;
-    button.disabled = false;
-  }
-};
+if (!separateTab && !selectedPrinter) {
+  getJson('/native').then(({url}) => {
+    if (url) {
+      nativePage.href = url;
+      nativePage.hidden = false;
+    }
+  }).catch(() => {});
+}
 
 function duration(seconds) {
   const hours = Math.floor(seconds / 3600);
@@ -1073,7 +1152,7 @@ function updatePrinter(data) {
 let manual = null, manualPending = false;
 const manualBody = el('manualBody');
 function manualKey(button) {
-  if (button.dataset.jog) return button.dataset.jog + el('jogStep').value;
+  if (button.dataset.jog) return button.dataset.jog + el('jogStep').querySelector(':checked').value;
   if (button.hasAttribute('data-timer')) return 'timer' + el('manualTimer').value;
   return button.dataset.manual;
 }
@@ -1083,7 +1162,11 @@ function renderManual() {
     node.hidden = !manual?.groups.includes(node.dataset.group);
   for (const button of manualBody.querySelectorAll('button'))
     button.disabled = manualPending || !manual?.allowed.includes(manualKey(button));
-  el('manualState').textContent = manual?.description || '';
+  const [status, ...details] = (manual?.description || '').split(' · ');
+  const badge = el('manualBadge');
+  badge.textContent = manualPending ? 'Sending…' : status;
+  badge.dataset.ready = String(status === 'Ready' && !manualPending);
+  el('manualState').textContent = details.join(' · ');
 }
 async function sendManual(key) {
   if (manualPending || !manual?.allowed.includes(key)) return;
@@ -1106,7 +1189,7 @@ manualBody.onclick = event => {
 };
 el('jogStep').onchange = el('manualTimer').onchange = renderManual;
 manualBody.onkeydown = event => {
-  if (event.target !== manualBody || event.altKey || event.ctrlKey || event.metaKey) return;
+  if ((event.target !== manualBody && !event.target.matches('.jog-pad')) || event.altKey || event.ctrlKey || event.metaKey) return;
   const axis = {ArrowLeft:'x-',ArrowRight:'x+',ArrowDown:'y-',ArrowUp:'y+'}[event.key];
   if (!axis && event.key !== 'Enter') return;
   event.preventDefault();
@@ -1326,7 +1409,6 @@ function applyView() {
   const name = current?.name || 'FlashForge';
   el('deviceName').textContent = showFleet ? 'All printers' : view === 'history' ? 'Print history · ' + name : name;
   el('status').hidden = !showMonitor;
-  el('nativePage').hidden = Boolean(selectedPrinter && location.pathname !== '/' + selectedPrinter + '/');
   el('setup').hidden = hasPrinters;
   el('fleet').hidden = !showFleet;
   el('history').hidden = !hasPrinters || view !== 'history';
@@ -1452,7 +1534,7 @@ el('settingsForm').onsubmit = async event => {
     const data = await response.json();
     if (!response.ok) throw Error(data.error || 'Could not save the settings.');
     settingsDialog.close();
-    if (data.moved && !printers.some(p => location.pathname === '/' + p.host + '/')) {
+    if (!separateTab && data.moved && !printers.some(p => location.pathname === '/' + p.host + '/')) {
       location.assign('/' + encodeURIComponent(data.endpoint) + '/');
     } else if (selectedPrinter && !printers.some(p => p.host === selectedPrinter)) {
       location.assign(location.pathname);
@@ -1475,40 +1557,45 @@ CONFIG_PAGE = r'''<!doctype html>
 <style>
 body { font: 14px "Segoe UI", sans-serif; color: var(--orca-fg, #eee); margin: 12px; }
 label { display: block; margin: 8px 0 5px; }
-input, button { font: inherit; padding: 6px 8px; }
+input, select, button { font: inherit; padding: 6px 8px; }
 p { max-width: 520px; }
 </style>
 <div>
+  <label for="tabPlacement">Show monitor in</label>
+  <select id="tabPlacement" aria-describedby="placementHelp"><option value="device">Printer tab</option><option value="flashforge">FlashForge tab</option></select>
+  <p id="placementHelp">Restart OrcaSlicer to switch tabs.</p>
   <label for="flashforgeHost">Printer IPv4 address</label>
   <input type="text" id="flashforgeHost" placeholder="192.168.1.51" maxlength="15" autocomplete="off">
   <label for="code">CheckCode</label>
   <input type="password" id="code" maxlength="32" autocomplete="off">
   <label for="serial">Serial number (required for Creator 5 / 5 Pro)</label>
   <input type="text" id="serial" maxlength="64" autocomplete="off">
-  <p>From the Device tab, open Speed Dial and choose FlashForge Device Tab.</p>
   <p>Allow OrcaSlicer to access your printer when prompted, then reload the plugin.</p>
-  <button id="save" type="button">Save</button>
+  <button id="save" type="button" disabled>Save</button>
   <span id="saved" role="status"></span>
 </div>
 <script>
 const byId = id => document.getElementById(id);
 const fields = {flashforge_host: byId('flashforgeHost'), check_code: byId('code'), serial_number: byId('serial')};
+const placement = byId('tabPlacement');
+const save = byId('save');
 const saved = byId('saved');
-let pending = false;
+const activePlacement = '{{placement}}';
 let printers = [];
 window.orca.onConfig(config => {
   printers = Array.isArray(config.printers) ? config.printers : [];
+  placement.value = config.placement === 'flashforge' ? 'flashforge' : 'device';
   const first = printers[0];
   fields.flashforge_host.value = first?.host || config.flashforge_host || '';
   fields.check_code.value = first?.code ?? config.check_code ?? '';
   fields.serial_number.value = first?.serial ?? config.serial_number ?? '';
-  if (pending) saved.textContent = 'Saved';
-  pending = false;
+  saved.textContent = placement.value !== activePlacement ? 'Saved. Restart OrcaSlicer to apply.' : '';
+  save.disabled = false;
 });
-for (const field of Object.values(fields)) field.oninput = () => { saved.textContent = ''; };
-byId('save').onclick = () => {
-  pending = true;
+for (const field of [placement, ...Object.values(fields)]) field.oninput = () => { saved.textContent = ''; };
+save.onclick = () => {
   const config = Object.fromEntries(Object.entries(fields).map(([key, field]) => [key, field.value.trim()]));
+  config.placement = placement.value;
   if (printers.length) {
     config.printers = [{...printers[0], host: config.flashforge_host, code: config.check_code,
       serial: config.serial_number}, ...printers.slice(1)];
@@ -2385,8 +2472,18 @@ class UploadInProgress(Exception):
 
 WEB_HOST = "127.0.0.1"
 WEB_PORT = 18771
+LEGACY_WEB_PORTS = (18769, 18765)
 DEVICE_UI_KEY = "print_host_webui"
 MONITOR_TITLE = "FlashForge"
+# OrcaSlicer reads registered capabilities before capability config is available.
+PLACEMENT_FILE = Path(__file__).with_name("monitor-placement.txt")
+
+
+def startup_placement():
+    try:
+        return "flashforge" if PLACEMENT_FILE.read_text(encoding="ascii").strip() == "flashforge" else "device"
+    except (OSError, UnicodeError):
+        return "device"
 
 
 def monitor_url(endpoint=""):
@@ -2399,7 +2496,7 @@ def monitor_identity(url):
         url = urlsplit(url)
     except ValueError:
         return None
-    if url.scheme != "http" or url.netloc != f"{WEB_HOST}:{WEB_PORT}":
+    if url.scheme != "http" or url.netloc not in {f"{WEB_HOST}:{port}" for port in (WEB_PORT, *LEGACY_WEB_PORTS)}:
         return None
     parts = url.path.strip("/").split("/")
     if not parts[0]:
@@ -2420,8 +2517,10 @@ def printer_endpoint(print_host):
 
 class LoopbackServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
-    restore_page = None
+    native_page = None
     check_view = None
+
+    placement = "device"
 
     def configure(self, get_config, storage):
         self.get_config = get_config
@@ -2478,7 +2577,7 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
     def settings_payload(self):
         printers = self.printers()
         return {"printers": printers, "endpoint": printers[0]["host"] if printers else "",
-                "notifications": self.notifications}
+                "notifications": self.notifications, "placement": self.placement}
 
     def fleet_payload(self, current=None):
         items = []
@@ -2655,21 +2754,28 @@ class MonitorHandler(BaseHTTPRequestHandler):
             raise ValueError("This printer is not in the plugin settings.")
         return requested[0]
 
+    def checked_printer(self, endpoint):
+        if endpoint == "flashforge":
+            if self.server.placement != "flashforge":
+                raise ValueError("The monitor is in the Printer tab.")
+            endpoint = self.server.settings_for()[0]
+        elif self.server.check_view is not None:
+            endpoint = self.server.check_view(endpoint)
+        return self.selected_printer(endpoint)
+
     def do_POST(self):
         authority = f"{WEB_HOST}:{WEB_PORT}"
         action = self.headers.get("X-FlashForge-Tab-Action")
         if (self.headers.get("Host") != authority
                 or self.headers.get("Origin") != f"http://{authority}"
                 or self.headers.get("Sec-Fetch-Site") not in (None, "same-origin")
-                or action not in ("restore", "settings", "action", "diagnostics", "notifications", "camera-stream")):
-            self.reply_json({"error": "Open the monitor from the Device tab."}, 403)
+                or action not in ("settings", "action", "diagnostics", "notifications", "camera-stream")):
+            self.reply_json({"error": "Open the monitor in OrcaSlicer."}, 403)
             return
         endpoint, route = self.request_route()
         if route in {"camera-stream", "action"} or (route == "diagnostics" and "?" in self.path):
             try:
-                if self.server.check_view is not None:
-                    endpoint = self.server.check_view(endpoint)
-                endpoint = self.selected_printer(endpoint)
+                endpoint = self.checked_printer(endpoint)
             except (OSError, RuntimeError, ValueError) as error:
                 self.reply_json({"error": str(error)}, 409)
                 return
@@ -2718,15 +2824,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
         if route == "action" and action == "action":
             self.run_action(endpoint)
             return
-        if route != "native" or action != "restore" or self.server.restore_page is None:
-            self.reply_json({"error": "The printer web interface is unavailable."}, 404)
-            return
-        try:
-            self.server.restore_page(endpoint)
-        except (OSError, RuntimeError, ValueError) as error:
-            self.reply_json({"error": str(error)}, 409)
-        else:
-            self.reply_json({})
+        self.send_error(404)
 
     def stream_camera(self, endpoint):
         monitor = self.server.monitors.get(endpoint)
@@ -2893,11 +2991,20 @@ class MonitorHandler(BaseHTTPRequestHandler):
         if route == "settings":
             self.reply_json(self.server.settings_payload())
             return
+        if route == "placement":
+            self.reply_json({"placement": self.server.placement})
+            return
+        if route == "native":
+            try:
+                url = self.server.native_page(endpoint) if self.server.native_page and endpoint != "flashforge" else ""
+            except (OSError, RuntimeError, ValueError) as error:
+                self.reply_json({"error": str(error)}, 409)
+            else:
+                self.reply_json({"url": url})
+            return
 
         try:
-            if self.server.check_view is not None:
-                endpoint = self.server.check_view(endpoint)
-            endpoint = self.selected_printer(endpoint)
+            endpoint = self.checked_printer(endpoint)
             if printers and endpoint not in {entry["host"] for entry in printers}:
                 raise ValueError("This printer is not in the plugin settings.")
         except (OSError, RuntimeError, ValueError) as error:
@@ -3019,18 +3126,19 @@ class MonitorHandler(BaseHTTPRequestHandler):
 class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
     _server = None
     instance = None
+    active_placement = "device"
 
     def get_name(self):
         return 'FlashForge Device Tab'
 
     def get_default_config(self):
-        return {"printers": [], "flashforge_host": "", "check_code": "", "serial_number": ""}
+        return {"printers": [], "flashforge_host": "", "check_code": "", "serial_number": "", "placement": "device"}
 
     def has_config_ui(self):
         return True
 
     def get_config_ui(self):
-        return CONFIG_PAGE
+        return CONFIG_PAGE.replace("{{placement}}", self.active_placement)
 
     def config(self):
         try:
@@ -3042,6 +3150,7 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         result = {name: config[name].strip() if isinstance(config.get(name), str) else ""
                   for name in ("flashforge_host", "check_code", "serial_number")}
         result["printers"] = config.get("printers") if isinstance(config.get("printers"), list) else []
+        result["placement"] = "flashforge" if config.get("placement") == "flashforge" else "device"
         return result
 
     def on_load(self):
@@ -3049,8 +3158,9 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         # errors in plugin diagnostics instead of losing them in a worker.
         storage = Path(orca.host.plugin.storage())
         self._page_store = storage / "device-pages.json"
-        self._view_store = storage / "device-views.json"
         self._switch_lock = threading.Lock()
+        self._placement_lock = threading.Lock()
+        self._next_placement = self.active_placement
         self._stopping = threading.Event()
         self._view_refresh = threading.Event()
         server = LoopbackServer((WEB_HOST, WEB_PORT), MonitorHandler)
@@ -3058,7 +3168,8 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                                   name='FlashForge Device Tab HTTP', daemon=True)
         try:
             server.configure(self.config, storage)
-            server.restore_page = self.restore_page
+            server.placement = self.active_placement
+            server.native_page = self.native_page
             server.act = self.act
             server.notify = self.notify
             server.check_view = self.check_view
@@ -3067,7 +3178,7 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         except Exception:
             server.server_close()
             raise
-        for port in (18769, 18765):
+        for port in LEGACY_WEB_PORTS:
             try:
                 alias = AliasServer((WEB_HOST, port), AliasRedirectHandler)
             except OSError:
@@ -3091,10 +3202,13 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
 
     def _restore_views(self):
         while True:
-            self._view_refresh.wait()
-            self._view_refresh.clear()
+            refresh = self._view_refresh.wait(0.5)
             if self._stopping.is_set():
                 return
+            self.sync_next_placement()
+            if not refresh:
+                continue
+            self._view_refresh.clear()
             for _ in range(10):
                 try:
                     self.restore_selected_view()
@@ -3105,17 +3219,6 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                     if self._stopping.wait(0.1):
                         return
 
-    def saved_views(self):
-        try:
-            views = json.loads(self._view_store.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
-        if not isinstance(views, dict):
-            return {}
-        return {name: view for name, view in views.items()
-                if isinstance(view, dict) and isinstance(view.get("host"), str)
-                and isinstance(view.get("monitor"), bool)}
-
     def restore_selected_view(self):
         server = self._server
         if server is None or self._stopping.is_set():
@@ -3124,21 +3227,20 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         if preset.config_value("host_type") != "flashforge":
             return
         endpoint = printer_endpoint(preset.config_value("print_host") or "")
-        if not any(item["host"] == endpoint for item in server.printers()):
-            return
-        choice = self.saved_views().get(preset.name, {})
-        show_monitor = choice.get("monitor", True) if choice.get("host") == endpoint else True
         current_url = preset.config_value(DEVICE_UI_KEY) or ""
-        if (show_monitor and current_url == monitor_url(endpoint)
-                or not show_monitor and monitor_identity(current_url) is None):
+        show_monitor = self.active_placement == "device"
+        if show_monitor and (current_url == monitor_url(endpoint)
+                             or not any(item["host"] == endpoint for item in server.printers())):
+            return
+        if not show_monitor and monitor_identity(current_url) is None:
             return
         expected = (preset.name, endpoint, current_url)
-        self.switch_view(show_monitor=show_monitor, remember=False, expected_profile=expected)
+        self.switch_view(expected_profile=expected)
 
     def adopt_profile_address(self):
         """First run after an upgrade: take the address from the active profile."""
         config = self.config()
-        if config.get("flashforge_host"):
+        if config.get("flashforge_host") or config.get("printers"):
             return
         preset = orca.host.preset_bundle().current_printer_preset()
         if preset.config_value("host_type") != "flashforge":
@@ -3147,14 +3249,28 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         if not print_host:
             return
         host = printer_endpoint(print_host)
-        self.save_config(json.dumps({"flashforge_host": host,
-                                     "check_code": config.get("check_code", ""),
-                                     "serial_number": config.get("serial_number", "")},
-                                    ensure_ascii=False))
+        config["flashforge_host"] = host
+        self.save_config(json.dumps(config, ensure_ascii=False))
+
+    def sync_next_placement(self):
+        # The host's settings iframe only writes capability config. Mirror the
+        # saved preference so it is available before the next registration.
+        try:
+            with self._placement_lock:
+                placement = self.config()["placement"]
+                if placement != self._next_placement:
+                    staged = PLACEMENT_FILE.with_suffix(".tmp")
+                    staged.write_text(placement, encoding="ascii")
+                    os.replace(staged, PLACEMENT_FILE)
+                    self._next_placement = placement
+        except (OSError, RuntimeError):
+            # A later check or shutdown can retry a transient host/write failure.
+            pass
 
     def on_unload(self):
         self._stopping.set()
         self._view_refresh.set()
+        self.sync_next_placement()
         # Do not join the page worker here: it may be waiting for the UI thread
         # that is unloading us. It checks _stopping before committing a change.
         for alias in getattr(self, "_aliases", []):
@@ -3180,6 +3296,11 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
 
     def check_view(self, endpoint):
         preset = orca.host.preset_bundle().current_printer_preset()
+        return self.check_profile_view(preset, endpoint)
+
+    def check_profile_view(self, preset, endpoint):
+        if self.active_placement != "device":
+            raise ValueError("Open the FlashForge tab to see the monitor.")
         if preset.config_value("host_type") != "flashforge":
             raise ValueError("Open FlashForge Device Tab for a FlashForge printer profile from Speed Dial.")
         if monitor_identity(preset.config_value(DEVICE_UI_KEY) or "") != endpoint:
@@ -3188,6 +3309,30 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         if endpoint and endpoint != current:
             raise ValueError("The printer address changed. Reopen FlashForge Device Tab for the current printer.")
         return current
+
+    def original_page(self, name, fallback=""):
+        try:
+            target = self.saved_pages().get(name, fallback)
+        except (OSError, ValueError):
+            target = fallback
+        if monitor_identity(target) is not None:
+            target = fallback
+        return target if monitor_identity(target) is None else ""
+
+    def native_page(self, endpoint):
+        bundle = orca.host.preset_bundle()
+        preset = bundle.current_printer_preset()
+        current = self.check_profile_view(preset, endpoint)
+        fallback = bundle.printers.selected_preset().config_value(DEVICE_UI_KEY) or ""
+        target = self.original_page(preset.name, fallback) or preset.config_value("print_host") or current
+        target = target if "://" in target else "http://" + target
+        try:
+            url = urlsplit(target)
+            if url.scheme in ("http", "https") and url.hostname and url.username is None and "\\" not in target:
+                return target
+        except ValueError:
+            pass
+        return f"http://{current}"
 
     def saved_pages(self):
         try:
@@ -3198,17 +3343,14 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             raise ValueError("Could not read the saved printer web interface URLs.")
         return pages
 
-    def switch_view(self, restore_view=None, *, show_monitor=None, remember=True, expected_profile=None):
+    def switch_view(self, *, expected_profile=None):
         if not self._switch_lock.acquire(blocking=False):
             raise ValueError("A page switch is already in progress.")
         try:
             if self._stopping.is_set():
                 raise ValueError("FlashForge Device Tab is shutting down.")
-            transaction = orca.host.preset.printer.begin_update()
             presets = orca.host.preset_bundle().printers
             preset = presets.edited_preset()
-            if preset.name != transaction.target_name:
-                raise ValueError("The active printer profile changed. Try again.")
             if preset.config_value("host_type") != "flashforge":
                 raise ValueError("Select a printer profile that uses the FlashForge host.")
             current_url = preset.config_value(DEVICE_UI_KEY) or ""
@@ -3217,26 +3359,22 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             if expected_profile is not None and expected_profile != (preset.name, endpoint, current_url):
                 raise ValueError("The active printer profile changed. Try again.")
             current_view = monitor_identity(current_url)
-            if restore_view is not None and restore_view != current_view:
-                raise ValueError("This monitor page is not open for the current OrcaSlicer profile.")
-            if show_monitor is None:
-                show_monitor = current_view is None
+            show_monitor = self.active_placement == "device"
             if (show_monitor and current_url == monitor_url(endpoint)
                     or not show_monitor and current_view is None):
-                return "The selected Device page is already open."
+                return ("FlashForge Device Tab is in the Printer tab." if show_monitor
+                        else "Open the FlashForge tab to see the monitor.")
+            transaction = orca.host.preset.printer.begin_update()
+            edited = presets.edited_preset()
+            if (edited.name != transaction.target_name or edited.name != preset.name
+                    or edited.config_value("host_type") != "flashforge"
+                    or edited.config_value("print_host") != print_host
+                    or (edited.config_value(DEVICE_UI_KEY) or "") != current_url):
+                raise ValueError("The active printer profile changed. Try again.")
             if not show_monitor:
-                # A damaged cache or an older URL can always fall back to Orca's profile.
                 fallback = presets.selected_preset().config_value(DEVICE_UI_KEY) or ""
-                if monitor_identity(fallback) is not None:
-                    fallback = ""
-                try:
-                    pages = self.saved_pages()
-                except (OSError, ValueError):
-                    pages = {}
-                target = pages.get(preset.name, fallback)
-                if monitor_identity(target) is not None:
-                    target = fallback
-                message = "Opened the printer web interface."
+                target = self.original_page(preset.name, fallback)
+                message = "Open the FlashForge tab to see the monitor."
             else:
                 entry = next((item for item in self._server.printers() if item["host"] == endpoint), None)
                 if entry is None:
@@ -3254,18 +3392,12 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                 pending.write_text(json.dumps(pages, ensure_ascii=False), encoding="utf-8")
                 os.replace(pending, self._page_store)
                 target = monitor_url(endpoint)
-                message = "Opened FlashForge Device Tab in the Device tab."
+                message = "Opened FlashForge Device Tab in the Printer tab."
 
             if self._stopping.is_set():
                 raise ValueError("FlashForge Device Tab is shutting down.")
             transaction.set(DEVICE_UI_KEY, target)
             transaction.commit()
-            if remember:
-                views = self.saved_views()
-                views[preset.name] = {"host": endpoint, "monitor": show_monitor}
-                pending = self._view_store.with_suffix(".tmp")
-                pending.write_text(json.dumps(views, ensure_ascii=False), encoding="utf-8")
-                os.replace(pending, self._view_store)
             return message
         finally:
             self._switch_lock.release()
@@ -3291,10 +3423,13 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         if not clean:
             raise ValueError("Add at least one printer address.")
         host, check_code = clean[0]["host"], clean[0]["code"]
+        previous_host = self._server.settings_for()[0]
         self.save_config(json.dumps({"printers": clean, "flashforge_host": host,
                                      "check_code": check_code,
-                                     "serial_number": clean[0].get("serial", "")}, ensure_ascii=False))
-        self._point_device_tab(host)
+                                     "serial_number": clean[0].get("serial", ""),
+                                     "placement": self.config()["placement"]}, ensure_ascii=False))
+        if self.active_placement == "device" and host != previous_host:
+            self._point_device_tab(host)
         self._view_refresh.set()
         return host
 
@@ -3440,17 +3575,26 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         except UploadInProgress as error:
             raise RuntimeError("OrcaSlicer is sending a print job. Try again when it finishes.") from error
 
-    def restore_page(self, view):
-        # Request threads are not joined during unload. They can wait for the
-        # GUI commit and report its outcome without blocking the server.
-        self.switch_view(restore_view=view)
-
     def execute(self):
         try:
             message = self.switch_view()
         except (OSError, RuntimeError, ValueError) as error:
             return orca.ExecutionResult.failure(orca.PluginResult.RecoverableError, str(error))
         return orca.ExecutionResult.success(message)
+
+
+class FlashForgePage(orca.pages.PagesPluginCapabilityBase):
+    def get_name(self):
+        return "FlashForge"
+
+    def get_type(self):
+        return orca.PluginType.Pages
+
+    def get_ui(self):
+        url = monitor_url() + "flashforge/"
+        return f'''<!doctype html><meta charset="utf-8">
+<script>location.replace({json.dumps(url)})</script>
+<a href="{url}">Open FlashForge</a>'''
 
 
 @orca.plugin
@@ -3460,5 +3604,8 @@ class FlashForgeDeviceTab(orca.base):
         # per-host grant, which OrcaSlicer asks for the first time the plugin
         # connects to a new address.
         orca.request_permissions(network_socket=[f"('{WEB_HOST}', {WEB_PORT})"], threading=True)
+        FlashForgeService.active_placement = startup_placement()
         orca.register_capability(FlashForgeService)
+        if FlashForgeService.active_placement == "flashforge":
+            orca.register_capability(FlashForgePage)
 

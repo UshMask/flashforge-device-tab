@@ -1,5 +1,15 @@
 ﻿# Changelog
 
+## 1.12.0
+
+- Open the printer's web interface in the system browser and recover Device
+  tabs left on a connection error by the previous switch behavior.
+- Choose the built-in Device tab or a dedicated FlashForge tab in the plugin
+  manager. OrcaSlicer applies tab visibility after a restart.
+- Reorganized the monitor so the temperature chart and file catalog stay in
+  place when Manual control opens on wider screens. Grouped XY, Z and filament
+  controls and moved the connection status next to the printer readings.
+
 ## 1.11.0
 
 - Added model-specific manual controls. Adventurer 3/4 and 5M-series printers

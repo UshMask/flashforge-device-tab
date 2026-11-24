@@ -10,6 +10,7 @@ const script = source.split('<script>')[1].split('</script>')[0];
 test('manual panel hides unavailable model controls and locks supported controls while busy', () => {
   const nodes = Object.fromEntries(['manualPanel','manualState','manualBody','jogStep','manualTimer'].map(id=>[id,{}]));
   const motion = {dataset:{group:'motion'}}, calibration = {dataset:{group:'calibration'}};
+  nodes.manualBadge = {dataset:{}};
   const level = {dataset:{manual:'level'}, hasAttribute:()=>false};
   nodes.manualBody.querySelectorAll = selector => selector === 'button' ? [level] : [motion,calibration];
   const context = vm.createContext({el:id=>nodes[id]});
@@ -29,6 +30,19 @@ function section(from, until) {
   assert.ok(start >= 0 && end > start);
   return script.slice(start, end);
 }
+
+test('XY sectors use the selected step while Home and Z keep their own commands', () => {
+  let step = '1';
+  const nodes = {manualBody:{}, jogStep:{querySelector:()=>({value:step})}};
+  const context = vm.createContext({el:id=>nodes[id]});
+  vm.runInContext(section('let manual =', 'function renderManual'), context);
+  const key = dataset => context.manualKey({dataset, hasAttribute:()=>false});
+  assert.equal(key({jog:'y-'}), 'y-1');
+  step = '10';
+  assert.equal(key({jog:'y-'}), 'y-10');
+  assert.equal(key({manual:'home'}), 'home');
+  assert.equal(key({manual:'z+1'}), 'z+1');
+});
 
 test('bulk settings preserve credentials, names and legacy rows', () => {
   const context = vm.createContext({});
