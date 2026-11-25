@@ -1,5 +1,13 @@
 ﻿# Changelog
 
+## 1.12.1
+
+- Arrow keys jog only while the XY pad has focus. Shift increases the step
+  from 1 mm to 10 mm. Enter activates Home only when its button has focus.
+- Keep Manual control open when readings become unavailable or stale, with
+  commands disabled until fresh readings arrive.
+- Wrap long connection errors in narrow windows.
+
 ## 1.12.0
 
 - Open the printer's web interface in the system browser and recover Device

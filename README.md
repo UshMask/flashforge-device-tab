@@ -5,8 +5,8 @@ is left, check nozzle and bed temperatures, or open the printer camera.
 Switch between your local printers and review completed jobs after a restart.
 Printers with a working authenticated control API also offer pause, resume and cancel.
 
-**Stable release 1.12.0** updates the monitor layout, opens the printer web
-interface in the system browser, and adds an optional dedicated FlashForge tab.
+**Stable release 1.12.1** scopes keyboard jogging to the XY pad and keeps
+Manual control visible when printer readings become unavailable.
 
 [![Live print monitoring in the Device tab](docs/01-live-monitor.png)](docs/panel.png)
 
@@ -30,6 +30,9 @@ The screenshots show the plugin running with demonstration data. Select an image
 Manual commands require an idle printer. Filament controls require at least
 180 °C at the nozzle. Where available, the shutdown timer offers Off, 30, 60
 and 120 minutes. The manual controls were verified with simulated printers.
+Focus the XY pad to jog by 1 mm with the arrow keys or by 10 mm with Shift.
+Press Enter on the Home button to home the printer. If readings become
+unavailable, the panel stays open and commands are disabled until fresh readings arrive.
 
 ## What it does
 
