@@ -4,7 +4,7 @@
 # name = "FlashForge Device Tab"
 # description = "Follow local FlashForge prints in OrcaSlicer's Device or FlashForge tab."
 # author = "Max"
-# version = "1.12.0"
+# version = "1.12.1"
 # ///
 import base64
 import hashlib
@@ -106,7 +106,9 @@ h2 { font-size: 14px; font-weight: 600; }
 .connection { gap: 6px; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .connection::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .connection.connected { color: var(--ok); }
-.connection.disconnected { color: var(--warn); }
+.connection.disconnected { color: var(--warn); max-width: 100%; min-width: 0; flex-wrap: nowrap;
+  white-space: normal; overflow-wrap: anywhere; }
+.connection.disconnected::before { flex: 0 0 7px; }
 .dashboard { display: grid; grid-template-columns: minmax(0, 3fr) minmax(380px, 2fr); gap: 16px; align-items: start; }
 .monitor-main, .printer-sidebar { display: grid; gap: 16px; min-width: 0; align-content: start; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
@@ -273,6 +275,7 @@ main {padding-top:0}
 .step-switch input:focus-visible + span {outline:2px solid white;outline-offset:1px}
 .jog-pad {position:relative;width:min(100%,148px);aspect-ratio:1;border-radius:50%;background:#16231e;
   border:2px solid #15211c;box-shadow:0 0 0 1px #53675c}
+.jog-pad:focus-visible {outline:2px solid #c2e9ce;outline-offset:4px}
 .jog-pad button[data-jog] {position:absolute;inset:0;width:100%;height:100%;padding:0;border:0;border-radius:50%;
   transform:rotate(var(--angle));clip-path:polygon(0 0,100% 0,50% 49%);color:#eff8ef;
   background:radial-gradient(circle,transparent 51%,#4c6257 52%,transparent 54%),#35493e}
@@ -427,7 +430,7 @@ main {padding-top:0}
       </section>
       <details class="panel" id="manualPanel" hidden>
         <summary class="panel-title">Manual control <span id="manualBadge"></span></summary>
-        <div class="tool-body manual-body" id="manualBody" tabindex="0" aria-label="Manual control keyboard area">
+        <div class="tool-body manual-body" id="manualBody">
           <p class="caption" id="manualState"></p>
           <div class="manual-surface" data-group="motion">
             <div class="manual-xy">
@@ -437,7 +440,7 @@ main {padding-top:0}
                   <label><input name="xyStep" type="radio" value="10"><span>10 mm</span></label>
                 </div>
               </div>
-              <div class="jog-pad" tabindex="0" role="group" aria-label="XY movement. Arrow keys move 1 mm, Shift moves 10 mm, Enter homes.">
+              <div class="jog-pad" tabindex="0" role="group" aria-label="XY movement. Arrow keys move 1 mm, Shift moves 10 mm.">
                 <button data-jog="y+" aria-label="Move Y positive"><span>Y+</span></button>
                 <button data-jog="x-" aria-label="Move X negative"><span>X−</span></button>
                 <button data-jog="x+" aria-label="Move X positive"><span>X+</span></button>
@@ -459,7 +462,7 @@ main {padding-top:0}
               </div>
             </div>
           </div>
-          <p class="caption" data-group="motion">Arrow keys 1 mm · Shift 10 mm · Enter Home</p>
+          <p class="caption" data-group="motion">Focus the XY pad for arrow keys: 1 mm · Shift 10 mm</p>
           <div class="manual-services" data-group="calibration"><button data-manual="level">Level bed</button>
             <button data-manual="shaper">Input shaper</button><button data-group="clear" data-manual="clear">Clear error</button></div>
           <div class="manual-row timer-row" data-group="timer"><label>Auto shutdown <select id="manualTimer"><option value="">Choose delay…</option><option value="0">Off</option>
@@ -586,7 +589,7 @@ async function diagnose(host) {
     const url = host ? new URL('/' + encodeURIComponent(host) + '/diagnostics', location.origin) : endpoint('/diagnostics');
     const data = await postLocal('diagnostics', url);
     if (!current()) return;
-    showInfo('Connection check', ['FlashForge Device Tab 1.12.0', 'Transport: ' + data.transport, 'Status: received',
+    showInfo('Connection check', ['FlashForge Device Tab 1.12.1', 'Transport: ' + data.transport, 'Status: received',
       'Authenticated readings: ' + (data.authenticated ? 'available' : 'unavailable'),
       'Camera URL: ' + (data.cameraReported ? 'reported; stream not tested' : 'not reported')].join('\n'), true);
   } catch (error) { if (current()) showInfo('Connection check', error.message, true); }
@@ -627,7 +630,7 @@ function updateAge() {
     el('connection').textContent = 'Delayed';
     el('connection').className = 'connection disconnected';
     el('monitor').classList.add('stale');
-    updateActions({});
+    updateActions({}, true);
   }
 }
 setInterval(updateAge,1000);
@@ -1113,7 +1116,7 @@ async function updateStatus() {
     el('monitor').classList.add('stale');
     el('status').hidden = false;
     el('status').textContent = error.status === 409 ? 'Profile changed' : 'Monitoring paused';
-    updateActions({});
+    updateActions({}, error.status !== 409);
     el('time').hidden = true;
     el('timeHint').hidden = true;
     if (error.status === 409) {
@@ -1189,14 +1192,16 @@ manualBody.onclick = event => {
 };
 el('jogStep').onchange = el('manualTimer').onchange = renderManual;
 manualBody.onkeydown = event => {
-  if ((event.target !== manualBody && !event.target.matches('.jog-pad')) || event.altKey || event.ctrlKey || event.metaKey) return;
+  if (!event.target.matches('.jog-pad') || event.altKey || event.ctrlKey || event.metaKey) return;
   const axis = {ArrowLeft:'x-',ArrowRight:'x+',ArrowDown:'y-',ArrowUp:'y+'}[event.key];
-  if (!axis && event.key !== 'Enter') return;
+  if (!axis) return;
   event.preventDefault();
-  if (!event.repeat) sendManual(axis ? axis + (event.shiftKey ? '10' : '1') : 'home');
+  if (!event.repeat) sendManual(axis + (event.shiftKey ? '10' : '1'));
 };
-function updateActions(data) {
-  manual = data.manual || null;
+function updateActions(data, preserveManual = false) {
+  manual = preserveManual && manual
+    ? {...manual, allowed: [], description: 'Unavailable · Waiting for current printer readings'}
+    : data.manual || null;
   renderManual();
   const state = data.state || '';
   const paused = data.jobControls && state === 'PAUSED';

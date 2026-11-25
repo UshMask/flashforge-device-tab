@@ -44,6 +44,43 @@ test('XY sectors use the selected step while Home and Z keep their own commands'
   assert.equal(key({manual:'z+1'}), 'z+1');
 });
 
+test('XY shortcuts require pad focus and leave Enter to the focused button', () => {
+  const manualBody = {};
+  const commands = [];
+  const context = vm.createContext({manualBody, sendManual: key => commands.push(key)});
+  vm.runInContext(section('manualBody.onkeydown =', 'function updateActions'), context);
+  const keydown = (key, padFocused, shiftKey = false) => {
+    let prevented = false;
+    manualBody.onkeydown({
+      key, shiftKey, target: {matches: selector => padFocused && selector === '.jog-pad'},
+      preventDefault: () => { prevented = true; },
+    });
+    return prevented;
+  };
+  assert.equal(keydown('Enter', false), false);
+  assert.equal(keydown('Enter', true), false);
+  assert.equal(keydown('ArrowRight', false), false);
+  assert.equal(keydown('ArrowRight', true), true);
+  assert.equal(keydown('ArrowLeft', true, true), true);
+  assert.deepEqual(commands, ['x+1', 'x-10']);
+});
+
+test('an unavailable status preserves manual groups and disables commands until recovery', () => {
+  const nodes = {pausePrint:{}, resumePrint:{}, cancelPrint:{classList:{contains:()=>false}}};
+  const context = vm.createContext({el:id=>nodes[id], manual:null, renderManual() {}});
+  vm.runInContext(section('function updateActions', 'async function runAction'), context);
+  const available = {groups:['motion'], allowed:['home'], description:'Ready'};
+  context.updateActions({manual:available});
+  context.updateActions({}, true);
+  assert.equal(context.manual.groups, available.groups);
+  assert.equal(context.manual.allowed.length, 0);
+  assert.match(context.manual.description, /^Unavailable/);
+  context.updateActions({manual:available});
+  assert.equal(context.manual, available);
+  context.updateActions({});
+  assert.equal(context.manual, null);
+});
+
 test('bulk settings preserve credentials, names and legacy rows', () => {
   const context = vm.createContext({});
   vm.runInContext(section('function parsePrinters', 'const fleetToggle'), context);
