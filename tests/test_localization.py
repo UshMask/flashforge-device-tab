@@ -25,6 +25,7 @@ class LocalizationTests(unittest.TestCase):
     def test_all_locales_render_both_pages_and_preserve_template_fields(self):
         self.assertEqual(set(plugin.TRANSLATIONS), set(plugin.LANGUAGES) - {"en"})
         required = set(re.findall(r"\{\{t:([^{}]+)\}\}", plugin.PAGE + plugin.CONFIG_PAGE))
+        required.update(re.findall(r'\bt\("([^"]+)"', plugin.PAGE + plugin.CONFIG_PAGE))
         required.update(plugin.STATES.values())
         required.update(plugin.ERROR_TEMPLATES)
         for language in plugin.LANGUAGES:
@@ -42,6 +43,12 @@ class LocalizationTests(unittest.TestCase):
                         self.assertTrue(value.strip(), key)
                         fields = r"\{[a-z]+\}"
                         self.assertEqual(Counter(re.findall(fields, key)), Counter(re.findall(fields, value)), key)
+
+    def test_rendered_axis_heading_uses_motion_terminology(self):
+        for language, heading in [("ru", "Оси"), ("fr", "Axes"), ("uk", "Осі")]:
+            with self.subTest(language=language):
+                page = plugin.render_page(plugin.PAGE, language, printer="FlashForge")
+                self.assertIn(f'id="axesTitle">{heading}</h3>', page)
 
     def test_override_applies_to_http_pages_without_changing_host_locale(self):
         config = {"language": "zh_TW"}
