@@ -21,24 +21,22 @@ def main():
         creator.detail.pop("cameraStreamUrl")  # Firmware can omit the URL.
         events = []
         hashes = set()
-        enabled = False
         frames = 0
         sessions = 0
         direct_sessions = 0
         direct_frames = 0
 
-        def control(action):
-            nonlocal enabled
-            assert action in ("open", "close")
-            events.append(action)
-            enabled = action == "open"
-
-        creator.camera_control = control
         jpeg = (Path(__file__).parent / "camera-frame.jpg").read_bytes()
 
         class Camera(BaseHTTPRequestHandler):
             def do_GET(self):
                 nonlocal frames, sessions, direct_sessions, direct_frames
+                if self.path == "/simulator/creator5":
+                    creator.detail.update(model="", pid="0028", status="ready")
+                    creator.set_material_station()
+                    self.send_response(204)
+                    self.end_headers()
+                    return
                 if self.path in {"/simulator/busy", "/simulator/completed", "/simulator/paused",
                                   "/simulator/ready", "/simulator/printing"}:
                     creator.detail["status"] = self.path.rsplit("/", 1)[1]
@@ -48,13 +46,15 @@ def main():
                 if self.path == "/stats":
                     body = json.dumps(dict(events=events, sessions=sessions, frames=frames,
                                            hashes=list(hashes), direct_sessions=direct_sessions,
-                                           direct_frames=direct_frames)).encode()
+                                           direct_frames=direct_frames, camera_commands=sum(
+                                               body.get("payload", {}).get("cmd") in {"streamCtrl", "streamCtrl_cmd"}
+                                               for _, body in creator.calls))).encode()
                     self.send_response(200)
                     self.end_headers()
                     self.wfile.write(body)
                     return
                 direct = self.path in {"/direct", "/direct?idle=1"}
-                if not direct and (not enabled or self.path != "/?action=stream"):
+                if not direct and self.path != "/?action=stream":
                     self.send_error(409)
                     return
                 if direct:
@@ -66,7 +66,7 @@ def main():
                 self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=cam")
                 self.end_headers()
                 try:
-                    while enabled or direct:
+                    while True:
                         # Standard JPEG comment makes each downloaded frame identifiable.
                         if direct:
                             direct_frames += 1
@@ -81,6 +81,9 @@ def main():
                         time.sleep(0.12)
                 except OSError:
                     pass
+                finally:
+                    if not direct:
+                        events.append("close")
 
             def log_message(self, *args):
                 pass

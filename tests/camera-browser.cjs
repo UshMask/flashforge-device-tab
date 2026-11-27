@@ -239,7 +239,7 @@ async function main() {
     await page.waitForFunction(() => document.querySelector('#jobsList li [data-stream]').src !== window.frameAtClick);
     const first = await stats();
     assert.ok(first.hashes.includes(createHash('sha256').update(bytes).digest('hex')));
-    assert.deepEqual(first.events, ['open','video']);
+    assert.deepEqual(first.events, ['video']);
     const commands = [];
     await page.route('**/action?printer=*', route => {
       commands.push(route.request().postDataJSON());
@@ -269,6 +269,7 @@ async function main() {
     const activePreview = await preview.getAttribute('src');
     assert.equal((await fetch(new URL('/simulator/completed', urls.stats))).status, 204);
     await creator.getByText('Last completed', {exact:false}).waitFor();
+    await creator.locator('.jobs-completion-hint').waitFor({state:'visible'});
     assert.deepEqual(await headerPositions(), activeHeader);
     assert.ok(await preview.isVisible());
     assert.equal(await preview.getAttribute('src'), activePreview);
@@ -329,7 +330,7 @@ async function main() {
     await reopened.reload();
     await reopened.waitForFunction(() => document.querySelector('#cameraUrl').disabled);
     assert.ok(await reopened.locator('#cameraStart').isEnabled());
-    assert.deepEqual((await stats()).events, ['open','video','close','open','video','close','open','video','close']);
+    assert.deepEqual((await stats()).events, ['video','close','video','close','video','close']);
     await reopened.locator('#fleetToggle').click();
     await reopened.locator('#jobsList [data-stream]').waitFor({state:'visible'});
     const cameras = reopened.getByRole('button',{name:'Live cameras'});
@@ -452,6 +453,8 @@ async function main() {
     const repeatFromMonitor = monitorJob.getByRole('button', {name:'Print again'});
     assert.equal((await fetch(new URL('/simulator/completed', urls.stats))).status, 204);
     await monitorJob.locator('.jobs-last').waitFor();
+    await monitorJob.locator('.jobs-completion-hint').waitFor({state:'visible'});
+    assert.ok(await repeatFromMonitor.isHidden());
     forceFleetReady = false;
     assert.equal((await fetch(new URL('/simulator/busy', urls.stats))).status, 204);
     await reopened.locator('#status').filter({hasText:/^Busy$/}).waitFor();
@@ -479,6 +482,7 @@ async function main() {
     await cameras.click();
     await reopened.locator('#monitorTab').click();
     await monitorJob.locator('#reprintJob:enabled').waitFor();
+    assert.ok(await monitorJob.locator('.jobs-completion-hint').isHidden());
     await monitorJob.locator('#jobImage').waitFor({state:'visible'});
     assert.equal(await monitorJob.locator('.jobs-last strong').textContent(), catalog.files[0].name);
     assert.ok(await monitorJob.locator('progress').isHidden());
@@ -693,6 +697,23 @@ async function main() {
     await directSettings.getByRole('button', {name:'Disconnect', exact:true}).click();
     assert.ok(await directCamera.getByRole('button', {name:'Enlarge camera'}).isHidden());
     await direct.close();
+    const switchModel = await fetch(new URL('/simulator/creator5', urls.stats));
+    assert.equal(switchModel.status, 204);
+    const creatorBase = await browser.newPage();
+    creatorBase.on('pageerror', error => errors.push(error.message));
+    await creatorBase.goto(urls.panel);
+    await creatorBase.waitForFunction(() => document.querySelector('#materialsTitle').textContent === 'Materials');
+    await creatorBase.getByRole('button', {name:'Edit slot 1 · PLA'}).click();
+    assert.equal(await creatorBase.locator('#slotTitle').textContent(), 'Edit slot 1');
+    await creatorBase.locator('#slotDialog').press('Escape');
+    await creatorBase.locator('#jobPanel').getByRole('button', {name:'Camera', exact:true}).click();
+    assert.ok(await creatorBase.locator('#cameraUrl').isHidden());
+    await creatorBase.locator('#cameraStart').click();
+    await creatorBase.locator('#cameraSettingsClose').click();
+    await creatorBase.locator('#cameraSnapshot').waitFor({state:'visible'});
+    await creatorBase.close();
+    await waitForClose();
+    assert.equal((await stats()).camera_commands, 0);
     assert.deepEqual(errors, []);
     console.log('PASS: camera, fleet, catalog pagination, history names, saved display settings, and printer editing.');
   } finally {

@@ -5,8 +5,8 @@ is left, check nozzle and bed temperatures, or open the printer camera.
 Switch between your local printers and review completed jobs after a restart.
 Printers with a working authenticated control API also offer pause, resume and cancel.
 
-**Version 1.14.0** adds a bed-clear confirmation in **All printers**, configurable
-temperature plots, and print history across printers with a per-printer filter.
+**Version 1.14.1** fixes camera connection and model detection on Creator 5 and
+Creator 5 Pro and adjusts manual controls for older AD5X firmware.
 
 [![Monitor with a print in progress](docs/orca-cloud/01-monitor.png)](docs/orca-cloud/01-monitor.png)
 
@@ -26,7 +26,7 @@ The screenshots show the plugin running with demonstration data. Select an image
 | --- | --- |
 | Adventurer 3, 3 Lite, 3 Pro, 3 Pro 2, 4, 4 Pro and 4 Lite | Home, XYZ jogs (1 or 10 mm) via TCP. |
 | Adventurer 5M and 5M Pro | Home, XYZ jogs, nozzle target (180–280 °C in 20 °C steps or off), and 10 mm feed/retract at a measured 180 °C or higher via TCP with authenticated telemetry. Level bed, input shaper and the firmware-reported shutdown timer via HTTP. |
-| AD5X | Home, XYZ jogs when enabled by firmware, level bed, input shaper, clear the active error and the firmware-reported shutdown timer. |
+| AD5X | Level bed, input shaper and the reported shutdown timer. Home, XYZ jogs, feed/retract and error clearing require firmware 1.1.6 or later and any applicable capability reported by the printer. |
 | Creator 5 and Creator 5 Pro | Level bed, input shaper and the firmware-reported shutdown timer via HTTP. Stock firmware has no manual motion or extrusion API. |
 
 Manual commands require an idle printer. Where available, the shutdown timer offers Off, 30, 60
@@ -133,9 +133,9 @@ back to the address. Use the CheckCode from the printer's network settings.
   the existing pause, resume and cancel controls. Creator support has been
   tested with a simulated printer.
 
-On **Creator 5 Pro**, open **Camera → Connect** to start the built-in camera.
+On **Creator 5 and Creator 5 Pro**, open **Camera → Connect** to view the built-in camera.
 **Save snapshot** downloads the displayed JPEG while video continues. Closing
-the Device tab releases the camera. Returning to the monitor reconnects when
+the Device tab closes the stream connection. Returning to the monitor reconnects when
 the Camera panel is open. Choose **Disconnect** to turn off automatic reopening.
 
 Creator stock firmware returns file names and serves thumbnails separately. It
