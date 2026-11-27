@@ -4,7 +4,7 @@
 # name = "FlashForge Device Tab"
 # description = "Follow local FlashForge prints in OrcaSlicer's Device or FlashForge tab."
 # author = "Max"
-# version = "1.13.1"
+# version = "1.14.0"
 # ///
 import base64
 import hashlib
@@ -27,6 +27,7 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from socketserver import TCPServer, ThreadingMixIn
+from string import Template
 from urllib.parse import parse_qs, urlsplit
 from xml.etree import ElementTree
 
@@ -135,6 +136,74 @@ def render_page(page, language, **slots):
                   lambda match: escape(translate(language, match[2])) if match[1] else values[match[2]], page)
 
 
+CAMERA_EXPAND_ICON = '''<svg class="camera-expand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+  stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 4H4v4m12-4h4v4M4 16v4h4m12-4v4h-4"/></svg>'''
+
+JOB_CARD_CONTENT = Template('''
+        <div class="jobs-body">
+          <div class="jobs-printer-heading">$heading</div>
+          <div class="jobs-file-row">$filename<strong class="jobs-percent" hidden></strong></div>
+          <progress max="100" aria-label="{{t:Print progress}}" hidden></progress>
+          $metrics
+          <div class="jobs-last" hidden>{{t:Last completed}} <strong></strong></div>
+          <div class="jobs-actions">$actions</div>
+          $extra
+        </div>
+        <div class="jobs-media">
+          <figure class="jobs-model">
+            <div class="jobs-media-frame">
+              <div class="jobs-fallback"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true">
+                <path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Zm0 9 8-4.5M12 12 4 7.5m8 4.5v9"/>
+              </svg><span>{{t:No preview}}</span></div>
+              <img data-preview$preview_attrs alt="" hidden>
+            </div>
+          </figure>
+          <div class="jobs-actions jobs-model-actions"$print_attrs>$print_buttons</div>
+        </div>
+''')
+
+FLEET_JOB_CONTENT = JOB_CARD_CONTENT.substitute(
+    heading='''<div class="jobs-printer-identity"><h3 tabindex="-1"></h3><span class="jobs-state"></span></div>
+            <a data-monitor data-icon="arrow">{{t:Monitor}}</a>''',
+    filename='<span class="jobs-file"></span>',
+    preview_attrs="", print_attrs="",
+    metrics='<div class="row jobs-meta"><span data-layer></span><strong data-eta></strong></div>',
+    actions='''<button type="button" data-retry data-icon="refresh" hidden>{{t:Reconnect camera}}</button>
+            <button type="button" data-clear-bed data-icon="check" hidden>{{t:Bed is clear}}</button>
+            <a data-files data-icon="arrow" hidden>{{t:Browse files}}</a>
+            <a data-repeat data-icon="refresh" hidden>{{t:Print again}}</a>''',
+    extra='''<details><summary>{{t:Job details}}</summary><dl></dl><ol class="jobs-events"></ol></details>
+          <p class="jobs-meta" data-job-result role="status"></p>''',
+    print_buttons='''<button type="button" data-print-action data-icon="pause" hidden></button>
+            <button type="button" class="danger" data-print-cancel data-icon="stop" hidden>{{t:Cancel}}</button>''',
+)
+
+MONITOR_JOB_CONTENT = JOB_CARD_CONTENT.substitute(
+    heading='''<div class="jobs-printer-identity">
+              <h2 id="job-title"><svg class="section-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 3h7l4 4v14H7z M14 3v5h4 M10 12h5 M10 16h5"/></svg>{{t:Print job}}</h2>
+              <span id="status" class="connection" role="status">{{t:Connecting…}}</span>
+              <button class="jobs-link" id="diagnose" type="button" data-icon="find">{{t:Check connection}}</button>
+            </div>
+            <div class="monitor-job-tools">
+              <button class="jobs-link" id="cameraOpen" type="button" data-icon="camera" aria-haspopup="dialog">{{t:Camera}}</button>
+              <button class="jobs-link" id="monitorHistory" type="button" data-icon="history" aria-label="{{t:Print History}}" title="{{t:Print History}}" hidden></button>
+            </div>''',
+    filename='''<button class="jobs-file" id="openJob" type="button" hidden></button>
+            <span class="jobs-file" id="jobFile">—</span>''',
+    preview_attrs=' id="jobImage"', print_attrs=' id="jobActions"',
+    metrics='''<div class="row jobs-meta" id="jobMetrics">
+            <span id="jobMeta"><span id="layers"></span><span id="elapsed"></span><span id="filament"></span></span>
+            <span id="time"><strong id="remaining"></strong> <span id="finishTime" hidden></span></span>
+          </div>''',
+    actions='<button class="jobs-link" id="reprintJob" type="button" data-icon="refresh" hidden disabled>{{t:Print again}}</button>',
+    extra='''<p class="jobs-meta" id="timeHint" hidden></p>
+          <p class="jobs-meta" id="actionStatus" role="status" hidden></p>''',
+    print_buttons='''<button id="pausePrint" type="button" data-icon="pause" hidden>{{t:Pause}}</button>
+            <button id="resumePrint" type="button" data-icon="play" hidden>{{t:Resume}}</button>
+            <button id="cancelPrint" type="button" class="danger" data-icon="stop" hidden>{{t:Cancel}}</button>''',
+)
+
+
 PAGE = r'''<!doctype html>
 <html lang="{{language}}">
 <head>
@@ -180,8 +249,7 @@ h1, h2, p, dl, dd { margin: 0; }
 h1 { font-size: 17px; font-weight: 600; }
 h2 { font-size: 14px; font-weight: 600; }
 .muted { color: var(--muted); }
-.device { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; padding: 0 0 10px; margin-bottom: 12px; border-bottom: 2px solid var(--panel); }
-.identity, .connection, .device-actions, .row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.connection, .row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
 .row { justify-content: space-between; }
 .connection { gap: 6px; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .connection::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
@@ -194,7 +262,6 @@ h2 { font-size: 14px; font-weight: 600; }
 .monitor-main, .printer-sidebar { display: grid; gap: 16px; min-width: 0; align-content: start; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
 .panel > .panel-title:first-child { border-radius: 7px 7px 0 0; }
-.identity::before { content: ""; width: 24px; height: 24px; background: center / contain no-repeat url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAF7klEQVR4nK2XbYydRRXHf2dmnpd77/buu+lWtEJSsYsEP/mSiLEpVBpQGuFqjBE/GLUiRCWmxKSJRkOESBRsgn7R2KgQWdrFmLQFQ2hLjFUS24Dd1i3WUNB2F2F3u3f33vu8zPHD031pd7t2dznJ8+GZzMz5zX/OnJwjzJkAumbbtm4XB5u95zpBI1SF1ZiIKiYxRk8krey5qcHB0Qu+AFQu/Ajg22u1+8TIt8TIVYhZld8Fpop6fxb1u8affOqHMxBCrWYZGMjba3fstnHpLp8kkOceQeVtglD1oAjWGhOG+GbrqfH+/s8yNCQC0FH79DckLj+izUaCEogxYkRIswyvuirnRoTAOXyhgCKkplQKfaO1c3xg4AGp1mpdBn8SY7vJc8QYk+eeqWaDrmqVKAhYKYIASZbx5sQE5TjGWYuqKiKq3tedSzc64GaxrlezzBfOc5xzPHT3dj7z8U3E5WhVAK1GwtMvvMAPfrWbRpLgrBX1Xk0QVLOMW52F6zFGEdSIMNlq8ZOvfZV7Nm/h6ZeP8trICIFz6DKvQkRIs5y+nm7u2XILlbYy2x/8EUG5jAqKiOK53ik+FBARQzNNuaq3l89vvonfHPkTX/je93EuQFeogREhbSX87Ds7uGvTTTy07re8NjJCFIYzAoUG5nb33lMplShhOPbKK9BsEkchztrZL7COwF3ms+6iuVEYQpJwdPgUoUJbuUQRh7MyqbuUWoFEPe9b/24++pEP016pkHu/IgWsMUxMTfH+a64mlcVVXABgjaGuKXfeuInP3bhpwQKdL9klNpPRLh1LgDoZ1izMKwsA8jynakJ+8ex+HtszSGd1DXmeY61lfLLOl2//JNs/sZVxn2CtnV3TYUJ2H3yOnz65h441bXNrzk/yxVu3ct+ntpHn+f8HKAaF0bExhk+doq2jkzTPCJyjPjZGfXqayFjUF0EGkAGRsUy3WvxjeJi2zk7SLCOwjvr4OGf/+yYWWVS5RQEUCJzDlEqU44gsdxhjyKpVXjxxkrrPiG1ApkVsRMbRRDny9+PE1SqlMCR0RUBOl0qESySzyyZ7VcV7j1fFq5LlOZU4Zt+fj/Clhx/GqWARRCE2ju2PPsLe5w9TiWPSPJ9d571fMocsqsDlLPee7mqVvc8fRFF+ueN+AjF85dEf8/iBZ+np6CBb5J6XsmUBAOSqvKO7i8GDh2krl4mCgMef+SO9XV3Ldr48AAHNPa16gwZKxQT8evAPoFApl6mPnQeUoBRjnLn8W10pgOZKqb2N/i0foqgTFGMMAhclqn+9OMT0W+cRe2W1xBUBiBHSRgufxfRd+56F2WZ2nuH0X46TNhOitvLbBCDgk5yu9WtZ+971/PPIy4gsTqCqvOuGDYyWY8b+/QY2ClYPIGJoTTeJKiU2fOwDZK1kSYAgjpgcHePc8BmiOFo5gIggIuRJytpr11PprHLs94cRs3SRrF4JKzHr+q9m4vVRuLDPFQOICCikWYaxFryy/oYNbLz5gyRTzSsDKMecOnyUo2dGcNaQZhmoLgrimBdSRoRWkpAJrOvpIZ+sM9GmHHpiP4ee2A9LnORiiuIN2jAgn6zT19uDF6GZFNenc/PEiUgKqKonCgLOjIyy729/5e7NW2gmCa+eO1fkcr/MkswUVXVfTzffvu12Dgy9xOnX/0Mchah6pHjHqVPPkGhRpalA6Bw7dj1GcK/w9a23YWc2XJb7uTzkgQMvHeObu3YhRor2SxFUxeCPS1ut1uvwJxHTgfcixkiSpuTec03fOkpxtOKaUIBmK+H02bOICHEQ4OfK8oax2UYBaK/dcb8tlR70jbnGRIBGkuC9R5Z9/hkVimwZh2HR+81rTPJG44GJgT07i9asv187hoZ+Z+LoTt9qccGripgVup4PMa81M8aYKCJvNvdNdHZtY2zMX1TGddRqO7HmXhHpLSJeWf7tL4YgM83pW6r+5xMjb3yXQ4dy5u0+2y531WrvzI25RVSvU9W4GF1hiy5FKSyGlmBOaJo+M75376vzfOr/AJq6riJACkPeAAAAAElFTkSuQmCC); }
 .panel-title { padding: 9px 13px; background: var(--header); }
 .caption { display: block; color: var(--muted); font-size: 12px; margin-top: 3px; }
 progress { display: block; appearance: none; width: 100%; height: 8px; border: 0; border-radius: 5px; background: var(--track); overflow: hidden; }
@@ -213,6 +280,7 @@ progress::-moz-progress-bar { background: var(--blue); border-radius: 5px; }
 .monitor-tools { margin-top: 12px; }
 .tool-body { padding: 12px 13px; }
 .chart { display: block; width: 100%; height: 168px; }
+#chartPlots {display:grid;gap:8px}
 .chart-legend { display: flex; flex-wrap: wrap; gap: 5px 12px; margin: 4px 0 1px; font-size: 12px; }
 .chart-legend span::before { content: ""; display: inline-block; width: 15px; border-top: 2px solid var(--series); margin-right: 5px; vertical-align: 3px; }
 .chart-legend .target::before { border-top-style: dashed; }
@@ -221,12 +289,10 @@ progress::-moz-progress-bar { background: var(--blue); border-radius: 5px; }
 summary.panel-title { cursor: pointer; font-weight: 600; }
 details .tool-body { border-top: 1px solid var(--line); }
 .camera-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
-.camera-form input { flex: 1 1 100%; width: auto; }
+.camera-form input { flex: 1 1 100%; width: auto; min-width: 0; }
 .camera-form:has(#cameraStop:not([hidden])) #cameraStart {display:none}
-#cameraSnapshot {margin-inline-start:auto}
 #cameraLight[aria-pressed=true] {border-color:var(--blue);color:var(--text);background:var(--track);font-weight:600}
 #cameraLight[aria-pressed=true]::before {background:var(--blue)}
-.camera-image { display: block; width: 100%; max-height: 360px; object-fit: contain; background: var(--header); margin-top: 8px; }
 .history-summary, .history-table { margin-top: 8px; }
 .history-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 13px; }
 .history-table th, .history-table td { padding: 7px 9px; text-align: left; border-bottom: 1px solid var(--line); }
@@ -239,6 +305,7 @@ details .tool-body { border-top: 1px solid var(--line); }
 }
 .history-filename:hover { text-decoration: underline; }
 .history-filename:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.history-printer-name {display:block;margin-top:3px;font-size:12px;color:var(--muted);overflow-wrap:anywhere}
 .table-wrap { overflow: auto; max-height: 350px; }
 @media (max-width: 620px) {
   .history-table, .history-table tbody { display: block; }
@@ -326,7 +393,7 @@ dialog.settings .caption { margin-top: 2px; }
 .settings-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .settings-actions button[type="submit"] { background: var(--blue); border-color: var(--blue); color: #fff; }
 /* Device panel */
-main {padding-top:0}
+main {padding-top:6px}
 /* The active tab shares its surface and baseline with the page. */
 .tabs {display:flex;align-items:end;justify-content:space-between;gap:8px 16px;margin-bottom:14px;border-bottom:1px solid var(--line);flex-wrap:wrap}
 .view-tabs,.view-actions {display:flex;align-items:center;gap:3px}
@@ -334,11 +401,11 @@ main {padding-top:0}
 .view-tabs button {position:relative;margin-bottom:-1px;border:1px solid transparent;border-bottom-color:var(--line);border-radius:9px 9px 0 0;padding:9px 16px;background:transparent}
 .view-tabs button:hover {background:var(--panel)}
 .view-tabs button[aria-current="page"] {background:var(--panel);border-color:var(--line);border-bottom-color:var(--panel);color:var(--text);font-weight:600}
-.view-actions {margin-left:auto;padding-bottom:4px}
+.view-actions {margin-left:auto;padding-bottom:4px;max-width:100%;flex-wrap:wrap;justify-content:flex-end}
 .view-actions button {background:transparent;border-color:transparent;padding:5px 8px}
+#devicePicker {min-width:0;max-width:min(170px,100%);padding:4px 6px;border:1px solid var(--line);
+  border-radius:5px;background:var(--panel);color:var(--text);font:inherit;font-size:12px}
 #nativePage {justify-self:start;color:var(--blue)}
-.device{border:0}
-.device h1{font-size:clamp(24px,3vw,40px);letter-spacing:-.04em}
 .panel{border-radius:12px}
 .panel-title{padding:13px 16px}
 .readings .panel-title {gap:4px 12px}
@@ -360,13 +427,14 @@ main {padding-top:0}
 #manualPanel button:disabled {opacity:.5;cursor:default}
 #manualPanel button:enabled:hover {background:var(--bg);border-color:var(--muted)}
 #manualPanel :focus-visible,.step-switch input:focus-visible + span {outline:2px solid var(--blue);outline-offset:2px}
-.manual-group,.panel-inset {display:grid;gap:8px;padding:10px;border:1px solid var(--line);border-radius:7px;
+.manual-group {display:grid;gap:8px;padding-block:9px 0;border-top:1px solid var(--line)}
+.manual-body > .manual-group:first-of-type {border-top:0;padding-top:0}
+.panel-inset {display:grid;gap:8px;padding:10px;border:1px solid var(--line);border-radius:7px;
   background:color-mix(in srgb,var(--panel) 72%,var(--bg))}
 .manual-heading,.inset-heading {margin:0;font-size:13px;font-weight:650}
-.manual-surface {display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:10px 14px}
+.manual-surface {display:grid;grid-template-columns:minmax(0,1fr) clamp(88px,24%,112px);gap:10px 14px}
 .manual-xy {min-width:0;display:grid;justify-items:center;align-content:start;gap:6px}
-.axis-toolbar {display:flex;align-items:center;gap:5px;flex-wrap:wrap}
-.axis-toolbar .manual-heading {margin-right:4px}
+.axis-toolbar {display:flex;align-items:center;gap:5px;min-width:0}
 .axis-toolbar .step-switch {margin-left:auto}
 .axis-heading {display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 6px;width:100%}
 .axis-heading small {color:var(--muted);font-variant-numeric:tabular-nums;white-space:pre}
@@ -378,8 +446,10 @@ main {padding-top:0}
 .step-switch label:first-child span {border-radius:5px 0 0 5px}
 .step-switch label:last-child span {border-radius:0 5px 5px 0;border-left:0}
 .step-switch input:checked + span {background:var(--blue);border-color:var(--blue);color:var(--panel);font-weight:600}
-.jog-pad {position:relative;isolation:isolate;width:min(100%,136px);aspect-ratio:1;background:#c1cdc1;border-radius:50%}
-#manualPanel .jog-pad button[data-jog] {position:absolute;inset:0;width:100%;height:100%;padding:0;border:0;border-radius:50%;background:#30453a;color:#f1f5ed;transform:rotate(var(--angle));clip-path:polygon(1px 0,calc(100% - 1px) 0,50% calc(50% - 1px))}
+.jog-pad {position:relative;isolation:isolate;width:min(100%,196px);aspect-ratio:1;border-radius:50%}
+#manualPanel .jog-pad button[data-jog] {position:absolute;inset:0;width:100%;height:100%;padding:0;border:0;border-radius:50%;background:#30453a;color:#f1f5ed;transform:rotate(var(--angle));clip-path:polygon(1px 0,calc(100% - 1px) 0,50% calc(50% - 1px));mask-image:radial-gradient(circle,transparent 24px,#000 25px)}
+.jog-pad::after {content:"";position:absolute;inset:50% auto auto 50%;width:50px;height:50px;transform:translate(-50%,-50%);clip-path:circle(50%);z-index:1}
+.jog-nozzle {position:absolute;inset:50% auto auto 50%;transform:translate(-50%,-50%);width:29px;height:29px;color:var(--muted);pointer-events:none}
 .jog-pad [data-jog="y+"] {--angle:0deg}
 .jog-pad [data-jog="x+"] {--angle:90deg}
 .jog-pad [data-jog="y-"] {--angle:180deg}
@@ -392,15 +462,16 @@ main {padding-top:0}
 #manualPanel .jog-pad button[data-jog]:disabled {opacity:1;background:#48564e;color:#c6d0c9}
 #manualPanel .axis-toolbar button[data-manual="home"]:disabled {opacity:1;background:#505c54;color:#c6d0c9;border-color:#9faea3}
 #manualPanel button[data-travel-limited="true"]:enabled {filter:grayscale(1);opacity:.55}
-.axis-toolbar button {display:flex;align-items:center;justify-content:center;gap:4px;min-height:28px}
-.axis-toolbar button svg {display:block;width:15px;height:15px;pointer-events:none}
+.axis-toolbar button {display:flex;align-items:center;justify-content:center;gap:4px;min-height:28px;white-space:nowrap}
+.axis-toolbar button svg {display:block;flex:none;width:15px;height:15px;pointer-events:none}
 [data-released="false"] [data-lock-open],[data-released="true"] [data-lock-closed] {display:none}
-.z-row {display:grid;align-content:start;border-left:1px solid var(--line);padding-left:14px;gap:6px}
+.z-row {min-width:0;display:grid;grid-template-rows:auto 1fr;border-left:1px solid var(--line);padding-left:14px;gap:6px}
 .z-row strong {align-self:center}
 .motion-buttons {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
-.z-row .motion-buttons {grid-template-columns:1fr;grid-template-rows:repeat(2,1fr);gap:5px}
+.z-row .motion-buttons {grid-template-columns:1fr;grid-template-rows:1fr 46px 1fr;gap:5px}
 #manualPanel .z-row button,.manual-services button {display:flex;align-items:center;justify-content:center;gap:6px;min-height:32px}
-#manualPanel .z-row button {min-height:42px}
+#manualPanel .z-row button {min-height:36px;padding-inline:4px}
+.z-plate {place-self:center;width:min(100%,68px);height:42px;color:var(--muted)}
 .z-row .mc-up {width:13px;height:15px}
 .z-row [data-z-step^="-"] .mc-up {transform:rotate(180deg)}
 .timer-row select,.timer-row button {min-height:32px}
@@ -409,8 +480,11 @@ main {padding-top:0}
 .nozzle-controls label {display:flex;align-items:center;flex-wrap:wrap;gap:3px 5px}
 .filament-actions .motion-buttons {grid-column:2/-1;gap:5px}
 .nozzle-controls button,.filament-actions button {min-height:32px}
-.manual-services {display:flex;gap:6px}
-#manualPanel .manual-services button {flex:1;min-width:0;font-size:12px;padding:4px}
+.calibration-row {display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.85fr);align-items:center;gap:8px}
+.calibration-row h3 {overflow-wrap:anywhere}
+.manual-services {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+#manualPanel .manual-services button .mc-icon {width:1em;height:1em}
+#manualPanel .manual-services button {min-width:0;font-size:12px;padding:4px}
 #calibrationStatus {color:var(--muted);font-size:12px}
 #calibrationProgress {margin-top:6px;background:linear-gradient(var(--blue),var(--blue)) left/30% 100% no-repeat var(--track);
   animation:calibration-progress 1.5s ease-in-out infinite alternate}
@@ -418,8 +492,8 @@ main {padding-top:0}
 #calibrationProgress::-moz-progress-bar {background:transparent}
 @keyframes calibration-progress {to {background-position:right}}
 @media (prefers-reduced-motion:reduce) {#calibrationProgress {animation:none}}
-.timer-row {display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px;align-items:stretch}
-.timer-row label {display:grid;grid-template-columns:1fr minmax(80px,42%);align-items:center;gap:6px;font-size:13px;font-weight:600}
+.timer-row {display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:stretch}
+.timer-row label {display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);align-items:center;gap:6px;font-size:13px;font-weight:600;overflow-wrap:anywhere}
 #manualPanel .timer-row select {min-width:0;width:100%}
 .manual-summary {margin-left:auto;min-width:0;display:flex;align-items:center;justify-content:flex-end;color:var(--muted);font-size:12px;font-weight:400;text-align:right;line-height:1.25}
 .manual-summary span {min-width:0;overflow-wrap:anywhere}
@@ -429,13 +503,27 @@ main {padding-top:0}
 .manual-notices {display:grid;gap:4px}
 .manual-notices:not(:has(p:not(:empty),button:not([hidden]))) {display:none}
 .manual-notices button {display:inline-flex;align-items:center;justify-self:start;gap:6px}
+.nozzle-controls .heat-short {display:none}
 @container (max-width:360px) {
   #manualPanel .manual-body {padding-inline:8px}
   .manual-surface {gap:10px}
   .z-row {padding-left:8px}
-  .axis-toolbar .manual-heading {flex-basis:100%}
+  #manualPanel .axis-toolbar button {font-size:12px;padding-inline:5px}
+  .axis-toolbar button svg {width:12px;height:12px}
   .axis-toolbar .step-switch span {padding-inline:5px}
   #manualPanel .nozzle-controls button,#manualPanel .nozzle-controls select {font-size:12px;padding-inline:5px}
+  :is(:lang(ru),:lang(en)) .nozzle-controls .heat-long {display:none}
+  :is(:lang(ru),:lang(en)) .nozzle-controls .heat-short {display:inline}
+  .timer-row label {font-size:12px}
+  :is(:lang(ru),:lang(en)) .timer-row label {grid-template-columns:max-content minmax(0,1fr)}
+  #manualPanel .timer-row select {font-size:12px;padding-inline:4px}
+}
+@container (max-width:300px) {
+  .axis-toolbar {gap:3px}
+  #manualPanel .axis-toolbar button {font-size:11px;padding-inline:3px;gap:3px}
+  .axis-toolbar button svg {width:11px;height:11px}
+  .axis-toolbar .step-switch {font-size:11px}
+  .axis-toolbar .step-switch span {padding-inline:3px}
 }
 .mc-level {--image:url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAE8AAAA/CAQAAAALH13MAAAFD0lEQVR42u2ZP2hkRRzHP795b/9EjdEQE5RDU8gJFlqIXKNcpY2CjVgI1nZ2WltaWMohihzHFep1J7HQgIocKEQQvUo4FBs9m+QM4bJJ9s3P4v3e7Mzu22Qvvk0W8Q3LsvNmZ77z/f2d38D/z3/2kQbneoAV9skQfmN39jb5Lsouyh4vAVkTE7sG4eVAC+ghTc3cNLxeU7w1A09qZpFZgScJGAEKMP5kVoQrBiWzjxuCfeq6R8LZzMDTRMguYXMm2NMIojPArjmZ5A3MoYdqpJ6+7ulUgmSjpqFjuJLTh1cAShHA6IhPnAHh+oQ9Db9kFoRbgvGHmsmpsqdB1D5yOXLyjqXeZfjEF5YfQQNAPUn2dIQXDd8+YlRDzwkJV8KikrA5SEJ9EvC8sXgMQd85vAwF3uISiyjtscmBhq3Ai2zwPNBu2m3Xb+dNFOUaZ4C2pfBwAWUbZZeXQx/AebZRNjlvo6f2lGn6O6i1n1gFOgblfZSdEXjPsmujt3gugd24cB1wP0+F309wlVX2bElJjCYnA86xRtf67+ONxn3tkFG0gce5HvhTfuQhe/uBCfc2rwB3A09yMxp5jUWgc3wnPYl4u8BZfo6W/Z6HgQ4XUW4HePA0f0aj1ukAHZxl01Piz9EFzvBdtPQvnAU+MXh7vAY8kzC3BkAXN314jruAB/k2AXiOCyj7KPu8wCqb0dsrYMxlBk+mBy8zgCt8FUH4Iwh8i/f4IXpzGcznucDe1OBl1uaAZdYjGPXt0+gUJwHc1OG1mAOW+PJQcFcSVyJRmyq8Fi0cc8ACa2PBXapNqWS6uudwZKbkXWCJL2rBfXhkXWEqAFMd6gDLfD0C7qMJMsZGmDxMY8TC/DLfTCDW+m0e05JlpI0b1wEW+TyAuzjh7LGayJ0KL22H7VDoAvNcjvxcNpEHHbQJAQ72NPjjUbtzZsXzfMw6C0D3yMUG8Fq0xsGTEWB1YizPCr72zFAuU860zz102aRNYcdKjYpE49YRO5MoSlEzfnafiqdHWWIvUtJUXQesiblmsb7MOPAUFo09HuhbScOFI6WiQa/Lf+WRRpdzePoUCB1+53oM8+qRsfNk20aczGcszJhUixJbKcBW6JolpVPIrcwgQJ8MuMk2rXCkFtM8pTCtSt1q5RAUb2U0HalO+WDBmlSjS7fSRkxnHV0W7X2rHJNHdbgCuMGrbLBgUOOShNoiqXOo1KMCX44qj99ZFG0qwP2wBQkQnX3vsMo6jwSlEyQfqqU7doEee/+qGBSXhCSyfx2pyBRhnhYHbIV1beP5UAHMI0CHfogH/THLu8CvUBhno2MkiQZFjWMfOBtoJ1UEQXMcRcTBAQfJ3v1YcII3IRRj/bwPBTQXYkjd1YMLoF3EraB5CCnx5Ykjx9vONBRy0kuWOPRVxhObhJj7liBgDYGOBE7JXpseraSCoJVwvYGBHTaBWw3US3UiVzUYsQvcohfJTtAKnlql9DHe5le69CMxFMHSsqH7Mg2ORE3UYoEqGyqJE42s6jASeQTBsccyK6lq5QagMF8zz+szEzX8wHL3AW8KHNeZZNoFw5Hyb7ler2KvVNRWsBp3yqGsfO4tVS435fyMv/kraESVihdRKpQm+nEc0ST7zS0OVBY9sOkqFXPBP3hLxfrWPB6PMM+NWcgBjlSdSe41XI3LaEqUcvh9h0ywv2wojvraa5T0/laPWFGi23M/NjZNYJfjLlea5W7MrP8Agc1mo7gc9oEAAAAASUVORK5CYII=)}
 .mc-shaper {--image:url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAE0AAAA2CAQAAAAo5dw5AAAFp0lEQVR42u3ZX4xUdxUH8M+9l53dZYNVUlts2rU0BOvGAlqgIKVgIJI0wfpUExOiqVGjNRqjPojRFyXxwRetmuJbqYk2vGh4EF9KXGslsBKogGlIIaWmgE23QCqysDM/H+bs3dmdGXYWhgUTf/dh9zf33jPf3/n7PWcyN76y+Jt0deVdk9RlYMzrksZuwsq7pqubCNLtpr/ihiX0uEPF2O2mqWV2es1557zkC/puB8PWPXS7NOUasQy57NbAy2Qq4JlpwJLkDSvDSeYcXiZT6MM3WgBLkv0WdcWDrwNabj4+4nQJ5k2/9Fvj5X7HrTNmBc+VQIbdCz7lXcm45KyVXa0yHWosN4BHnAtgrxjEAn34kiSpSX58K4xZGMBPS51tRZ9MD9gjGZMc9cDcm7MPdzoawP7gvQSsDNtKyJ+fe2gLsE0tAHw5dDkB7R5HJJclz89teU9yY9gik3Day5inVpb5N+0Pias9eON1YTaRNM8V91mFy9jnVYxPKe9/CQMv9fDcQoOPW4I+7HOliUAedAJXsRq10tjXVRtmA+0K1suROefQNL0k/MOxkLnOYGgwu17SlM/iyWTAI7H7sxMtGdvBKFMfNRRBMqmz7GZBy7DO0ti96HKTOSsY8e+Q+zCqihJWmm330Dm0Kh7zHvCWv7Yh4yOOx26FPlfD/HMQBqsD4iGnWmS9qsKowyXNfKCUn6Sb52sZHvKhSBfDLjTdzaQwaX0tNRSarAW4qQfpqtY2GkRvOPt0nWUh7bAz8elKjDXBqvPgLvahCevj/yOOtemlqjjqqA+4qsfHvM87CtW2dkjIbbbBImOO2eP09XjlIq9G7fx5S7pUKPToww5JVXLGqrL8N+u4zoQ/7dQUlvycu2cXOD34TMlkt7UAVodW58BbXYonn2r7NXXA329B4c/Y2PJA1/DIX8Wrb1s+TQN5eWX6sdjfg/E+cw0Ww1eaYFUlyVudg+tBjwPx+u/Mn1J+pl51gS9IrkiGLWzbmK9o6C+SU15v2B33wc501o/HvB2vfbshsrMWpbvAd+LZCza0lfqTEshpW8AXG5qfFzrLaP34YbxSsx6VKZpq1vEmo/H8N9vE5oNOlr71KFHQthqLT7/V6VQkMxyesM9d6GvwrqyFXy70cpj0N22kfrXUz3dRkStU8KTkXzZ31sv2Yk1pzu0oVBQltNbr2TjKCR9ukdhzu+P+YfcGMaj7acUy96FQdFYNtpbufACVMruntno+GICWNPHdDKtsjPt7/VOmKkNVj6pXvKGQ1PIZJmT1fmBT7PY7jtTQD7QjOgecjDK1lvjqyeNsdKereMcfUQl5VCW5Qq0TAtWLR50Pc/4AWWnOdkW67p17wtsOuz/kTNybb6/kkmSvomF8MxlWmazRCyqebpFNEp5wR0kg6TU+g0FrcsmhiNbl1jQU9RxrbQiwL6pG5W1MvNMIwf2GJbumUb8KFjkeXfnvLUBvnK1VCEycuh+Pl+VqV+g/j4T8s9DnWeuuHYkZNpS5+OkG/lWfpE2mxs9SGrK1MSfKVi8G/CneO2sNBqL7X2c0jrq7E5K4xsUSwOYI5MJ8bHIxhiwjHU7OcnkwkO3lgGYnBHnfFR3+RPc/4/pFCe28teWnD5U5e0KfnQArYjw45LXQT/K1uF8vYZclI+7pLLHmjpQgxuyw3GJfj0Q7LnmpTaFuxcMmmduPGpx7t6c837D/Xmc6yzHkQssR6Lik6hMzQJpKjwqFfrzfwbaD1YWzIT6fbKj8U6/PdfRjRtYAbwLc5qYD1yQXbYn474hf1BlDs+bGPNnx7yyTabMOrwePN4RY/XrXE8g7HUbXhTFop/+UQi55tlNS16bDyrCkYfab/NqSMgVfs+nLYlo20fzD3YYsVnXSMaNdGhwOWuEuo/7m9SmaTmZ04luzrvndxe38Y6G2Jef/639w/Rf9bF4XxxmWAQAAAABJRU5ErkJggg==)}
@@ -471,41 +559,47 @@ button.slot:hover {border-color:var(--blue);background:var(--panel)}
 .printer-check-status:empty,#settingsSaveStatus:empty {display:none}
 .printer-check-status[data-result=success] {color:var(--ok)}
 .printer-check-status[data-result=error] {color:var(--warn)}
-#settingsDialog {width:min(540px,calc(100% - 24px));max-height:90vh;overflow:hidden}
+#settingsDialog {width:min(680px,calc(100% - 24px));max-height:90vh;overflow:hidden}
 dialog.settings #settingsForm {display:flex;max-height:calc(90vh - 2px);padding:0;gap:0}
-#settingsTitle {flex:none;margin:0;padding:16px 20px 8px;font-size:17px}
-#settingsSections {display:flex;flex-wrap:wrap;gap:6px;padding:0 20px 10px}
-#settingsSections button {background:transparent;color:var(--muted)}
+#settingsTitle {flex:none;margin:0;padding:16px 20px 12px;font-size:17px}
+#settingsLayout {display:grid;grid-template-columns:minmax(160px,192px) minmax(0,1fr);grid-template-rows:minmax(0,1fr);
+  min-height:min(245px,50vh);overflow:hidden;border-top:1px solid var(--line)}
+#settingsSections {display:flex;flex-direction:column;gap:3px;padding:10px 10px 10px 16px;
+  border-inline-end:1px solid var(--line);overflow:auto}
+#settingsSections button {display:flex;align-items:center;gap:7px;text-align:start;min-width:0;
+  background:transparent;color:var(--muted);border-color:transparent;overflow-wrap:anywhere}
+#settingsSections button::before {flex:none;margin:0}
+#settingsSections button:hover {background:var(--bg);color:var(--text)}
+#settingsSections button:focus-visible {outline:2px solid var(--blue);outline-offset:-2px}
 #settingsSections button[aria-pressed="true"] {border-color:var(--blue);color:var(--text);background:var(--bg)}
-#settingsContent {min-height:0;overflow:auto;padding:0 20px 10px;scrollbar-gutter:stable}
-.display-settings {display:grid;gap:2px;padding-block:3px}
-.display-settings label {display:flex;align-items:center;justify-content:space-between;gap:8px 14px;flex-wrap:wrap;
+#settingsContent {min-width:0;min-height:0;overflow:auto;padding:10px 20px 14px;scrollbar-gutter:stable}
+.settings-fields {display:grid;gap:2px;padding-block:3px}
+.settings-fields label {display:flex;align-items:center;justify-content:space-between;gap:8px 14px;flex-wrap:wrap;
   margin:0;padding:9px 0;font-size:13px;color:var(--text);border-bottom:1px solid var(--line)}
-.display-settings label:last-child {border-bottom:0}
-.display-settings select {min-width:min(100%,150px);max-width:100%;font:inherit;color:inherit;background:var(--bg);
+.settings-fields label:last-child {border-bottom:0}
+.settings-fields select {min-width:min(100%,150px);max-width:100%;font:inherit;color:inherit;background:var(--bg);
   border:1px solid var(--line);border-radius:4px;padding:6px 8px}
-.display-settings input[type="checkbox"] {margin:2px 0;accent-color:var(--blue)}
-.display-blocks {display:grid;gap:6px;margin-top:8px}
-.display-block {border:1px solid var(--line);border-radius:6px}
-.display-block > summary {cursor:pointer;padding:8px 11px;font-size:13px;font-weight:600}
-.display-block > summary:focus-visible {outline:2px solid var(--blue);outline-offset:-2px}
-.display-block[open] > summary {border-bottom:1px solid var(--line)}
-.display-block > .display-settings {padding-inline:11px}
+.settings-fields input[type="checkbox"] {margin:2px 0;accent-color:var(--blue)}
 #settingsFooter {flex:none;background:var(--panel);border-top:1px solid var(--line);padding:10px 20px}
 #settingsFooter .settings-actions {margin:0}
 #settingsSave {color:var(--panel)}
 #settingsSaveStatus {margin:0 0 8px;overflow-wrap:anywhere}
+@media(max-width:520px) {
+  #settingsLayout {grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);min-height:0}
+  #settingsSections {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;
+    padding:8px 12px;border-inline-end:0;border-bottom:1px solid var(--line);max-height:38vh}
+  #settingsSections button {padding-inline:5px;gap:5px;font-size:12px}
+  .settings-fields label {gap:6px 8px}
+  .settings-fields select {min-width:min(100%,116px)}
+  #settingsTitle,#settingsContent,#settingsFooter {padding-inline:12px}
+}
 @media(max-width:640px){.tabs{gap:4px}.view-tabs button{padding-inline:10px}
-.identity{min-width:0}
 .tabs button{font-size:12px}
-
-.device{margin:14px 0}
 }
 @media(max-width:420px){
   .view-tabs {flex-wrap:wrap;max-width:100%;gap:2px}
   .view-tabs button {padding-inline:7px}
   .view-tabs [data-icon]::before {margin-inline-end:.25em}
-  #settingsContent,#settingsTitle,#settingsFooter,#settingsSections {padding-inline:12px}
 }
 
 .section-icon {width:17px;height:17px;vertical-align:-3px;margin-right:8px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;color:var(--blue)}
@@ -550,30 +644,24 @@ details.panel:not([open]) > summary.panel-title {border-radius:11px}
 
 
 @media (max-width:820px) {
+  .dashboard #jobPanel {order:-3}
   .dashboard #manualPanel {order:-1}
 
   .dashboard .readings {order:-2}
 }
 
-.device {display:flex;align-items:center;gap:12px 24px;padding:0;margin:20px 0}
-.device .identity {min-width:0;max-width:100%}
-.device h1 {overflow-wrap:anywhere}
+#jobPanel {grid-column:1 / -1}
+#cameraSettings .tool-body {padding:14px 16px;overflow-wrap:anywhere}
+#cameraSettings .camera-form {padding:0;flex-direction:row}
+#cameraSettings .caption:empty {display:none}
+#cameraSettings .row {margin-top:10px;justify-content:flex-end}
+
 #status:not(.disconnected) + #diagnose,#status[hidden] + #diagnose {display:none}
-#headerJob {flex:1 1 330px;min-width:0;max-width:740px;margin-left:auto}
-#job {display:grid;grid-template-columns:clamp(72px,10vw,120px) minmax(0,1fr);
-  background:var(--panel);border:1px solid var(--line);border-radius:8px}
-.job-visual {position:relative;display:grid;place-items:center;min-height:64px;overflow:hidden;
-  border-radius:7px 0 0 7px;color:var(--muted)}
-.job-visual svg {width:24px;height:24px}
-.job-image {position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
-#job[data-preview="available"] .job-visual svg {visibility:hidden}
-.job-content {min-width:0;padding:12px 12px 12px 8px}
-.job-heading {display:flex;align-items:center;justify-content:space-between;gap:12px}
-.filename {min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;font-weight:600}
+#job {display:contents}
 #openJob {display:block;width:fit-content;max-width:100%;padding:0;border:0;background:none;
-  color:var(--text);text-align:left;font:inherit;font-weight:600}
+  color:var(--text);text-align:left;font-size:inherit}
 #openJob:hover {color:var(--blue);text-decoration:underline}
-#headerJob #job[data-active="true"] .job-visual {cursor:pointer}
+#job[data-active="true"] .jobs-model {cursor:pointer}
 #jobs {display:grid;gap:12px;padding-top:8px}
 .fleet-toolbar,.fleet-tools,.fleet-filters {display:flex;align-items:center;flex-wrap:wrap;gap:6px}
 .fleet-toolbar {justify-content:space-between;gap:10px 16px}
@@ -585,38 +673,44 @@ details.panel:not([open]) > summary.panel-title {border-radius:11px}
 #fleetCameras[aria-pressed="true"] {border-color:var(--blue);color:var(--blue)}
 #fleetCameras[aria-pressed="false"] {background:transparent;color:var(--muted)}
 #jobsList {display:grid;gap:8px;margin:0;padding:0;list-style:none;grid-template-columns:minmax(0,1fr)}
-.jobs-card {display:grid;grid-template-columns:minmax(0,1fr);grid-template-areas:"job";
+.jobs-card {display:grid;grid-template-columns:minmax(138px,16%) minmax(0,1fr);grid-template-areas:"media job";
   background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
-.jobs-card[data-active="true"] {grid-template-columns:minmax(138px,16%) minmax(0,1fr);
-  grid-template-areas:"media job"}
-.jobs-card:has(.jobs-camera:not([hidden])) {grid-template-columns:minmax(0,1fr) clamp(140px,20vw,220px);
-  grid-template-areas:"job camera"}
-.jobs-card[data-active="true"]:has(.jobs-camera:not([hidden])) {
+.jobs-card:has(.jobs-camera:not([hidden])) {
   grid-template-columns:minmax(138px,16%) minmax(0,1fr) clamp(140px,20vw,220px);
   grid-template-areas:"media job camera"}
-.jobs-card:has(.jobs-camera:not([hidden])) .jobs-body {align-content:start}
-.jobs-printer-heading {display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 10px;margin-bottom:3px}
-.jobs-printer-heading h3 {margin:0;font-size:15px;line-height:1.25;overflow-wrap:anywhere}
-.jobs-printer-heading a {margin-inline-start:auto}
+.jobs-printer-heading {display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:3px}
+.jobs-printer-identity {display:flex;align-items:baseline;flex-wrap:wrap;min-width:0;gap:4px 10px}
+.jobs-printer-heading :is(h2,h3) {margin:0;font-size:15px;line-height:1.25;overflow-wrap:anywhere}
+#job .jobs-printer-heading {flex-wrap:wrap}
+.monitor-job-tools {display:flex;align-items:center;gap:6px;margin-inline-start:auto}
+#job .monitor-job-tools .jobs-link {padding:2px 4px}
+#monitorHistory::before {margin-inline-end:0}
+.jobs-printer-heading a {flex:none}
 .jobs-state {display:flex;align-items:baseline;gap:6px;margin:0;font-size:12px;color:var(--muted)}
 .jobs-state::before {content:"";display:inline-block;flex:0 0 6px;height:6px;align-self:center;border-radius:50%;background:currentColor}
 .jobs-card[data-group="active"] .jobs-state,.jobs-card[data-ready="true"] .jobs-state {color:var(--ok)}
 .jobs-card[data-group="attention"] .jobs-state {color:var(--warn)}
-.jobs-printer-heading a,.jobs-actions a {color:var(--blue);font-size:12px;font-weight:600;text-decoration:none}
+.jobs-printer-heading :is(a,.jobs-link),.jobs-actions :is(a,.jobs-link) {color:var(--blue);font-size:12px;font-weight:600;text-decoration:none}
 .jobs-card a:hover {text-decoration:underline}
-.jobs-body {grid-area:job;min-width:0;display:grid;align-content:center;gap:5px;padding:8px 10px}
+.jobs-body {grid-area:job;min-width:0;display:grid;align-content:start;gap:5px;padding:8px 10px}
 .jobs-file-row {display:flex;align-items:baseline;justify-content:space-between;gap:10px}
 .jobs-file {font-weight:600;overflow-wrap:anywhere;min-width:0}
 .jobs-file-row strong {flex:none;color:var(--blue)}
-.jobs-card[data-active="false"] .jobs-file {color:var(--muted);font-weight:400}
+:is(.jobs-card,#job)[data-active="false"] .jobs-file {color:var(--muted);font-weight:400}
 .jobs-card progress {height:6px}
 .jobs-meta,.jobs-events,.jobs-last {font-size:12px;color:var(--muted)}
-.jobs-meta:has(span:empty):has(strong:empty) {display:none}
+.jobs-meta:has(>span:empty):has(>strong:empty) {display:none}
 .jobs-last {display:flex;flex-wrap:wrap;gap:2px 6px}
 .jobs-last strong {font-weight:600;color:var(--text);overflow-wrap:anywhere;min-width:0}
 .jobs-actions {display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px}
 .jobs-actions:not(:has(:is(button,a):not([hidden]))) {display:none}
-.jobs-actions a {padding-block:4px}
+.jobs-actions :is(a,.jobs-link) {padding-block:4px}
+.jobs-card .jobs-link {border:0;background:none;padding-inline:0}
+.jobs-card .jobs-link:enabled:hover {text-decoration:underline}
+#cameraOpen {padding-block:0;flex:none}
+#jobMeta,#jobMetrics #time {display:inline-flex;flex-wrap:wrap;gap:4px 10px}
+#jobMeta span:empty {display:none}
+#jobMetrics:not(:has(>span:not([hidden]))) {display:none}
 .jobs-body details {font-size:12px;color:var(--muted)}
 :root[data-fleet-details="off"] .jobs-body details {display:none}
 .jobs-body summary {cursor:pointer;width:fit-content}
@@ -626,28 +720,29 @@ details.panel:not([open]) > summary.panel-title {border-radius:11px}
 .jobs-events {list-style:none;margin:0;padding:0}
 .jobs-events li + li {margin-top:3px}
 [data-job-result]:empty {display:none}
-.jobs-media {grid-area:media;display:grid;justify-items:center;align-content:center;gap:4px;min-width:0;padding:5px 4px}
+.jobs-media {grid-area:media;display:grid;grid-template-rows:minmax(86px,1fr) auto;min-width:0}
 .jobs-media figure,.jobs-camera {min-width:0;margin:0}
-.jobs-model {width:min(100%,116px)}
-.jobs-model-actions {justify-content:center;gap:4px}
+.jobs-model {display:grid}
+.jobs-model-actions {justify-content:center;gap:4px;padding:0 4px 4px}
 .jobs-model-actions button {padding:4px 6px;font-size:12px}
-.jobs-camera {grid-area:camera;position:relative;align-self:stretch;width:100%;min-height:0;aspect-ratio:16/10}
+.jobs-camera {grid-area:camera;position:relative;
+  align-self:stretch;width:100%;min-height:0;aspect-ratio:16/10}
 .jobs-camera figcaption {position:absolute;bottom:6px;left:6px;padding:2px 5px;border-radius:4px;
   background:#151a18d9;color:#fff;font-size:11px;pointer-events:none}
 .jobs-camera:not(:has([data-stream]:not([hidden]))) figcaption {visibility:hidden}
-.jobs-camera .jobs-media-frame {position:absolute;inset:0;height:auto;border-radius:0}
+.jobs-camera .jobs-media-frame {position:absolute;inset:0;border-radius:0}
 .jobs-media-frame,#jobsCameraFrame {position:relative;display:grid;place-items:center;overflow:hidden;
   background:var(--bg);border-radius:6px}
-.jobs-media-frame {height:86px}
 .jobs-media-frame img,#jobsCameraFrame img {position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
-.jobs-model .jobs-media-frame {height:72px;background:transparent}
+.jobs-model .jobs-media-frame {background:transparent;border-radius:0}
 .jobs-camera .muted,.jobs-fallback {padding:3px 4px;text-align:center;font-size:11px}
 .jobs-fallback {display:grid;justify-items:center;gap:3px;color:var(--muted)}
 .jobs-fallback svg {width:22px;height:22px}
 .jobs-model:has([data-preview]:not([hidden])) .jobs-fallback {visibility:hidden}
 .jobs-camera-tools {position:absolute;top:4px;right:4px;display:flex;gap:4px}
 .jobs-camera-tools button {display:grid;place-items:center;width:28px;height:28px;padding:0;background:var(--panel)}
-.jobs-camera-tools svg {width:14px;height:14px}
+.jobs-camera-tools svg,.camera-expand-icon {width:14px;height:14px}
+.jobs-camera-tools button[data-icon]::before {margin:0}
 #jobsNotice {padding:16px}
 #jobsNotice button {margin-top:8px}
 #jobsCameraDialog {width:min(680px,calc(100% - 24px));padding:12px}
@@ -658,35 +753,14 @@ details.panel:not([open]) > summary.panel-title {border-radius:11px}
   #fleetSearch {max-width:none;min-width:118px}
 }
 @media(max-width:540px){
-  .jobs-card[data-active="true"] {grid-template-columns:minmax(0,1fr);grid-template-areas:"job" "media"}
-  .jobs-card:has(.jobs-camera:not([hidden])) {grid-template-columns:minmax(0,1fr) minmax(0,59%)}
-  .jobs-card[data-active="true"]:has(.jobs-camera:not([hidden])) {
+  .jobs-card {grid-template-columns:minmax(0,1fr);grid-template-areas:"job" "media"}
+  .jobs-card:has(.jobs-camera:not([hidden])) {
     grid-template-columns:minmax(142px,41%) minmax(0,1fr);grid-template-areas:"job job" "media camera"}
-  .jobs-media {justify-items:start;padding-inline-start:10px}
-  .jobs-card:has(.jobs-camera:not([hidden])) .jobs-media {justify-items:center;padding-inline-start:4px}
+  .jobs-card:not(:has(.jobs-camera:not([hidden]))) .jobs-media {width:min(100%,160px)}
   .fleet-tools {flex-basis:100%}
 }
 @media(max-width:345px){#fleetSearch {flex-basis:100%}}
-.percent {flex:none;color:var(--blue);font-size:16px;font-weight:650;line-height:1.15}
-#progressLine {margin-top:7px}
-#bar {height:5px}
-.job-timing, .job-meta {display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;color:var(--muted);font-size:12px}
-.job-timing strong {font-size:13px;color:var(--text);font-weight:600}
-.job-footer {display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px 16px;margin-top:8px}
-.job-footer:not(:has(#time:not([hidden]), #jobMeta:not([hidden]), #jobActions:not([hidden]) button:not([hidden]))) {display:none}
-.job-stats:not(:has(#time:not([hidden]), #jobMeta:not([hidden]))) {display:none}
-.job-meta span:empty {display:none}
-.job-timing:not([hidden]) + .job-meta {margin-top:4px}
-#timeHint {margin-top:6px;font-size:12px;color:var(--muted)}
-#jobActions {margin-left:auto;gap:6px}
-#jobActions button {min-height:28px;padding:4px 9px}
-#jobActions:not(:has(button:not([hidden]))) {display:none}
-#actionStatus {padding:7px 0 0;font-size:12px}
-#job[data-phase="idle"] {display:block;padding:0;background:none;border:0}
-#job[data-phase="idle"] :is(.job-visual,.job-footer,#progressLine,.percent) {display:none}
-#job[data-phase="idle"] .job-content {padding:0}
-#job[data-phase="idle"] .filename {color:var(--muted);font-weight:400}
-main:has(.dashboard.stale) #job {opacity:.65}
+main:has(.dashboard.stale) #job > * {opacity:.65}
 #otherTools {display:flex;align-items:baseline;gap:6px 14px;flex-wrap:wrap;padding:0 16px 12px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
 #otherTools span {white-space:nowrap}
 .detail-groups {display:grid;gap:8px}
@@ -696,13 +770,13 @@ main:has(.dashboard.stale) #job {opacity:.65}
 #printerSensors:empty {display:none}
 #history .totals {margin-bottom:12px}
 #history .totals dd {font-size:16px;font-weight:600;font-variant-numeric:tabular-nums}
-#historyStatus {margin-bottom:6px}
+#historyStatus {margin-bottom:6px;white-space:pre-line;overflow-wrap:anywhere}
 .history-controls {display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px}
 .history-controls label {display:inline-flex;align-items:center;gap:6px;cursor:pointer}
 .history-controls input[type="checkbox"] {width:auto;margin:0;accent-color:var(--blue)}
+#historyPrinter {max-width:100%;min-width:0;font:inherit;color:inherit;background:var(--panel);
+  border:1px solid var(--line);border-radius:4px;padding:6px 8px}
 .preview {background:var(--bg);color:var(--muted)}
-:root[data-density="compact"] .device {margin-block:10px;gap:8px 16px}
-:root[data-density="compact"] .device h1 {font-size:clamp(22px,2.5vw,30px)}
 :root[data-density="compact"] .tabs {margin-bottom:9px}
 :root[data-density="compact"] .dashboard,
 :root[data-density="compact"] .monitor-main,
@@ -711,63 +785,14 @@ main:has(.dashboard.stale) #job {opacity:.65}
 :root[data-density="compact"] .panel-title {padding-block:7px}
 :root[data-density="compact"] .jobs-body,
 :root[data-density="compact"] .file-name {padding-block:6px}
-:root[data-density="compact"] .jobs-model .jobs-media-frame {height:65px}
-:root[data-density="compact"] .jobs-media {padding-block:4px}
 :root[data-density="compact"] .chart {height:126px}
-@media(max-width:760px){#headerJob {flex-basis:100%;max-width:none;margin-left:0}}
-@media(max-width:440px){#job .job-content {padding:9px 9px 9px 6px}
-  #job[data-phase="idle"] .job-content {padding:0}
-  #jobActions {margin-left:0}}
 </style>
 </head>
 <body>
 <main>
-  <header class="device"><div class="identity"><h1 id="deviceName">{{printer}}</h1><span id="status" class="connection" role="status">{{t:Connecting…}}</span><button id="diagnose" type="button" data-icon="find">{{t:Check connection}}</button></div>
-    <select id="devicePicker" aria-label="{{t:Open printer}}" hidden></select>
-    <section id="headerJob" aria-label="{{t:Print job}}" hidden>
-      <div id="jobCard">
-        <div id="job" data-phase="idle" data-preview="none">
-          <div class="job-visual" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round">
-              <path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Zm0 9 8-4.5M12 12 4 7.5m8 4.5v9"/>
-            </svg>
-            <img class="job-image" id="jobImage" alt="" hidden>
-          </div>
-          <div class="job-content">
-            <div class="job-heading">
-              <button class="filename" id="openJob" type="button" hidden></button>
-              <p class="filename" id="jobFile">—</p>
-              <strong class="percent" id="percent" hidden></strong>
-            </div>
-            <div id="progressLine" hidden>
-              <progress id="bar" max="100" aria-label="{{t:Print progress}}"></progress>
-            </div>
-            <div class="job-footer">
-              <div class="job-stats">
-                <div class="job-timing" id="time" hidden>
-                  <span><strong id="remaining"></strong></span>
-                  <span id="finishTime" hidden></span>
-                </div>
-                <div class="job-meta" id="jobMeta" hidden>
-                  <span id="layers"></span><span id="elapsed"></span><span id="filament"></span>
-                </div>
-              </div>
-              <div class="device-actions" id="jobActions">
-                <button id="pausePrint" type="button" data-icon="pause" hidden>{{t:Pause}}</button>
-                <button id="resumePrint" type="button" data-icon="play" hidden>{{t:Resume}}</button>
-                <button id="cancelPrint" type="button" class="danger" data-icon="stop" hidden>{{t:Cancel}}</button>
-              </div>
-            </div>
-            <p id="timeHint" hidden></p>
-          </div>
-        </div>
-        <p id="actionStatus" role="status" class="tool-body" hidden></p>
-      </div>
-    </section>
-  </header>
   <nav class="tabs" aria-label="{{t:Device navigation}}">
     <div class="view-tabs"><button id="monitorTab" data-icon="monitor">{{t:Monitor}}</button><button id="fleetToggle" data-icon="fleet">{{t:All printers}}</button><button id="historyTab" data-icon="history">{{t:History}}</button>
-    </div><div class="view-actions"><button id="notificationsButton" data-icon="bell">{{t:Notifications}}</button><button id="settingsButton" data-icon="settings" aria-haspopup="dialog">{{t:Settings}}</button>
+    </div><div class="view-actions"><select id="devicePicker" aria-label="{{t:Open printer}}" hidden></select><button id="notificationsButton" data-icon="bell">{{t:Notifications}}</button><button id="settingsButton" data-icon="settings" aria-haspopup="dialog">{{t:Settings}}</button>
   </div></nav>
 
   <section class="panel" id="setup" hidden>
@@ -787,7 +812,7 @@ main:has(.dashboard.stale) #job {opacity:.65}
         <button type="button" data-fleet-filter="all" aria-controls="jobsList" aria-pressed="true">{{t:All}} <span data-count></span></button>
         <button type="button" data-fleet-filter="active" aria-controls="jobsList" aria-pressed="false">{{t:Printing}} <span data-count></span></button>
         <button type="button" data-fleet-filter="idle" aria-controls="jobsList" aria-pressed="false">{{t:Idle}} <span data-count></span></button>
-        <button type="button" data-fleet-filter="attention" aria-controls="jobsList" aria-pressed="false" title="{{t:Paused, disconnected or reporting a problem}}">{{t:Attention}} <span data-count></span></button>
+        <button type="button" data-fleet-filter="attention" aria-controls="jobsList" aria-pressed="false">{{t:Attention}} <span data-count></span></button>
       </div>
       <div class="fleet-tools">
         <input type="search" id="fleetSearch" aria-label="{{t:Search printers and jobs}}" placeholder="{{t:Search…}}">
@@ -800,49 +825,14 @@ main:has(.dashboard.stale) #job {opacity:.65}
       <p class="muted" role="status"></p>
       <button type="button" id="fleetClear" data-icon="close">{{t:Clear filters}}</button>
     </div>
-    <dialog id="jobsCameraDialog" aria-labelledby="jobsCameraName">
-      <div class="row"><h2 id="jobsCameraName"></h2><form method="dialog"><button type="submit" data-icon="close">{{t:Close}}</button></form></div>
-      <div id="jobsCameraFrame"></div>
-    </dialog>
     <template id="jobTile">
       <li class="jobs-card">
-        <div class="jobs-body">
-          <div class="jobs-printer-heading">
-            <h3 tabindex="-1"></h3><span class="jobs-state"></span>
-            <a data-monitor data-icon="arrow">{{t:Monitor}}</a>
-          </div>
-          <div class="jobs-file-row"><span class="jobs-file"></span><strong class="jobs-percent"></strong></div>
-          <progress max="100" aria-label="{{t:Print progress}}"></progress>
-          <div class="row jobs-meta"><span data-layer></span><strong data-eta></strong></div>
-          <div class="jobs-last" hidden>{{t:Last completed}} <strong></strong></div>
-          <div class="jobs-actions">
-            <button type="button" data-retry data-icon="refresh" hidden>{{t:Reconnect camera}}</button>
-            <a data-files data-icon="arrow" hidden>{{t:Browse files}}</a>
-            <a data-repeat data-icon="refresh" hidden>{{t:Print again}}</a>
-          </div>
-          <details><summary>{{t:Job details}}</summary><dl></dl><ol class="jobs-events"></ol></details>
-          <p class="jobs-meta" data-job-result role="status"></p>
-        </div>
-        <div class="jobs-media">
-          <figure class="jobs-model">
-            <div class="jobs-media-frame">
-              <div class="jobs-fallback"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true">
-                <path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Zm0 9 8-4.5M12 12 4 7.5m8 4.5v9"/>
-              </svg><span>{{t:No preview}}</span></div>
-              <img data-preview alt="" hidden>
-            </div>
-          </figure>
-          <div class="jobs-actions jobs-model-actions">
-            <button type="button" data-print-action data-icon="pause" hidden></button>
-            <button type="button" class="danger" data-print-cancel data-icon="stop" hidden>{{t:Cancel}}</button>
-          </div>
-        </div>
-        <figure class="jobs-camera" hidden>
+''' + FLEET_JOB_CONTENT + r'''        <figure class="jobs-camera" hidden>
           <div class="jobs-media-frame">
             <img data-stream alt="" hidden><span class="muted" role="status" hidden></span>
             <div class="jobs-camera-tools">
               <button type="button" data-camera aria-label="{{t:Enlarge camera}}" title="{{t:Enlarge camera}}" hidden>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 4H4v4m12-4h4v4M4 16v4h4m12-4v4h-4"/></svg>
+''' + CAMERA_EXPAND_ICON + r'''
               </button>
               <button type="button" data-snapshot aria-label="{{t:Save snapshot}}" title="{{t:Save snapshot}}" hidden>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M3 7h4l2-3h6l2 3h4v13H3z"/><circle cx="12" cy="13" r="3.5"/></svg>
@@ -854,9 +844,41 @@ main:has(.dashboard.stale) #job {opacity:.65}
       </li>
     </template>
   </section>
+  <dialog id="jobsCameraDialog" aria-labelledby="jobsCameraName">
+    <div class="row"><h2 id="jobsCameraName"></h2><form method="dialog"><button type="submit" data-icon="close">{{t:Close}}</button></form></div>
+    <div id="jobsCameraFrame"></div>
+  </dialog>
+  <dialog class="settings" id="cameraSettings" aria-labelledby="cameraSettingsTitle">
+    <div class="tool-body">
+      <h2 id="cameraSettingsTitle">{{t:Camera}}</h2>
+      <form class="camera-form" id="cameraForm">
+        <label for="cameraUrl">{{t:MJPEG stream URL (HTTP or HTTPS)}}</label>
+        <input id="cameraUrl" type="url" maxlength="2048" placeholder="http://…" autocomplete="off">
+        <button id="cameraStart" type="submit" data-icon="play">{{t:Connect}}</button>
+        <button id="cameraStop" type="button" data-icon="unplug" hidden>{{t:Disconnect}}</button>
+        <button id="cameraLight" type="button" data-icon="light" aria-label="{{t:Chamber light}}" aria-pressed="false" hidden>{{t:Light off}}</button>
+      </form>
+      <p class="caption" id="cameraStatus" role="status"></p>
+      <p class="caption" id="lightStatus" role="status"></p>
+      <div class="row"><button id="cameraSettingsClose" type="button">{{t:Close}}</button></div>
+    </div>
+  </dialog>
   <div class="dashboard" id="monitor">
+    <section class="jobs-card" id="jobPanel" aria-labelledby="job-title">
+      <div id="job" data-active="false">
+''' + MONITOR_JOB_CONTENT + r'''      </div>
+      <figure class="jobs-camera" id="camera" hidden>
+        <div class="jobs-media-frame">
+          <img id="cameraImage" data-stream alt="{{t:Printer camera feed}}" referrerpolicy="no-referrer" hidden>
+          <div class="jobs-camera-tools">
+            <button id="cameraExpand" type="button" aria-label="{{t:Enlarge camera}}" title="{{t:Enlarge camera}}">''' + CAMERA_EXPAND_ICON + r'''</button>
+            <button id="cameraSnapshot" type="button" data-icon="camera" aria-label="{{t:Save snapshot}}" title="{{t:Save snapshot}}"></button>
+          </div>
+        </div>
+        <figcaption>{{t:Live camera}}</figcaption>
+      </figure>
+    </section>
     <div class="monitor-main">
-
       <details class="panel readings foldable-panel" id="readingsPanel" aria-labelledby="readouts-title" open>
         <summary class="panel-title">
           <span class="foldable-title" id="readouts-title"><svg class="section-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 13h4l3-8 4 14 3-7h4"/></svg>{{t:Printer Readings}}</span>
@@ -888,10 +910,13 @@ main:has(.dashboard.stale) #job {opacity:.65}
           <select id="chartTool" aria-label="{{t:Chart nozzle}}" hidden></select>
           <label>{{t:Range}} <select id="chartRange"><option value="5">{{t:5 min}}</option><option value="15">{{t:15 min}}</option><option value="30" selected>{{t:30 min}}</option></select></label>
         </div>
-        <canvas class="chart" id="chart" role="img" aria-label="{{t:Chart of actual and target temperatures for the nozzle and bed}}"></canvas>
+        <div id="chartPlots">
+          <canvas class="chart" id="chart" role="img" aria-label="{{t:Chart of actual and target temperatures for the nozzle and bed}}"></canvas>
+          <canvas class="chart" id="chartBed" role="img" aria-label="{{t:Bed}}" hidden></canvas>
+        </div>
         <p class="caption" id="chartSample"></p><div class="chart-legend muted">
-          <span class="nozzle-series" id="chartNozzle">{{t:Nozzle}}</span><span class="nozzle-series target" id="chartNozzleTarget">{{t:Nozzle Target}}</span>
-          <span class="bed-series">{{t:Bed}}</span><span class="bed-series target">{{t:Bed Target}}</span>
+          <span class="nozzle-series" id="chartNozzle" data-chart-line="nozzle">{{t:Nozzle}}</span><span class="nozzle-series target" id="chartNozzleTarget" data-chart-line="nozzleTarget">{{t:Nozzle Target}}</span>
+          <span class="bed-series" data-chart-line="bed">{{t:Bed}}</span><span class="bed-series target" data-chart-line="bedTarget">{{t:Bed Target}}</span>
         </div>
       </div>
     </details>
@@ -928,9 +953,8 @@ main:has(.dashboard.stale) #job {opacity:.65}
           <div class="manual-notices">
             <button data-group="clear" data-manual="clear" hidden><span class="mc-icon mc-clear" aria-hidden="true"></span>{{t:Clear error}}</button>
           </div>
-          <section class="manual-group" data-group="motion" aria-labelledby="axesTitle" hidden>
+          <section class="manual-group" data-group="motion" aria-label="{{t:Axes}}" hidden>
             <div class="axis-toolbar">
-              <h3 class="manual-heading" id="axesTitle">{{t:Axes}}</h3>
               <button data-manual="home" aria-label="{{t:Home all axes}}" title="{{t:Home all axes}}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="m2.5 11 9.5-8 9.5 8M5 9.5V21h5v-6h4v6h5V9.5"/></svg>{{t:Home}}</button>
               <button type="button" data-manual="release" data-group="release" data-released="false" aria-label="{{t:Release motors}}" title="{{t:Release motors}}" hidden>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false">
@@ -952,12 +976,14 @@ main:has(.dashboard.stale) #job {opacity:.65}
                   <button data-jog="x-" aria-label="{{t:Move X negative}}"><span>X−</span></button>
                   <button data-jog="x+" aria-label="{{t:Move X positive}}"><span>X+</span></button>
                   <button data-jog="y-" aria-label="{{t:Move Y negative}}"><span>Y−</span></button>
+                  <svg class="jog-nozzle" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 3h8v6h-8zM9 9h14v9H9zM11 18l3 6h4l3-6m-5 6v4M6 11v5m20-5v5"/></svg>
                 </div>
               </div>
               <div class="z-row" role="group" aria-labelledby="zPart">
                 <div class="axis-heading"><strong id="zPart">Z</strong><small id="zPosition"></small></div>
                 <div class="motion-buttons">
                   <button data-z-step="1" aria-label="{{t:Move up}}"><span class="mc-icon mc-up" aria-hidden="true"></span>{{t:Up}}</button>
+                  <svg class="z-plate" viewBox="0 0 64 40" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14 11h36l10 14H4zM4 25v4h56v-4M19 16h26m-31 5h36M24 11l-4 14m20-14 4 14"/></svg>
                   <button data-z-step="-1" aria-label="{{t:Move down}}"><span class="mc-icon mc-up" aria-hidden="true"></span>{{t:Down}}</button>
                 </div>
               </div>
@@ -968,7 +994,8 @@ main:has(.dashboard.stale) #job {opacity:.65}
             <div class="nozzle-controls" data-group="nozzleHeat" hidden>
               <label>{{t:Nozzle}} <select id="heatTarget"><option value="180">180 °C</option><option value="200" selected>200 °C</option>
                 <option value="220">220 °C</option><option value="240">240 °C</option><option value="260">260 °C</option><option value="280">280 °C</option></select></label>
-              <button data-heat>{{t:Set temperature}}</button><button data-manual="heat0">{{t:Heat off}}</button>
+              <button data-heat aria-label="{{t:Set temperature}}"><span class="heat-long">{{t:Set temperature}}</span><span class="heat-short">{{t:Heat}}</span></button>
+              <button data-manual="heat0" aria-label="{{t:Heat off}}"><span class="heat-long">{{t:Heat off}}</span><span class="heat-short">{{t:Off}}</span></button>
             </div>
             <div class="filament-actions" role="group" aria-label="{{t:Filament movement}}" aria-describedby="feedDistance">
               <small id="feedDistance">{{t:10 mm per move}}</small>
@@ -976,10 +1003,12 @@ main:has(.dashboard.stale) #job {opacity:.65}
             </div>
           </section>
           <section class="manual-group" data-group="calibration" aria-labelledby="calibrationTitle" hidden>
-            <h3 class="manual-heading" id="calibrationTitle">{{t:Calibration}}</h3>
-            <div class="manual-services">
-              <button data-manual="level"><span class="mc-icon mc-level" aria-hidden="true"></span>{{t:Level bed}}</button>
-              <button data-manual="shaper"><span class="mc-icon mc-shaper" aria-hidden="true"></span>{{t:Input shaper}}</button>
+            <div class="calibration-row">
+              <h3 class="manual-heading" id="calibrationTitle">{{t:Calibration}}</h3>
+              <div class="manual-services">
+                <button data-manual="level"><span class="mc-icon mc-level" aria-hidden="true"></span>{{t:Level bed}}</button>
+                <button data-manual="shaper"><span class="mc-icon mc-shaper" aria-hidden="true"></span>{{t:Input shaper}}</button>
+              </div>
             </div>
             <div id="calibrationStatus" hidden><span id="calibrationMessage" role="status"></span>
               <progress id="calibrationProgress" aria-label="{{t:Calibration in progress}}" hidden></progress></div>
@@ -992,24 +1021,6 @@ main:has(.dashboard.stale) #job {opacity:.65}
         </div>
       </details>
       <section id="materials" class="panel" hidden><h2 class="panel-title"><svg class="section-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 6c0-4 14-4 14 0s-14 4-14 0z M5 6v12c0 4 14 4 14 0V6 M5 12c0 4 14 4 14 0"/></svg>{{t:Materials · IFS}}</h2><div id="slots"></div></section>
-      <div id="monitorCamera">
-        <details class="panel" id="camera">
-          <summary class="panel-title"><svg class="section-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 7h4l2-3h6l2 3h4v13H3z M15.5 13a3.5 3.5 0 1 1-7 0 3.5 3.5 0 1 1 7 0"/></svg>{{t:Camera}}</summary>
-          <div class="tool-body">
-            <label for="cameraUrl">{{t:MJPEG stream URL (HTTP or HTTPS)}}</label>
-            <form class="camera-form" id="cameraForm">
-              <input id="cameraUrl" type="url" maxlength="2048" placeholder="http://…" autocomplete="off">
-              <button id="cameraStart" type="submit" data-icon="play">{{t:Connect}}</button>
-              <button id="cameraStop" type="button" data-icon="unplug" hidden>{{t:Disconnect}}</button>
-              <button id="cameraLight" type="button" data-icon="light" aria-label="{{t:Chamber light}}" aria-pressed="false" hidden>{{t:Light off}}</button>
-              <button id="cameraSnapshot" type="button" data-icon="camera" hidden>{{t:Save snapshot}}</button>
-            </form>
-            <p class="caption" id="cameraStatus" role="status"></p>
-            <p class="caption" id="lightStatus" role="status"></p>
-            <img class="camera-image" id="cameraImage" alt="{{t:Printer camera feed}}" referrerpolicy="no-referrer" hidden>
-          </div>
-        </details>
-      </div>
       <details class="panel" id="printerDetails">
         <summary class="panel-title"><svg class="section-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M21 12a9 9 0 1 1-18 0 9 9 0 1 1 18 0 M12 11v6 M12 7v1"/></svg>{{t:Printer details}}</summary>
         <div class="tool-body detail-groups">
@@ -1047,7 +1058,11 @@ main:has(.dashboard.stale) #job {opacity:.65}
         </dl>
       </section>
       <p class="muted" id="historyStatus" role="status">{{t:Print history is recorded while OrcaSlicer is open.}}</p>
-      <div class="history-controls"><input type="search" id="historySearch" placeholder="{{t:Find a file}}" aria-label="{{t:Find a history entry}}"><label><input type="checkbox" id="failedJobs"> {{t:Errors and cancellations}}</label></div>
+      <div class="history-controls">
+        <select id="historyPrinter" aria-label="{{t:Printer}}"><option value="">{{t:All printers}}</option></select>
+        <input type="search" id="historySearch" placeholder="{{t:Find a file}}" aria-label="{{t:Find a history entry}}">
+        <label><input type="checkbox" id="failedJobs"> {{t:Errors and cancellations}}</label>
+      </div>
       <p class="history-summary" id="historySummary"></p>
       <div class="table-wrap" id="historyTable" hidden>
         <table class="history-table" role="table">
@@ -1061,24 +1076,17 @@ main:has(.dashboard.stale) #job {opacity:.65}
 <dialog class="settings" id="settingsDialog" aria-labelledby="settingsTitle">
   <form id="settingsForm" novalidate>
     <h2 id="settingsTitle">{{t:Settings}}</h2>
-    <div id="settingsSections" role="group" aria-label="{{t:Settings}}">
-      <button id="settingsAppearanceTab" type="button" data-icon="monitor" aria-controls="settingsAppearance" aria-pressed="false">{{t:Appearance}}</button>
-      <button id="settingsPrintersTab" type="button" data-icon="link" aria-controls="settingsPrinters" aria-pressed="true">{{t:Connection}}</button>
-    </div>
-    <div id="settingsContent">
-      <section id="settingsPrinters" aria-labelledby="settingsPrintersTab">
-        <div id="printerFields"></div>
-        <div class="row"><button type="button" id="findPrinters" data-icon="find">{{t:Find printers}}</button><button type="button" id="addPrinter" data-icon="plus">{{t:Add printer}}</button></div>
-        <div id="discoveredPrinters"></div>
-        <p class="caption" id="settingsStatus" role="status"></p>
-        <details id="bulk"><summary>{{t:Edit as text}}</summary><label for="printersText">{{t:One printer per line: address | CheckCode | name | serial number}}</label>
-          <textarea id="printersText" rows="5" spellcheck="false" placeholder="192.168.1.50 | 1a2b3c4d | Adventurer 5M"></textarea>
-          <p class="caption">{{t:Use a JSON array of four strings when a value contains a vertical bar.}}</p>
-        </details>
-        <p class="caption">{{t:Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.}}</p>
-      </section>
-      <section id="settingsAppearance" aria-labelledby="settingsAppearanceTab" hidden>
-        <div class="display-settings">
+    <div id="settingsLayout">
+      <div id="settingsSections" role="group" aria-label="{{t:Settings}}">
+        <button id="settingsAppearanceTab" type="button" data-icon="settings" aria-controls="settingsAppearance" aria-pressed="false">{{t:Appearance}}</button>
+        <button id="settingsMonitorTab" type="button" data-icon="monitor" aria-controls="settingsMonitor" aria-pressed="false">{{t:Monitor}}</button>
+        <button id="settingsFleetTab" type="button" data-icon="fleet" aria-controls="settingsFleet" aria-pressed="false">{{t:All printers}}</button>
+        <button id="settingsFilesTab" type="button" data-icon="print" aria-controls="settingsFiles" aria-pressed="false">{{t:Printer Files}}</button>
+        <button id="settingsHistoryTab" type="button" data-icon="history" aria-controls="settingsHistory" aria-pressed="false">{{t:Print History}}</button>
+        <button id="settingsPrintersTab" type="button" data-icon="link" aria-controls="settingsPrinters" aria-pressed="true">{{t:Connection}}</button>
+      </div>
+      <div id="settingsContent">
+        <section class="settings-fields" id="settingsAppearance" aria-labelledby="settingsAppearanceTab" hidden>
           <label for="displayTheme">{{t:Theme}}<select id="displayTheme">
             <option value="system">{{t:System theme}}</option>
             <option value="light">{{t:Light theme}}</option>
@@ -1088,44 +1096,57 @@ main:has(.dashboard.stale) #job {opacity:.65}
             <option value="standard">{{t:Standard}}</option>
             <option value="compact">{{t:Compact}}</option>
           </select></label>
-        </div>
-        <div class="display-blocks">
-          <details class="display-block" id="settingsMonitor">
-            <summary>{{t:Monitor}}</summary>
-            <div class="display-settings">
-              <label for="displayMonitorChart">{{t:Temperatures}}<input type="checkbox" id="displayMonitorChart"></label>
-              <label for="displayPrinterDetails">{{t:Printer details}}<input type="checkbox" id="displayPrinterDetails"></label>
-            </div>
+        </section>
+        <section class="settings-fields" id="settingsMonitor" aria-labelledby="settingsMonitorTab" hidden>
+          <label for="displayMonitorChart">{{t:Temperatures}}<input type="checkbox" id="displayMonitorChart"></label>
+          <label for="displayChartLayout">{{t:Chart layout}}<select id="displayChartLayout">
+            <option value="shared">{{t:Shared scale}}</option>
+            <option value="separate">{{t:Separate scales}}</option>
+          </select></label>
+          <label for="displayChartRange">{{t:Range}}<select id="displayChartRange">
+            <option value="5">{{t:5 min}}</option><option value="15">{{t:15 min}}</option><option value="30">{{t:30 min}}</option>
+          </select></label>
+          <label>{{t:Nozzle}}<input type="checkbox" data-chart-choice="nozzle"></label>
+          <label>{{t:Nozzle Target}}<input type="checkbox" data-chart-choice="nozzleTarget"></label>
+          <label>{{t:Bed}}<input type="checkbox" data-chart-choice="bed"></label>
+          <label>{{t:Bed Target}}<input type="checkbox" data-chart-choice="bedTarget"></label>
+          <label for="displayPrinterDetails">{{t:Printer details}}<input type="checkbox" id="displayPrinterDetails"></label>
+        </section>
+        <section class="settings-fields" id="settingsFleet" aria-labelledby="settingsFleetTab" hidden>
+          <label for="displayFleetCameras">{{t:Live cameras}}<select id="displayFleetCameras">
+            <option value="all">{{t:While this tab is open}}</option>
+            <option value="printing">{{t:Only during an active print}}</option>
+            <option value="off">{{t:Off}}</option>
+          </select></label>
+          <label for="displayFleetDetails">{{t:Job details}}<input type="checkbox" id="displayFleetDetails"></label>
+          <label for="displayFleetWaitForRemoval">{{t:Wait for part removal}}<input type="checkbox" id="displayFleetWaitForRemoval"></label>
+        </section>
+        <section class="settings-fields" id="settingsFiles" aria-labelledby="settingsFilesTab" hidden>
+          <label for="displayCardSize">{{t:Card size}}<select id="displayCardSize">
+            <option value="small">{{t:Small}}</option>
+            <option value="medium">{{t:Medium}}</option>
+            <option value="large">{{t:Large}}</option>
+          </select></label>
+          <label for="displayRows">{{t:Rows per page}}<select id="displayRows">
+            <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option>
+          </select></label>
+          <label for="displayPreviews">{{t:Show file previews}}<input type="checkbox" id="displayPreviews"></label>
+        </section>
+        <section class="settings-fields" id="settingsHistory" aria-labelledby="settingsHistoryTab" hidden>
+          <label for="displayHistoryTotals">{{t:Totals}}<input type="checkbox" id="displayHistoryTotals"></label>
+        </section>
+        <section id="settingsPrinters" aria-labelledby="settingsPrintersTab">
+          <div id="printerFields"></div>
+          <div class="row"><button type="button" id="findPrinters" data-icon="find">{{t:Find printers}}</button><button type="button" id="addPrinter" data-icon="plus">{{t:Add printer}}</button></div>
+          <div id="discoveredPrinters"></div>
+          <p class="caption" id="settingsStatus" role="status"></p>
+          <details id="bulk"><summary>{{t:Edit as text}}</summary><label for="printersText">{{t:One printer per line: address | CheckCode | name | serial number}}</label>
+            <textarea id="printersText" rows="5" spellcheck="false" placeholder="192.168.1.50 | 1a2b3c4d | Adventurer 5M"></textarea>
+            <p class="caption">{{t:Use a JSON array of four strings when a value contains a vertical bar.}}</p>
           </details>
-          <details class="display-block" id="settingsFleet">
-            <summary>{{t:All printers}}</summary>
-            <div class="display-settings">
-              <label for="displayFleetCameras">{{t:Live cameras}}<input type="checkbox" id="displayFleetCameras"></label>
-              <label for="displayFleetDetails">{{t:Job details}}<input type="checkbox" id="displayFleetDetails"></label>
-            </div>
-          </details>
-          <details class="display-block" id="settingsFiles">
-            <summary>{{t:Printer Files}}</summary>
-            <div class="display-settings">
-              <label for="displayCardSize">{{t:Card size}}<select id="displayCardSize">
-                <option value="small">{{t:Small}}</option>
-                <option value="medium">{{t:Medium}}</option>
-                <option value="large">{{t:Large}}</option>
-              </select></label>
-              <label for="displayRows">{{t:Rows per page}}<select id="displayRows">
-                <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option>
-              </select></label>
-              <label for="displayPreviews">{{t:Show file previews}}<input type="checkbox" id="displayPreviews"></label>
-            </div>
-          </details>
-          <details class="display-block" id="settingsHistory">
-            <summary>{{t:Print History}}</summary>
-            <div class="display-settings">
-              <label for="displayHistoryTotals">{{t:Totals}}<input type="checkbox" id="displayHistoryTotals"></label>
-            </div>
-          </details>
-        </div>
-      </section>
+          <p class="caption">{{t:Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.}}</p>
+        </section>
+      </div>
     </div>
     <div id="settingsFooter"><p class="caption" id="settingsSaveStatus" role="status"></p>
     <div class="settings-actions">
@@ -1178,20 +1199,21 @@ const stateLabel = value => t(Object.hasOwn(states, value) ? states[value] : val
 const jobActionLabel = action => t({pause:'Pause', resume:'Resume', cancel:'Cancel'}[action] || action);
 const formatLocales = [uiLocale, uiLocale === 'eu' ? 'es-ES' : 'en-GB'];
 const weightFormat = new Intl.NumberFormat(formatLocales, {style:'unit', unit:'gram', maximumFractionDigits:2});
-const hourFormat = new Intl.NumberFormat(formatLocales, {style:'unit', unit:'hour'});
-const minuteFormat = new Intl.NumberFormat(formatLocales, {style:'unit', unit:'minute'});
 const fileCountLabel = count => uiLocale === 'en-US' ? count + (count === 1 ? ' file' : ' files')
   : t("Files: {count}", {count});
 const displayKey = 'ff-display-settings';
 const systemTheme = matchMedia('(prefers-color-scheme: dark)');
+const chartLineKeys = ['nozzle','nozzleTarget','bed','bedTarget'];
 const defaults = {
   theme:'system', density:'standard', cardSize:'medium', rows:3, previews:true,
-  monitorChart:true, printerDetails:true, fleetDetails:true, historyTotals:true
+  monitorChart:true, chartLayout:'shared', chartRange:30, chartLines:chartLineKeys,
+  printerDetails:true, fleetDetails:true, fleetWaitForRemoval:true, historyTotals:true
 };
 function readDisplaySettings() {
   let saved;
   try {saved = JSON.parse(localStorage.getItem(displayKey));} catch {}
   if (!saved) return {...defaults};
+  const chartLines = Array.isArray(saved.chartLines) ? chartLineKeys.filter(key => saved.chartLines.includes(key)) : [];
   return {
     theme:['system','light','dark'].includes(saved.theme) ? saved.theme : defaults.theme,
     density:['standard','compact'].includes(saved.density) ? saved.density : defaults.density,
@@ -1199,8 +1221,12 @@ function readDisplaySettings() {
     rows:Number.isInteger(saved.rows) && saved.rows >= 1 && saved.rows <= 6 ? saved.rows : defaults.rows,
     previews:typeof saved.previews === 'boolean' ? saved.previews : defaults.previews,
     monitorChart:saved.monitorChart !== false,
+    chartLayout:saved.chartLayout === 'separate' ? 'separate' : 'shared',
+    chartRange:[5,15,30].includes(saved.chartRange) ? saved.chartRange : defaults.chartRange,
+    chartLines:chartLines.length ? chartLines : chartLineKeys,
     printerDetails:saved.printerDetails !== false,
     fleetDetails:saved.fleetDetails !== false,
+    fleetWaitForRemoval:saved.fleetWaitForRemoval !== false,
     historyTotals:saved.historyTotals !== false
   };
 }
@@ -1217,12 +1243,15 @@ function applyDisplayStyles() {
 }
 applyDisplayStyles();
 let pageSize = display.rows * 4;
-let view = ['#allPrinters', '#printJobs'].includes(location.hash) ? 'fleet'
+let view = location.hash === '#history' ? 'history' : ['#allPrinters', '#printJobs'].includes(location.hash) ? 'fleet'
   : !['#monitor', '#files-section'].includes(location.hash) && localStorage.getItem('ff-fleet') === '1' ? 'fleet' : 'monitor';
 let openFleetFiles = location.hash === '#files-section';
 let lastObservation = null;
 let connectionFailure = '';
-let historyJobs = [];
+let historyData = null;
+let historyLoading = false;
+let historyFilter = view === 'history' ? new URL(location.href).searchParams.get('historyPrinter') || '' : '';
+let historyRowsKey = '';
 let chartKey = 'nozzle';
 const finishClock = new Intl.DateTimeFormat(formatLocales, {hour:'2-digit', minute:'2-digit'});
 function finishAt(seconds, stamp) {
@@ -1256,7 +1285,7 @@ async function diagnose(host) {
     const url = host ? new URL('/' + encodeURIComponent(host) + '/diagnostics', location.origin) : endpoint('/diagnostics');
     const data = await postLocal('diagnostics', url);
     if (!current()) return;
-    showInfo(t("Connection check"), ['FlashForge Device Tab 1.13.1', t("Transport: {transport}", {transport:data.transport}), t("Status: received"),
+    showInfo(t("Connection check"), ['FlashForge Device Tab 1.14.0', t("Transport: {transport}", {transport:data.transport}), t("Status: received"),
       t("Authenticated readings: {availability}", {availability:data.authenticated ? t("available") : t("unavailable")}),
       t("Camera URL: {status}", {status:data.cameraReported ? t("reported; stream not tested") : t("not reported")})].join('\n'), true);
   } catch (error) { if (current()) showInfo(t("Connection check"), error.message, true); }
@@ -1388,7 +1417,7 @@ const separateTab = location.pathname === '/flashforge/';
 const nativePage = el('nativePage');
 function endpoint(path) {
   const url = new URL(path.replace(/^\//, ''), location.href);
-  if (selectedPrinter && !['/native','/settings','/notifications'].includes(path)) url.searchParams.set('printer',selectedPrinter);
+  if (selectedPrinter && !['/native','/settings','/notifications','/history'].includes(path)) url.searchParams.set('printer',selectedPrinter);
   return url;
 }
 function printerPage(host) {
@@ -1402,6 +1431,8 @@ let page = 0;
 let renderVersion = 0;
 let polling = false;
 let jobFile = '';
+let lastCompletedFile = '';
+let jobReady = false;
 let previewKey = '';
 let catalogLoaded = false;
 let catalogRevision;
@@ -1463,7 +1494,11 @@ function updateReadingsSummary(data, tools, heated) {
 }
 
 const chart = el('chart');
+const chartBed = el('chartBed');
 const chartRange = el('chartRange');
+const chartLegend = [...document.querySelectorAll('[data-chart-line]')];
+const chartChoices = [...document.querySelectorAll('[data-chart-choice]')];
+chartRange.value = String(display.chartRange);
 const chartDuration = () => Number(chartRange.value) * 60000;
 let temperatures = [];
 let chartEnd = 0;
@@ -1500,35 +1535,67 @@ function updateTemperatureTrend(now = Date.now()) {
 }
 
 function drawChart() {
+  updateLegend();
+  const series = visibleTemperatureSeries();
+  const separate = display.chartLayout === 'separate';
+  const nozzle = separate ? series.filter(line => line.nozzle) : series;
+  const bed = separate ? series.filter(line => !line.nozzle) : [];
+  chart.hidden = !nozzle.length;
+  chartBed.hidden = !bed.length;
   if (!el('temperaturesPanel').open) return;
-  const width = chart.clientWidth;
-  const height = chart.clientHeight;
-  if (!width || !height) return;
-  const scale = window.devicePixelRatio || 1;
-  chart.width = Math.round(width * scale);
-  chart.height = Math.round(height * scale);
-  const ctx = chart.getContext('2d');
-  ctx.scale(scale, scale);
-  const colors = getComputedStyle(chart);
-  const series = [
-    [chartKey, colors.getPropertyValue('--blue').trim(), []],
-    [chartKey + 'Target', colors.getPropertyValue('--blue').trim(), [5, 4]],
-    ['bed', colors.getPropertyValue('--bed-series').trim(), []],
-    ['bedTarget', colors.getPropertyValue('--bed-series').trim(), [5, 4]]
-  ];
   const end = chartEnd = Date.now();
   const start = end - chartDuration();
-  const left = 41, right = width - 16, top = 11, bottom = height - 26;
-  const samples = temperatures.filter(sample => sample.t >= start);
-  const max = Math.max(100, Math.ceil(Math.max(0, ...samples.flatMap(sample =>
-    series.map(([field]) => sample[field] ?? 0))) / 50) * 50);
+  const samples = temperatures.filter(sample => sample.t >= start && sample.t <= end);
+  if (nozzle.length) drawTemperaturePlot(chart, nozzle, samples, start, end, separate ? el('chartNozzle').textContent : '');
+  if (bed.length) drawTemperaturePlot(chartBed, bed, samples, start, end, t("Bed"));
+}
+
+function visibleTemperatureSeries() {
+  return chartLegend.filter(element => display.chartLines.includes(element.dataset.chartLine)).map(element => {
+    const key = element.dataset.chartLine;
+    const target = key.endsWith('Target');
+    const nozzle = key.startsWith('nozzle');
+    return {nozzle, target, field:nozzle ? chartKey + (target ? 'Target' : '') : key,
+      color:nozzle ? '--blue' : '--bed-series', label:element.textContent};
+  });
+}
+
+function temperatureAxis(samples, series, separate) {
+  let low = Infinity, high = -Infinity;
+  for (const sample of samples) for (const {field} of series) {
+    if (!Number.isFinite(sample[field])) continue;
+    low = Math.min(low, sample[field]);
+    high = Math.max(high, sample[field]);
+  }
+  if (!separate || !Number.isFinite(high)) return {min:0, max:Math.max(100, Math.ceil(high / 50) * 50), steps:4};
+  const step = Math.max(5, Math.ceil((high - low) / 20) * 5);
+  const paddedMin = Math.floor((low - step / 2) / step) * step;
+  const min = low >= 0 ? Math.max(0, paddedMin) : paddedMin;
+  const max = Math.ceil((high + step / 2) / step) * step;
+  return {min, max, steps:(max - min) / step};
+}
+
+function drawTemperaturePlot(canvas, series, samples, start, end, title) {
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  if (!width || !height) return;
+  const scale = window.devicePixelRatio || 1;
+  canvas.width = Math.round(width * scale);
+  canvas.height = Math.round(height * scale);
+  canvas.setAttribute('aria-label', series.map(line => line.label).join(' · '));
+  const ctx = canvas.getContext('2d');
+  ctx.scale(scale, scale);
+  const colors = getComputedStyle(canvas);
+  const left = 41, right = width - 16, top = title ? 26 : 11, bottom = height - 26;
+  const {min,max,steps} = temperatureAxis(samples, series, Boolean(title));
   const x = t => left + (t - start) / (end - start) * (right - left);
-  const y = value => bottom - Math.max(0, value) / max * (bottom - top);
+  const y = value => bottom - (Math.max(min, value) - min) / (max - min) * (bottom - top);
   ctx.font = '11px "Segoe UI", sans-serif';
   ctx.fillStyle = colors.getPropertyValue('--muted').trim();
   ctx.strokeStyle = colors.getPropertyValue('--line').trim();
-  for (let tick = 0; tick <= 4; tick++) {
-    const value = max * tick / 4;
+  if (title) ctx.fillText(title, left, 12);
+  for (let tick = 0; tick <= steps; tick++) {
+    const value = min + (max - min) * tick / steps;
     ctx.beginPath();
     ctx.moveTo(left, y(value));
     ctx.lineTo(right, y(value));
@@ -1538,15 +1605,14 @@ function drawChart() {
   ctx.fillText(shortTime.format(start), left, height - 5);
   const current = shortTime.format(end);
   ctx.fillText(current, right - ctx.measureText(current).width, height - 5);
-  if (!samples.some(sample => sample[chartKey] != null || sample.bed != null)) {
+  if (!samples.some(sample => series.some(({field}) => Number.isFinite(sample[field])))) {
     const label = t("Waiting for temperature readings");
     ctx.fillText(label, Math.max(left + 5, (width - ctx.measureText(label).width) / 2), height / 2);
   }
-  for (const [field, color, dash] of series) {
-    ctx.strokeStyle = color;
-    ctx.fillStyle = color;
+  for (const {field,color,target} of series) {
+    ctx.strokeStyle = ctx.fillStyle = colors.getPropertyValue(color).trim();
     ctx.lineWidth = 2;
-    ctx.setLineDash(dash);
+    ctx.setLineDash(target ? [5, 4] : []);
     ctx.beginPath();
     let previous = 0;
     let last = null;
@@ -1563,7 +1629,7 @@ function drawChart() {
       last = [px, py];
     }
     ctx.stroke();
-    if (last && !dash.length) {
+    if (last && !target) {
       ctx.beginPath();
       ctx.arc(...last, 2.5, 0, 2 * Math.PI);
       ctx.fill();
@@ -1575,7 +1641,11 @@ function redrawTemperatureChart() {
   el('chartSample').textContent = '';
   drawChart();
 }
-chartRange.onchange = redrawTemperatureChart;
+chartRange.onchange = () => {
+  display = {...display, chartRange:Number(chartRange.value)};
+  try {localStorage.setItem(displayKey, JSON.stringify(display));} catch {}
+  redrawTemperatureChart();
+};
 el('chartTool').onchange = () => {
   chartKey = el('chartTool').value;
   updateLegend();
@@ -1586,18 +1656,27 @@ function updateLegend() {
   const label = chartKey === 'nozzle' ? el('nozzleLabel').textContent : chartKey.toUpperCase();
   el('chartNozzle').textContent = label;
   el('chartNozzleTarget').textContent = chartKey === 'nozzle' ? t("Nozzle Target") : label + ' · ' + t("Target");
+  for (const element of chartLegend) element.hidden = !display.chartLines.includes(element.dataset.chartLine);
+  const picker = el('chartTool');
+  picker.hidden = picker.options.length < 2 || !display.chartLines.some(key => key.startsWith('nozzle'));
 }
-chart.onpointermove = event => {
+function sampleTemperaturePlot(event) {
+  const canvas = event.currentTarget;
   const range = chartDuration();
-  const t = chartEnd - range + range * (event.offsetX - 41) / Math.max(1,chart.clientWidth-57);
+  const t = chartEnd - range + range * (event.offsetX - 41) / Math.max(1,canvas.clientWidth - 57);
   const s = temperatures.reduce((a,b) => !a || Math.abs(b.t-t)<Math.abs(a.t-t) ? b:a,null);
-  el('chartSample').textContent = s && Math.abs(s.t-t)<18000
-    ? shortTime.format(s.t) + ' · ' + el('chartNozzle').textContent + ' ' + plain(s[chartKey]) + ' / '
-      + plain(s[chartKey+'Target']) + ' °C · ' + t("Bed") + ' ' + plain(s.bed) + ' / ' + plain(s.bedTarget) + ' °C'
-    : '';
-};
-chart.onpointerleave = () => {el('chartSample').textContent = '';};
+  const readings = s && Math.abs(s.t-t)<18000 ? visibleTemperatureSeries()
+    .filter(line => Number.isFinite(s[line.field])
+      && (display.chartLayout === 'shared' || line.nozzle === (canvas === chart)))
+    .map(line => line.label + ' ' + plain(s[line.field]) + ' °C') : [];
+  el('chartSample').textContent = readings.length ? [shortTime.format(s.t), ...readings].join(' · ') : '';
+}
+for (const canvas of [chart, chartBed]) {
+  canvas.onpointermove = sampleTemperaturePlot;
+  canvas.onpointerleave = () => {el('chartSample').textContent = '';};
+}
 async function updateTools() {
+  updateHistory();
   try {
     const data = await getJson('/telemetry');
     if (data.language && data.language !== document.documentElement.lang && !document.querySelector('dialog[open]')) {
@@ -1610,39 +1689,36 @@ async function updateTools() {
       fleetPrinters = data.printers;
       applyView();
     }
-    if (data.stats) {
-      el('statJobs').textContent = String(data.stats.jobs || 0);
-      el('statHours').textContent = data.stats.seconds ? duration(data.stats.seconds) : t("0 min");
-      el('statSuccess').textContent = data.stats.successRate == null
-        ? '—' : data.stats.successRate + ' %';
-    }
     drawChart();
     if (data.cameraUrl && !el('cameraUrl').value && !el('cameraUrl').matches(':focus')) {
       el('cameraUrl').value = data.cameraUrl;
     }
-    if (!el('history').open) return;
-    const jobs = data.history;
-    let message = t("Print history is recorded while OrcaSlicer is open.");
-    if (data.historyError) message = t(data.historyError);
-    else if (!jobs.length) message = t("No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.");
-    el('historyStatus').textContent = message;
-    const completed = jobs.filter(job => job.result === 'complete');
-    const total = completed.reduce((seconds, job) => seconds + (job.elapsed ?? 0), 0);
-    el('historySummary').textContent = jobs.length
-      ? t("Completed: {done} of {total}", {done:completed.length, total:jobs.length})
-        + (total ? t(" · Total print time: {time}", {time:duration(total)}) : '')
-      : '';
-    historyJobs = jobs;
-    el('historySummary').dataset.summary = el('historySummary').textContent;
-    renderHistory();
   } catch {
     setTemperatureTrend(t("Trend unavailable"));
     drawChart();
+  }
+}
+
+async function updateHistory() {
+  const panel = el('history');
+  if (historyLoading || panel.hidden || !panel.open) return;
+  historyLoading = true;
+  try {
+    historyData = await getJson('/history');
+    renderHistory();
+  } catch {
     el('historyStatus').textContent = t("Print history is temporarily unavailable.");
+  } finally {
+    historyLoading = false;
   }
 }
 el('historySearch').oninput = renderHistory;
 el('failedJobs').onchange = renderHistory;
+el('historyPrinter').onchange = event => {
+  historyFilter = event.target.value;
+  replaceViewAddress();
+  renderHistory();
+};
 function appendFilename(label, name) {
   const parts = name.split(/(?<=_)(?=[^_])/);
   for (const [i, part] of parts.entries()) {
@@ -1651,39 +1727,84 @@ function appendFilename(label, name) {
   }
 }
 function renderHistory() {
-    const jobs = historyJobs.filter(job => (job.file || '').toLowerCase().includes(el('historySearch').value.toLowerCase())
-      && (!el('failedJobs').checked || ['error','cancelled'].includes(job.result)));
-    const results = {active: t("In Progress"), complete: t("Completed"), cancelled: t("Canceled"),
-                     error: t("Error"), unknown: t("Unknown Result")};
-    el('historyRows').replaceChildren(...jobs.map(job => {
-      const row = document.createElement('tr');
-      row.setAttribute('role', 'row');
-      const name = job.file || t("Unknown filename");
-      const started = historyTime.format(job.started * 1000);
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'history-filename';
-      appendFilename(button, name);
-      button.onclick = () => showInfo(name, [
-        t("Started: {time}", {time:started}),
-        t("Ended: {time}", {time:Number.isSafeInteger(job.ended) && job.ended >= 0 && job.ended <= 253402300799 ? historyTime.format(job.ended * 1000) : t("Not recorded")}),
-        t("Print time: {time}", {time:job.elapsed == null ? '—' : duration(job.elapsed)}), t("Result: {result}", {result:results[job.result]}),
-        job.result === 'unknown' ? t("The end of this job was not observed.") : ''
-      ].filter(Boolean).join('\n'));
-      row.insertCell().append(button);
-      for (const value of [started, job.elapsed == null ? '—' : duration(job.elapsed), results[job.result]])
-        row.insertCell().textContent = value;
-      return row;
-    }));
-    el('historyTable').hidden = !jobs.length;
-    if (!jobs.length && historyJobs.length) el('historySummary').textContent = t("No matching jobs.");
-    else el('historySummary').textContent = el('historySummary').dataset.summary || '';
+  if (!historyData) return;
+  const picker = el('historyPrinter');
+  const printers = historyData.printers;
+  const options = JSON.stringify(printers.map(({host,name}) => [host,name]));
+  if (picker.dataset.options !== options) {
+    picker.replaceChildren(new Option(t("All printers"), ''), ...printers.map(({host,name}) =>
+      new Option(name === host ? host : name + ' · ' + host, host)));
+    picker.dataset.options = options;
+  }
+  const selected = printers.find(printer => printer.host === historyFilter);
+  if (!selected && historyFilter) {
+    historyFilter = '';
+    replaceViewAddress();
+  }
+  picker.value = historyFilter;
+  const scope = selected ? [selected] : printers;
+  const stats = selected ? selected.stats : historyData.stats;
+  el('statJobs').textContent = String(stats.jobs);
+  el('statHours').textContent = stats.seconds ? duration(stats.seconds) : t("0 min");
+  el('statSuccess').textContent = stats.successRate == null ? '—' : stats.successRate + ' %';
+  const errors = scope.filter(printer => printer.error)
+    .map(printer => printer.name + ' · ' + t(printer.error));
+  el('historyStatus').textContent = errors.length ? errors.join('\n')
+    : t(stats.jobs ? "Print history is recorded while OrcaSlicer is open."
+      : "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.");
 
+  const query = el('historySearch').value.trim().toLowerCase();
+  const failures = el('failedJobs').checked;
+  const jobs = scope.flatMap(({host,name,jobs}) => jobs
+    .filter(job => job.file.toLowerCase().includes(query) && (!failures || ['error','cancelled'].includes(job.result)))
+    .map(job => ({job,host,name}))).sort((a,b) => b.job.started - a.job.started);
+  const completed = jobs.filter(({job}) => job.result === 'complete').length;
+  el('historySummary').textContent = jobs.length
+    ? t("Completed: {done} of {total}", {done:completed, total:jobs.length})
+    : stats.jobs ? t("No matching jobs.") : '';
+  el('historyTable').hidden = !jobs.length;
+  const key = JSON.stringify(jobs.map(({job,host,name}) =>
+    [host,name,job.file,job.started,job.ended,job.elapsed,job.result]));
+  if (historyRowsKey === key) return;
+  historyRowsKey = key;
+  const results = {active:t("In Progress"), complete:t("Completed"), cancelled:t("Canceled"),
+                   error:t("Error"), unknown:t("Unknown Result")};
+  const rows = document.createDocumentFragment();
+  for (const {job,host,name:printerName} of jobs) {
+    const row = document.createElement('tr');
+    row.setAttribute('role', 'row');
+    const name = job.file || t("Unknown filename");
+    const started = historyTime.format(job.started * 1000);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'history-filename';
+    appendFilename(button, name);
+    button.onclick = () => showInfo(name, [
+      t("Printer") + ' · ' + printerName + (printerName === host ? '' : ' (' + host + ')'),
+      t("Started: {time}", {time:started}),
+      t("Ended: {time}", {time:Number.isSafeInteger(job.ended) && job.ended >= 0 && job.ended <= 253402300799 ? historyTime.format(job.ended * 1000) : t("Not recorded")}),
+      t("Print time: {time}", {time:job.elapsed == null ? '—' : duration(job.elapsed)}),
+      t("Result: {result}", {result:results[job.result]}),
+      job.result === 'unknown' ? t("The end of this job was not observed.") : ''
+    ].filter(Boolean).join('\n'));
+    const label = document.createElement('span');
+    label.className = 'history-printer-name';
+    label.textContent = printerName;
+    label.title = host;
+    row.insertCell().append(button, label);
+    for (const value of [started, job.elapsed == null ? '—' : duration(job.elapsed), results[job.result]])
+      row.insertCell().textContent = value;
+    rows.append(row);
+  }
+  el('historyRows').replaceChildren(rows);
 }
 
 const cameraImage = el('cameraImage');
 const cameraUrl = el('cameraUrl');
 const cameraStatus = el('cameraStatus');
+const cameraSettings = el('cameraSettings');
+el('cameraOpen').onclick = () => cameraSettings.showModal();
+el('cameraSettingsClose').onclick = () => cameraSettings.close();
 const cameraStorageKey = 'flashforge-device-tab-camera-' + (selectedPrinter ? '/' + selectedPrinter + '/' : location.pathname);
 let cameraTimeout;
 let managedCamera = false;
@@ -1705,7 +1826,13 @@ function showCameraConnection(connected) {
   const restoreFocus = document.activeElement === (connected ? start : stop);
   stop.hidden = !connected;
   start.disabled = connected;
+  cameraUrl.readOnly = connected;
   if (restoreFocus) (connected ? stop : start).focus();
+}
+
+function showMonitorCameraFrame(visible) {
+  el('camera').hidden = !visible;
+  cameraImage.hidden = !visible;
 }
 
 function stopCamera(message = '', suspend = false) {
@@ -1717,11 +1844,11 @@ function stopCamera(message = '', suspend = false) {
   cameraSession = null;
   cameraFrame = null;
   clearTimeout(cameraTimeout);
+  closeCameraViewer(cameraImage);
   cameraImage.removeAttribute('src');
   if (frameUrl) URL.revokeObjectURL(frameUrl);
   frameUrl = '';
-  cameraImage.hidden = true;
-  el('cameraSnapshot').hidden = true;
+  showMonitorCameraFrame(false);
   showCameraConnection(false);
   cameraStatus.textContent = message;
   for (const tile of jobTiles.values()) {
@@ -1804,8 +1931,7 @@ async function startManagedCamera() {
       frameUrl = url;
       cameraFrame = blob;
       updateSharedJobCamera();
-      cameraImage.hidden = false;
-      el('cameraSnapshot').hidden = false;
+      showMonitorCameraFrame(true);
       cameraStatus.textContent = '';
       clearTimeout(cameraTimeout);
       cameraTimeout = setTimeout(frameTimeout, 10000);
@@ -1815,9 +1941,13 @@ async function startManagedCamera() {
   }
 }
 function syncCameraView() {
-  const camera = el('camera');
   const shared = !el('jobs').hidden && [...jobTiles.values()].some(tile => tile.shared);
-  const visible = !document.hidden && (shared || camera.open && !el('printerTools').hidden);
+  const monitorVisible = !el('monitor').hidden;
+  if (!monitorVisible) {
+    closeCameraViewer(cameraImage);
+    if (cameraSettings.open) cameraSettings.close();
+  }
+  const visible = !document.hidden && (shared || monitorVisible);
   if (!visible) {
     if (cameraSession || cameraImage.hasAttribute('src')) stopCamera('', true);
   } else if (managedCamera) {
@@ -1828,8 +1958,6 @@ function syncCameraView() {
 }
 function startDirectCamera() {
   cameraImage.src = directCameraSource;
-  cameraImage.hidden = false;
-  el('cameraSnapshot').hidden = false;
   showCameraConnection(true);
   cameraStatus.textContent = t("Connecting…");
   cameraTimeout = setTimeout(() => stopCamera(t("No frame received. Check the URL and confirm the stream uses MJPEG.")), 12000);
@@ -1851,7 +1979,8 @@ el('cameraForm').onsubmit = event => {
   startDirectCamera();
 };
 cameraImage.onload = () => {
-  if (managedCamera) return;
+  if (managedCamera || !cameraImage.hasAttribute('src')) return;
+  showMonitorCameraFrame(true);
   clearTimeout(cameraTimeout);
   cameraStatus.textContent = '';
 };
@@ -1859,7 +1988,7 @@ cameraImage.onerror = () => {
   if (cameraImage.hasAttribute('src')) stopCamera(t("Could not open the MJPEG stream. Check the camera URL."));
 };
 el('cameraStop').onclick = () => stopCamera();
-for (const id of ['camera','printerDetails','manualPanel','readingsPanel','temperaturesPanel','files-section']) {
+for (const id of ['printerDetails','manualPanel','readingsPanel','temperaturesPanel','files-section']) {
   const node = el(id), key='ff-layout:'+(selectedPrinter || location.pathname)+':'+id;
   try {
     const saved = localStorage.getItem(key);
@@ -1867,12 +1996,11 @@ for (const id of ['camera','printerDetails','manualPanel','readingsPanel','tempe
     if (id === 'manualPanel' && location.hash === '#manualPanel') node.open = true;
   } catch {}
   node.ontoggle=()=>{ try {localStorage.setItem(key,node.open?'open':'closed');} catch {}
-    if (id==='camera') syncCameraView();
     if (id==='temperaturesPanel' && node.open) drawChart();
   };
 }
-el('history').ontoggle = () => { if (el('history').open) updateTools(); };
-new ResizeObserver(drawChart).observe(chart);
+el('history').ontoggle = updateHistory;
+new ResizeObserver(drawChart).observe(el('chartPlots'));
 systemTheme.addEventListener('change', () => {
   if (display.theme !== 'system') return;
   applyDisplayStyles();
@@ -1883,7 +2011,13 @@ function previewUrl(id) {
   if (!imageRequests.has(id)) {
     const promise = fetch(endpoint('/preview/' + id), {signal: AbortSignal.timeout(12000)})
       .then(response => {
-        if (response.status === 404) return null;
+        if (response.status === 404) {
+          // A newly sent job may be listed before its thumbnail is available.
+          setTimeout(() => {
+            if (imageRequests.get(id) === promise) imageRequests.delete(id);
+          }, 5000);
+          return null;
+        }
         if (!response.ok) throw Error(t("Preview unavailable"));
         return response.blob().then(blob => URL.createObjectURL(blob));
       })
@@ -1897,13 +2031,13 @@ function previewUrl(id) {
 }
 
 async function updateJobPreview() {
-  const matching = files.filter(file => file.name === jobFile);
-  const key = jobFile && matching.length === 1 ? matching[0].id : '';
+  const filename = lastCompletedFile || jobFile;
+  const matching = files.filter(file => file.name === filename);
+  const key = filename && matching.length === 1 ? matching[0].id : '';
   const image = el('jobImage');
   if (key !== previewKey) {
     previewKey = key;
     image.hidden = true;
-    el('job').dataset.preview = 'none';
   }
   if (!image.hidden) return;
   if (!key) return;
@@ -1912,39 +2046,72 @@ async function updateJobPreview() {
   if (!url || previewKey !== key || imageRequests.get(key) !== request) return;
   image.src = url;
   image.hidden = false;
-  el('job').dataset.preview = 'available';
+}
+
+function renderJobProgress(card, value) {
+  const progress = card.querySelector('progress');
+  const percent = card.querySelector('.jobs-percent');
+  progress.hidden = percent.hidden = value == null;
+  progress.value = value ?? 0;
+  percent.textContent = value == null ? '' : value + '%';
+}
+
+function renderLastCompleted(card, filename) {
+  const row = card.querySelector('.jobs-last');
+  row.hidden = !filename;
+  row.querySelector('strong').textContent = filename || '';
+}
+
+function jobLayerLabel(layer, total) {
+  if (layer == null) return '';
+  return total ? t("Layer {layer} of {total}", {layer,total}) : t("Layer {layer}", {layer});
+}
+
+function jobTimeLeft(seconds) {
+  return seconds == null ? '' : t("{time} left", {time:duration(seconds)});
+}
+
+function updateJobReprint() {
+  const button = el('reprintJob');
+  button.hidden = !jobReady || !lastCompletedFile;
+  button.disabled = button.hidden || !catalogLoaded || el('refresh').disabled;
+}
+
+function isReadyForReprint(state, active) {
+  return !active && ['READY', 'IDLE'].includes(state);
 }
 
 function updateJob(data) {
+  const card = el('job');
   const previousJob = jobFile;
-  jobFile = data.file || '';
+  lastCompletedFile = data.active ? '' : data.lastCompleted?.file || '';
+  jobReady = isReadyForReprint(data.state, data.active);
+  jobFile = data.active || (data.complete && !lastCompletedFile) ? data.file || '' : '';
   if (catalogLoaded && (data.fileCatalogRevision !== catalogRevision
       || (data.active && jobFile && previousJob !== jobFile && !files.some(file => file.name === jobFile)))) refreshFiles();
   const hasJob = Boolean(jobFile || data.active || data.complete);
-  el('job').dataset.phase = hasJob ? 'visible' : 'idle';
-  el('jobFile').textContent = hasJob
+  const showProgress = hasJob && !lastCompletedFile;
+  renderLastCompleted(card, lastCompletedFile);
+  el('jobFile').textContent = showProgress
     ? jobFile || (data.complete ? t("Print complete") : t("Printing")) : t("No active print job");
-  el('jobFile').title = hasJob ? jobFile : '';
-  el('job').dataset.active = String(Boolean(data.active));
+  el('jobFile').title = jobFile;
+  card.dataset.active = String(Boolean(data.active));
   el('openJob').textContent = el('jobFile').textContent;
   el('openJob').title = jobFile;
   updateJobLink();
-  el('progressLine').hidden = data.percent == null;
-  el('percent').hidden = data.percent == null;
-  el('percent').textContent = data.percent == null ? '' : data.percent + '%';
-  el('bar').value = data.percent ?? 0;
-  el('time').hidden = data.remaining == null;
+  updateJobReprint();
+  renderJobProgress(card, showProgress ? data.percent : null);
+  el('time').hidden = !showProgress || data.remaining == null;
   const finish = data.state === 'PAUSED' ? '' : finishAt(data.remaining, data.observedAt);
   el('finishTime').hidden = !finish;
   el('finishTime').textContent = finish ? t("Finish ≈ {time}", {time:finish}) : '';
-  el('remaining').textContent = data.remaining == null ? '' : t("{time} left", {time:duration(data.remaining)});
+  el('remaining').textContent = jobTimeLeft(data.remaining);
   el('timeHint').hidden = !data.active || !data.timeHint;
   el('timeHint').textContent = t(data.timeHint);
-  el('layers').textContent = data.layer == null || !data.layerTotal
-    ? '' : t("Layer {layer} of {total}", {layer:data.layer, total:data.layerTotal});
+  el('layers').textContent = jobLayerLabel(data.layer, data.layerTotal);
   el('elapsed').textContent = data.elapsed == null ? '' : t("Elapsed: {time}", {time:duration(data.elapsed)});
   el('filament').textContent = data.filament == null ? '' : t("Estimated material: {weight}", {weight:weightFormat.format(data.filament)});
-  el('jobMeta').hidden = !el('layers').textContent && data.elapsed == null && data.filament == null;
+  el('jobMeta').hidden = !showProgress || (!el('layers').textContent && data.elapsed == null && data.filament == null);
   updateJobPreview();
 }
 
@@ -1985,7 +2152,6 @@ async function updateStatus() {
       picker.replaceChildren(...tools.map((_,i) => new Option('T'+(i+1),'t'+(i+1))));
       chartKey = tools.length ? picker.value : 'nozzle';
     }
-    picker.hidden = tools.length < 2;
     updateLegend();
     const temperatures = (actual, target) => [actual, target]
       .map(value => value == null ? '—' : celsius(value)).join(' / ');
@@ -2038,6 +2204,8 @@ async function updateStatus() {
     showSlots(lastSlots);
     updateLight(null);
     updateActions({}, error.status !== 409);
+    jobReady = false;
+    updateJobReprint();
     el('time').hidden = true;
     el('timeHint').hidden = true;
     if (error.status === 409) {
@@ -2520,6 +2688,7 @@ new ResizeObserver(() => {
 async function refreshFiles() {
   if (el('refresh').disabled || fileUploadBusy) return;
   el('refresh').disabled = true;
+  updateJobReprint();
   selectCatalogFile(null);
   el('fileCount').textContent = t("Loading…");
   el('filesSummary').textContent = t("Loading…");
@@ -2529,14 +2698,13 @@ async function refreshFiles() {
     printOptions = catalog.printOptions;
     catalogRevision = catalog.revision;
     el('uploadFile').hidden = !printOptions?.upload;
-    openReprint(catalog);
+    openReprintFromUrl();
     el('filesSummary').textContent = files.length ? fileCountLabel(files.length) : t("No files");
     catalogLoaded = true;
     for (const promise of imageRequests.values()) promise.then(url => { if (url) URL.revokeObjectURL(url); });
     imageRequests.clear();
     previewKey = '';
     el('jobImage').hidden = true;
-    el('job').dataset.preview = 'none';
     page = 0;
     updateJobPreview();
     renderFiles();
@@ -2545,6 +2713,7 @@ async function refreshFiles() {
     el('filesSummary').textContent = t("Could not load files");
   } finally {
     el('refresh').disabled = false;
+    updateJobReprint();
     selectCatalogFile(selectedCatalogFile);
   }
 }
@@ -2559,7 +2728,7 @@ el('uploadFile').onclick = () => {
   uploadFileInput.value = '';
   uploadFileName.value = '';
   uploadFileMessage.textContent = t("The file will be saved on the printer without starting a print.");
-  el('uploadFilePrinter').textContent = el('deviceName').textContent;
+  el('uploadFilePrinter').textContent = currentPrinterName();
   uploadFileProgress.hidden = true;
   uploadFileDialog.showModal();
 };
@@ -2680,11 +2849,18 @@ const fleetSearch = el('fleetSearch');
 const fleetFilters = [...document.querySelectorAll('[data-fleet-filter]')];
 let fleetFilter = 'all';
 const fleetCameraButton = el('fleetCameras');
+const confirmedBeds = new Map();
 let fleetCameras = localStorage.getItem('ff-fleet-cameras') !== 'off';
+let fleetCameraScope = localStorage.getItem('ff-fleet-camera-scope') === 'printing' ? 'printing' : 'all';
 fleetCameraButton.setAttribute('aria-pressed', String(fleetCameras));
 
+function waitingForPartRemoval(item) {
+  return display.fleetWaitForRemoval && !item.printing
+    && Boolean(item.bedClearToken && confirmedBeds.get(item.host) !== item.bedClearToken);
+}
+
 function fleetGroup(item) {
-  if (item.error || ['PAUSED', 'PAUSING', 'ERROR', 'ATTENTION'].includes(item.state)) return 'attention';
+  if (waitingForPartRemoval(item) || item.error || ['PAUSED', 'PAUSING', 'ERROR', 'ATTENTION'].includes(item.state)) return 'attention';
   if (item.printing) return 'active';
   if (item.observedAt && !['BUSY', 'CALIBRATING', 'CANCELING', 'CANCELLING'].includes(item.state)) return 'idle';
   return 'other';
@@ -2708,11 +2884,34 @@ function updateJobLink() {
 
 const jobTiles = new Map();
 const jobsCameraDialog = el('jobsCameraDialog');
-let enlargedJob = null;
+let enlargedCamera = null;
+
+function placeCameraImage(stream, parent, before = null) {
+  // A state-preserving move keeps direct MJPEG requests open in Chromium.
+  if (parent.moveBefore) parent.moveBefore(stream, before);
+  else parent.insertBefore(stream, before);
+}
+
+function openCameraViewer(stream, name) {
+  if (enlargedCamera || stream.hidden) return;
+  enlargedCamera = {stream, parent:stream.parentNode, before:stream.nextSibling};
+  el('jobsCameraName').textContent = name;
+  placeCameraImage(stream, el('jobsCameraFrame'));
+  jobsCameraDialog.showModal();
+}
+
+function closeCameraViewer(stream) {
+  if (enlargedCamera?.stream === stream && jobsCameraDialog.open) jobsCameraDialog.close();
+}
+
 jobsCameraDialog.onclose = () => {
-  if (enlargedJob) enlargedJob.cameraPanel.firstElementChild.prepend(enlargedJob.stream);
-  enlargedJob = null;
+  if (!enlargedCamera) return;
+  const {stream, parent, before} = enlargedCamera;
+  enlargedCamera = null;
+  if (parent.isConnected) placeCameraImage(stream, parent, before);
+  else stream.remove();
 };
+el('cameraExpand').onclick = () => openCameraViewer(cameraImage, currentPrinterName());
 
 function jobEndpoint(path, host) {
   const url = endpoint(path);
@@ -2736,16 +2935,29 @@ function showFleetFiles() {
   section.querySelector('summary').focus({preventScroll:true});
 }
 
-function openReprint(catalog) {
+function openReprintFromUrl() {
   const url = new URL(location.href);
   const name = url.searchParams.get('reprint');
   if (!name) return;
   url.searchParams.delete('reprint');
   window.history.replaceState(null, '', url);
-  const matches = catalog.files.filter(file => file.name === name);
-  if (matches.length === 1 && catalog.printOptions?.family) openPrint(matches[0]);
-  else showInfo(t("Print again"), t("The file is unavailable or cannot be identified on this printer."));
+  openReprint(name);
 }
+
+function openReprint(name) {
+  const matches = files.filter(file => file.name === name);
+  if (matches.length !== 1 || !printOptions?.family) {
+    showInfo(t("Print again"), t("The file is unavailable or cannot be identified on this printer."));
+  } else if (printOptions.family === 'creator' && !name.toLowerCase().endsWith('.3mf')) {
+    showInfo(t("Print again"), t("Creator repeat printing requires a .3mf."));
+  } else {
+    openPrint(matches[0]);
+  }
+}
+
+el('reprintJob').onclick = () => {
+  if (lastCompletedFile && !el('reprintJob').disabled) openReprint(lastCompletedFile);
+};
 
 function jobCameraSource(item) {
   if (item.managedCamera) return 'managed';
@@ -2760,7 +2972,7 @@ function jobCameraSource(item) {
 }
 
 function stopJobCamera(tile) {
-  if (enlargedJob === tile && jobsCameraDialog.open) jobsCameraDialog.close();
+  closeCameraViewer(tile.stream);
   tile.camera?.abort();
   tile.camera = null;
   tile.shared = false;
@@ -2807,7 +3019,8 @@ function updateSharedJobCamera() {
 }
 
 function startJobCamera(tile, item) {
-  const source = !fleetCameras || item.error ? '' : jobCameraSource(item);
+  const enabled = fleetCameras && (fleetCameraScope === 'all' || item.printing);
+  const source = enabled && !item.error ? jobCameraSource(item) : '';
   if (tile.source !== source) {
     stopJobCamera(tile);
     tile.source = source;
@@ -2850,27 +3063,69 @@ function startJobCamera(tile, item) {
   } else tile.stream.src = source;
 }
 
+function clearJobTilePreview(tile) {
+  tile.previewRequest?.abort();
+  tile.previewRequest = null;
+  tile.previewRetryAt = 0;
+  tile.previewFailures = 0;
+  const image = tile.node.querySelector('[data-preview]');
+  image.hidden = true;
+  image.removeAttribute('src');
+  if (tile.previewUrl) URL.revokeObjectURL(tile.previewUrl);
+  tile.previewUrl = '';
+}
+
 async function loadJobTilePreview(tile, item) {
-  if (!item.file || item.error || tile.previewRequest) return;
+  const filename = tile.active ? item.file : item.lastCompleted?.file || '';
+  if (tile.previewFile !== filename) {
+    clearJobTilePreview(tile);
+    tile.previewFile = filename;
+  }
+  const image = tile.node.querySelector('[data-preview]');
+  if (!filename || item.error || !image.hidden || tile.previewRequest || Date.now() < tile.previewRetryAt) return;
   const request = new AbortController();
   tile.previewRequest = request;
+  const signal = AbortSignal.any([request.signal, AbortSignal.timeout(12000)]);
+  let url = '';
   try {
-    const response = await fetch(jobEndpoint('/files', item.host), {signal:AbortSignal.any([request.signal, AbortSignal.timeout(12000)])});
-    if (!response.ok) {
-      if (response.status === 503 && !request.signal.aborted) tile.previewRetryAt = Date.now() + 15000;
+    const response = await fetch(jobEndpoint('/files', item.host), {signal});
+    if (!response.ok) throw Error('File catalog unavailable');
+    const matches = (await response.json()).files.filter(file => file.name === filename);
+    signal.throwIfAborted();
+    if (matches.length === 0) throw Error('File not yet in catalog');
+    if (matches.length > 1) {
+      tile.previewRetryAt = Infinity;
       return;
     }
-    const matches = (await response.json()).files.filter(file => file.name === item.file);
-    if (request.signal.aborted || matches.length !== 1) return;
-    const image = tile.node.querySelector('[data-preview]');
-    image.alt = t("Preview of {file}", {file:item.file});
-    image.onload = () => { if (!request.signal.aborted) image.hidden = false; };
-    image.src = jobEndpoint('/preview/' + matches[0].id, item.host);
-  } catch {}
+    const preview = await fetch(jobEndpoint('/preview/' + matches[0].id, item.host), {signal});
+    signal.throwIfAborted();
+    if (!preview.ok) throw Error('Preview unavailable');
+    const blob = await preview.blob();
+    signal.throwIfAborted();
+    url = URL.createObjectURL(blob);
+    image.src = url;
+    await image.decode();
+    signal.throwIfAborted();
+    image.alt = t("Preview of {file}", {file:filename});
+    image.hidden = false;
+    tile.previewUrl = url;
+    url = '';
+    tile.previewFailures = 0;
+  } catch {
+    if (!request.signal.aborted) {
+      image.removeAttribute('src');
+      const delay = Math.min(30000, 1500 * 2 ** Math.min(tile.previewFailures, 5));
+      tile.previewFailures++;
+      tile.previewRetryAt = Date.now() + delay;
+    }
+  } finally {
+    if (url) URL.revokeObjectURL(url);
+    if (tile.previewRequest === request) tile.previewRequest = null;
+  }
 }
 
 async function runJobTileAction(tile, action) {
-  if (tile.pending || !tile.item.jobControls || tile.item.error || !tile.item.file) return;
+  if (tile.pending || !tile.active || !tile.item.jobControls || tile.item.error || !tile.file) return;
   const buttons = tile.node.querySelectorAll('[data-print-action],[data-print-cancel]');
   const result = tile.node.querySelector('[data-job-result]');
   tile.pending = true;
@@ -2891,6 +3146,27 @@ async function runJobTileAction(tile, action) {
   }
 }
 
+async function confirmBedClear(tile) {
+  const item = tile.item;
+  if (tile.confirmingBed || !waitingForPartRemoval(item)) return;
+  const button = tile.node.querySelector('[data-clear-bed]');
+  const status = tile.node.querySelector('[data-job-result]');
+  tile.confirmingBed = true;
+  button.disabled = true;
+  status.textContent = t("Saving…");
+  try {
+    await postLocal('confirm-bed-clear', jobEndpoint('/confirm-bed-clear', item.host), {token:item.bedClearToken});
+    confirmedBeds.set(item.host, item.bedClearToken);
+    status.textContent = '';
+    if (view === 'fleet') renderJobs();
+  } catch (error) {
+    status.textContent = error.message || t("Could not save the settings.");
+  } finally {
+    tile.confirmingBed = false;
+    button.disabled = false;
+  }
+}
+
 function createJobTile(item) {
   const node = el('jobTile').content.firstElementChild.cloneNode(true);
   const cameraPanel = node.querySelector('.jobs-camera');
@@ -2901,6 +3177,7 @@ function createJobTile(item) {
   const tile = {node, stream, cameraPanel, mediaStatus, retry, item};
   const monitor = node.querySelector('[data-monitor]');
   const filesLink = node.querySelector('[data-files]');
+  node.querySelector('[data-clear-bed]').onclick = () => confirmBedClear(tile);
   for (const [link, showFiles] of [[monitor, false], [filesLink, true]]) {
     link.onclick = event => {
       if (!tile.item.current || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
@@ -2927,12 +3204,7 @@ function createJobTile(item) {
       }, 5000);
     }
   };
-  node.querySelector('[data-camera]').onclick = () => {
-    enlargedJob = tile;
-    el('jobsCameraName').textContent = tile.item.name || tile.item.host;
-    el('jobsCameraFrame').append(stream);
-    jobsCameraDialog.showModal();
-  };
+  node.querySelector('[data-camera]').onclick = () => openCameraViewer(stream, tile.item.name || tile.item.host);
   node.querySelector('[data-snapshot]').onclick = () => {
     if (tile.blob) saveCameraBlob(tile.blob);
   };
@@ -2951,18 +3223,12 @@ function updateTileJob(tile, item) {
   const {node} = tile;
   tile.active = active;
   tile.file = file;
-  tile.previewRequest?.abort();
-  tile.previewRequest = null;
-  tile.previewRetryAt = 0;
   tile.cancelUntil = 0;
   tile.controlState = null;
-  const preview = node.querySelector('[data-preview]');
-  preview.hidden = true;
-  preview.removeAttribute('src');
   node.querySelector('details').open = false;
   node.querySelector('[data-job-result]').textContent = '';
   node.dataset.active = String(active);
-  for (const selector of ['.jobs-media', 'progress', '.row.jobs-meta', 'details'])
+  for (const selector of ['.row.jobs-meta', 'details'])
     node.querySelector(selector).hidden = !active;
 }
 
@@ -2976,32 +3242,35 @@ function updateJobTile(tile, item) {
   };
   set('h3', item.name || item.host);
   node.dataset.group = fleetGroup(item);
-  const ready = !item.error && ['READY', 'IDLE'].includes(item.state);
-  node.dataset.ready = String(ready);
+  const waiting = waitingForPartRemoval(item);
+  const ready = !item.error && isReadyForReprint(item.state, item.printing);
+  node.dataset.ready = String(ready && !waiting);
+  node.querySelector('[data-clear-bed]').hidden = !waiting;
   node.querySelector('[data-monitor]').href = jobPage(item);
   startJobCamera(tile, item);
   if (!tile.source) tile.retry.hidden = true;
+  loadJobTilePreview(tile, item);
+  renderJobProgress(node, tile.active ? item.percent : null);
+  renderLastCompleted(node, !tile.active && (!item.error || waiting) ? item.lastCompleted?.file : '');
   if (!tile.active) {
-    set('.jobs-state', item.error ? t("Disconnected") : stateLabel(item.status) || (item.observedAt ? t("Connected") : t("Connecting…")));
-    set('.jobs-file', item.error ? t("Job status unavailable") : item.observedAt ? t("No active print job") : t("Waiting for job status"));
+    const warning = item.error || ['ERROR','ATTENTION'].includes(item.state);
+    const waitingLabel = waiting ? t("Waiting for part removal") : '';
+    set('.jobs-state', item.error ? t("Disconnected") : (!warning && waitingLabel) || stateLabel(item.status)
+      || (item.observedAt ? t("Connected") : t("Connecting…")));
+    set('.jobs-file', waiting ? (warning ? waitingLabel : '')
+      : item.error ? t("Job status unavailable") : item.observedAt ? t("No active print job") : t("Waiting for job status"));
     const completed = item.lastCompleted?.file;
-    set('.jobs-percent', '');
-    node.querySelector('.jobs-last').hidden = !completed || Boolean(item.error);
-    set('.jobs-last strong', completed || '');
+    node.querySelector('[data-print-action]').hidden = true;
+    node.querySelector('[data-print-cancel]').hidden = true;
     const filesLink = node.querySelector('[data-files]');
     filesLink.hidden = !ready;
     if (ready) filesLink.href = jobPage(item, {hash:'files-section'});
     const repeat = node.querySelector('[data-repeat]');
-    repeat.hidden = !ready || !completed;
+    repeat.hidden = !ready || waiting || !completed;
     if (!repeat.hidden) repeat.href = jobPage(item, {reprint:completed});
     return;
   }
-  for (const selector of ['.jobs-last', '[data-files]', '[data-repeat]']) node.querySelector(selector).hidden = true;
-  if (tile.previewRetryAt && Date.now() >= tile.previewRetryAt) {
-    tile.previewRetryAt = 0;
-    tile.previewRequest = null;
-  }
-  loadJobTilePreview(tile, item);
+  for (const selector of ['[data-files]', '[data-repeat]']) node.querySelector(selector).hidden = true;
   set('.jobs-state', item.error ? t("Disconnected") : stateLabel(item.status) || t("Printing"));
   set('.jobs-file', item.file || t("Active print"));
   const canControl = Boolean(item.jobControls && !item.error && item.file && item.state !== 'PAUSING');
@@ -3014,16 +3283,10 @@ function updateJobTile(tile, item) {
     set('[data-print-cancel]', t("Cancel"));
   }
   tile.controlState = item.state;
-  set('.jobs-percent', item.percent == null ? '' : item.percent + '%');
-  const progress = node.querySelector('progress');
-  progress.hidden = item.percent == null;
-  progress.value = item.percent ?? 0;
-  set('[data-layer]', item.layer == null ? '' : t("Layer {layer}", {layer:item.layer + (item.layerTotal ? ' / ' + item.layerTotal : '')}));
+  set('[data-layer]', jobLayerLabel(item.layer, item.layerTotal));
   const timed = !item.error && !['PAUSED', 'PAUSING'].includes(item.state);
   const finish = timed ? finishAt(item.remaining, item.observedAt) : '';
-  const minutes = Math.ceil(item.remaining / 60);
-  const eta = minutes >= 60 ? hourFormat.format(Math.floor(minutes / 60)) + " " + minuteFormat.format(minutes % 60) : minuteFormat.format(minutes);
-  set('[data-eta]', timed && item.remaining != null ? t("{time} left", {time:eta}) : '');
+  set('[data-eta]', timed ? jobTimeLeft(item.remaining) : '');
   const temp = (value, target) => value == null ? '' : plain(value) + (target == null ? '' : ' / ' + plain(target)) + ' °C';
   const tools = item.tools?.length > 1 ? item.tools.map((tool,i) => ['T' + (i + 1),temp(tool.actual,tool.target)]) : [];
   const metrics = [...(tools.length ? tools : [[t("Nozzle"),temp(item.nozzle,item.nozzleTarget)]]),
@@ -3066,7 +3329,7 @@ function renderJobs() {
     const item = byHost.get(host);
     if (item) continue;
     stopJobCamera(tile);
-    tile.previewRequest?.abort();
+    clearJobTilePreview(tile);
     tile.node.remove();
     jobTiles.delete(host);
   }
@@ -3095,20 +3358,24 @@ function renderJobs() {
   }
 }
 
+function currentPrinterName() {
+  const printer = fleetPrinters.find(item => item.current);
+  return printer?.name || printer?.host || t("Printer");
+}
+
 function applyView() {
   const hasPrinters = fleetPrinters.length > 0;
   const showFleet = hasPrinters && view === 'fleet';
   const showMonitor = hasPrinters && view === 'monitor';
+  const showHistory = view === 'history';
   updateJobLink();
   const current = fleetPrinters.find(item => item.current);
-  el('deviceName').textContent = showFleet ? 'FlashForge' : current?.name || 'FlashForge';
-  el('status').hidden = !hasPrinters || showFleet;
-  el('headerJob').hidden = !hasPrinters || showFleet;
+  el('status').hidden = !showMonitor;
+  el('monitorHistory').hidden = !showMonitor || !current;
   el('jobs').hidden = !showFleet;
-  el('jobActions').hidden = !showMonitor;
-  el('setup').hidden = hasPrinters;
-  el('history').hidden = !hasPrinters || view !== 'history';
-  if (!el('history').hidden) el('history').open = true;
+  el('setup').hidden = hasPrinters || showHistory;
+  el('history').hidden = !showHistory;
+  if (showHistory) el('history').open = true;
   for (const id of ['monitor','printerTools','files-section']) el(id).hidden = !showMonitor;
   if (showFleet) renderJobs();
   else stopJobCameras();
@@ -3127,17 +3394,36 @@ function applyView() {
   }
   picker.hidden = !showMonitor || fleetPrinters.length < 2;
 }
+function replaceViewAddress() {
+  const url = new URL(location.href);
+  url.hash = view === 'fleet' ? 'allPrinters' : view;
+  if (view === 'history' && historyFilter) url.searchParams.set('historyPrinter', historyFilter);
+  else url.searchParams.delete('historyPrinter');
+  if (url.href !== location.href) window.history.replaceState(null, '', url);
+}
 function switchTab(next) {
   view = next;
-  const url = new URL(location.href);
-  url.hash = next === 'fleet' ? 'allPrinters' : next === 'monitor' ? 'monitor' : '';
-  if (url.href !== location.href) window.history.replaceState(null, '', url);
+  replaceViewAddress();
   try {localStorage.setItem('ff-fleet',next === 'fleet' ? '1':'0');} catch {}
   applyView();drawChart();
+  if (next === 'history') {
+    renderHistory();
+    updateHistory();
+  }
 }
 el('devicePicker').onchange = event => {location.href = printerPage(event.target.value);};
 el('monitorTab').onclick = () => switchTab('monitor');
-el('historyTab').onclick = () => switchTab('history');
+el('historyTab').onclick = () => {
+  historyFilter = '';
+  switchTab('history');
+};
+el('monitorHistory').onclick = () => {
+  historyFilter = fleetPrinters.find(printer => printer.current)?.host || '';
+  el('historySearch').value = '';
+  el('failedJobs').checked = false;
+  switchTab('history');
+  el('historyPrinter').focus();
+};
 el('openJob').onclick = () => {
   const current = fleetPrinters.find(item => item.current);
   if (current && (!matchesFleetSearch(current, fleetSearch.value.trim().toLowerCase())
@@ -3146,7 +3432,7 @@ el('openJob').onclick = () => {
   const heading = jobTiles.get(current?.host)?.node.querySelector('h3');
   (heading ?? fleetToggle).focus();
 };
-el('job').querySelector('.job-visual').onclick = () => {
+el('job').querySelector('.jobs-model').onclick = () => {
   if (!el('openJob').hidden) el('openJob').click();
 };
 fleetToggle.onclick = () => switchTab('fleet');
@@ -3166,14 +3452,20 @@ el('fleetClear').onclick = () => {
   refreshFleetView();
   fleetSearch.focus();
 };
-function setFleetCameras(value) {
-  if (fleetCameras === value) return;
-  fleetCameras = value;
+function setFleetCameraMode(mode) {
+  const enabled = mode !== 'off';
+  const scope = enabled ? mode : fleetCameraScope;
+  if (fleetCameras === enabled && fleetCameraScope === scope) return;
+  fleetCameras = enabled;
+  fleetCameraScope = scope;
   fleetCameraButton.setAttribute('aria-pressed', String(fleetCameras));
-  try {localStorage.setItem('ff-fleet-cameras', fleetCameras ? 'on' : 'off');} catch {}
+  try {
+    localStorage.setItem('ff-fleet-cameras', fleetCameras ? 'on' : 'off');
+    localStorage.setItem('ff-fleet-camera-scope', fleetCameraScope);
+  } catch {}
   if (!el('jobs').hidden) refreshFleetView();
 }
-fleetCameraButton.onclick = () => setFleetCameras(!fleetCameras);
+fleetCameraButton.onclick = () => setFleetCameraMode(fleetCameras ? 'off' : fleetCameraScope);
 el('fleetRefresh').onclick = async event => {
   const button = event.currentTarget;
   button.disabled = true;
@@ -3336,9 +3628,13 @@ el('settingsButton').onclick = async () => {
   el('displayRows').value = display.rows;
   el('displayPreviews').checked = display.previews;
   el('displayMonitorChart').checked = display.monitorChart;
+  el('displayChartLayout').value = display.chartLayout;
+  el('displayChartRange').value = String(display.chartRange);
+  for (const choice of chartChoices) choice.checked = display.chartLines.includes(choice.dataset.chartChoice);
   el('displayPrinterDetails').checked = display.printerDetails;
-  el('displayFleetCameras').checked = fleetCameras;
+  el('displayFleetCameras').value = fleetCameras ? fleetCameraScope : 'off';
   el('displayFleetDetails').checked = display.fleetDetails;
+  el('displayFleetWaitForRemoval').checked = display.fleetWaitForRemoval;
   el('displayHistoryTotals').checked = display.historyTotals;
   showSettingsSection(fleetPrinters.length ? 'settingsAppearance' : 'settingsPrinters');
   settingsDialog.showModal();
@@ -3371,6 +3667,11 @@ el('settingsForm').onsubmit = async event => {
   el('settingsContent').inert = true;
   status.textContent = t("Saving…");
   try {
+    const chartLines = chartChoices.filter(choice => choice.checked).map(choice => choice.dataset.chartChoice);
+    if (!chartLines.length) {
+      showSettingsSection('settingsMonitor');
+      throw Error(t("Select at least one temperature line."));
+    }
     let printers, data;
     if (printerSettingsSnapshot !== null) {
       try {
@@ -3390,8 +3691,12 @@ el('settingsForm').onsubmit = async event => {
       cardSize:el('displayCardSize').value, rows:Number(el('displayRows').value),
       previews:el('displayPreviews').checked,
       monitorChart:el('displayMonitorChart').checked,
+      chartLayout:el('displayChartLayout').value,
+      chartRange:Number(el('displayChartRange').value),
+      chartLines,
       printerDetails:el('displayPrinterDetails').checked,
       fleetDetails:el('displayFleetDetails').checked,
+      fleetWaitForRemoval:el('displayFleetWaitForRemoval').checked,
       historyTotals:el('displayHistoryTotals').checked
     };
     if (JSON.stringify(next) !== JSON.stringify(display)) {
@@ -3399,9 +3704,11 @@ el('settingsForm').onsubmit = async event => {
       display = next;
       applyDisplayStyles();
       renderFiles();
-      drawChart();
+      chartRange.value = String(display.chartRange);
+      redrawTemperatureChart();
+      if (view === 'fleet') renderJobs();
     }
-    setFleetCameras(el('displayFleetCameras').checked);
+    setFleetCameraMode(el('displayFleetCameras').value);
     settingsDialog.close();
     if (!data) return;
     if (!separateTab && data.moved && !printers.some(p => location.pathname === '/' + p.host + '/')) {
@@ -3586,7 +3893,8 @@ def translate_error(language, message):
 
 
 ACTIVE_JOB = {"PRINTING", "BUILDING", "BUILDING_FROM_SD", "PAUSED", "HEATING", "PAUSING"}
-ENDED_JOB = {"CANCELLED": "cancelled", "CANCELED": "cancelled", "STOPPED": "cancelled", "ERROR": "error"}
+CANCELLED_JOB = {"CANCELLED", "CANCELED", "STOPPED"}
+ENDED_JOB = {**dict.fromkeys(CANCELLED_JOB, "cancelled"), "ERROR": "error"}
 ACK = re.compile(rb"(?:^|\n)ok\r?\n")
 TEMP_ACK = re.compile(rb"(?:^|\n)ok[ \t]+T0:[^\r\n]+\r?\n")
 LIST_HEADER = b"D\xaa\xaaD"
@@ -3702,6 +4010,24 @@ def read_preview(host, path):
         except TimeoutError:
             pass
     return None
+
+
+def last_completed_job(jobs):
+    completed = next((job for job in jobs if job["result"] == "complete" and job["file"]), None)
+    if completed:
+        return {"file": completed["file"], "ended": completed.get("ended", 0)}
+    return None
+
+
+def bed_clear_token(jobs, active):
+    if active or not jobs or jobs[0]["result"] != "complete":
+        return ""
+    job = jobs[0]
+    ended = job.get("ended")
+    if type(ended) is not int or ended < job["started"]:
+        return ""
+    identity = json.dumps([job["started"], ended, job["file"]]).encode("ascii")
+    return hashlib.sha256(identity).hexdigest()
 
 
 def history_stats(jobs, now):
@@ -3942,7 +4268,7 @@ def manual_family(model):
     return None
 
 
-def manual_controls(detail, state, tcp_model="", nozzle=None):
+def manual_controls(detail, state, tcp_model="", nozzle=None, *, tcp_idle_after_cancel=False):
     tcp = manual_family(tcp_model)
     pid = detail.get("pid")
     if pid is None:
@@ -3956,8 +4282,10 @@ def manual_controls(detail, state, tcp_model="", nozzle=None):
         return None
     if not legacy and not detail:
         return None
-    idle = state in {"READY", "IDLE"} and (legacy or str(detail.get("status", "")).upper() in {"READY", "IDLE"})
     error = detail.get("errorCode")
+    idle = tcp_idle_after_cancel or (
+        state in {"READY", "IDLE"} and (legacy or str(detail.get("status", "")).strip().upper() in {"READY", "IDLE"})
+    )
     tcp_motion = tcp == family and (legacy or family == "5m")
     motion = tcp_motion or family == "ad5x"
     filament = tcp_motion or (family == "ad5x" and detail.get("extrudeCtrl") == 1)
@@ -3999,8 +4327,13 @@ def manual_controls(detail, state, tcp_model="", nozzle=None):
                 allowed.extend(("e+10", "e-10"))
         if "timer" in groups:
             allowed.extend(("timer0", "timer30", "timer60", "timer120"))
+    if tcp_idle_after_cancel:
+        # The TCP session confirms motion and heating independently of the HTTP job status.
+        allowed = [key for key in allowed if key == "home" or key.startswith(("heat", "x", "y", "z", "e"))]
     timer = detail.get("autoShutdown")
     notes = ["Ready" if idle else "Locked · printer must be idle"]
+    if not idle and state in CANCELLED_JOB | {"CANCELING", "CANCELLING"}:
+        notes.append(STATES[state])
     if idle and error:
         notes.append(str(error))
     return {"allowed": allowed, "groups": groups, "tcpMotion": tcp_motion,
@@ -4044,9 +4377,14 @@ def at_5m_park(position):
     return position and all(abs(value - 110) <= 0.2 for value in position[:2])
 
 
+def at_5m_final_park(position):
+    return (all(isinstance(value, (int, float)) for value in position)
+            and at_5m_park(position) and abs(position[2] - 220) <= 0.05)
+
+
 def stationary_check_seconds(position):
     # Only use the short window at the 5M's final XYZ parking position.
-    return 2 if at_5m_park(position) and abs(position[2] - 220) <= 0.05 else 10
+    return 2 if at_5m_final_park(position) else 10
 
 
 def checked_manual_target(key, position, volume, family):
@@ -4085,7 +4423,8 @@ def ad5x_axis_position(host, axis):
         return None
 
 
-def tcp_manual_move(host, key, volume, model, release_marker=None, settled_homing=None, track_home=None, record_target=None):
+def tcp_manual_move(host, key, volume, model, release_marker=None, settled_homing=None, track_home=None, record_target=None,
+                    *, require_idle_axes=False):
     """Keep the idle check and the single move in the same printer control session."""
     with socket.create_connection((host, PORT), timeout=2) as sock:
         def send(code, deadline=None):
@@ -4106,6 +4445,8 @@ def tcp_manual_move(host, key, volume, model, release_marker=None, settled_homin
             mode = mode_match[1].upper() if mode_match else ""
             if not re.search(r"^MachineStatus:[ \t]*(?:READY|IDLE)[ \t]*\r?$", status, re.M | re.I):
                 raise ManualAxesBusy("Printer must be idle.")
+            if require_idle_axes and mode not in {"READY", "IDLE"}:
+                raise ManualAxesBusy("Printer must be idle. Wait for movement or Home to finish.")
             verified_park = None
             if mode == "HOMING" and settled_homing and manual_family(model) == "5m":
                 if bounded_5m_position(send("M114")) == settled_homing:
@@ -4118,10 +4459,13 @@ def tcp_manual_move(host, key, volume, model, release_marker=None, settled_homin
                     raise ValueError("Unsupported nozzle target.")
                 target = int(key[4:])
                 send(f"M104 S{target}")
-                reading = re.search(r"\bT0:\s*[\d.]+\s*/\s*(\d+(?:\.\d+)?)", send("M105"))
-                if not reading or float(reading[1]) != target:
-                    raise ValueError("Printer has not confirmed the nozzle target. Check Printer Readings.")
-                return "Printer confirmed the nozzle target."
+                for attempt in range(4):
+                    if attempt:
+                        time.sleep(0.5)
+                    reading = re.search(r"\bT0:\s*[\d.]+\s*/\s*(\d+(?:\.\d+)?)", send("M105"))
+                    if reading and float(reading[1]) == target:
+                        return "Printer confirmed the nozzle target."
+                raise ValueError("Printer has not confirmed the nozzle target. Check Printer Readings.")
             if key == "home":
                 try:
                     # A 5M can take several seconds to acknowledge homing.
@@ -4291,7 +4635,9 @@ def read_status(host, check_code, include_details=False):
         state_match = re.search(r"^MachineStatus:[ \t]*(\S+)", status, re.M)
         if not state_match or not re.search(r"\bT0:", temp):
             raise ValueError("Unexpected response from the printer")
-        state = state_match[1]
+        state = state_match[1].upper()
+        move = re.search(r"^MoveMode:[ \t]*(\S+)", status, re.M | re.I)
+        move_mode = move[1].upper() if move else ""
         serial = None
         machine = ""
         try:
@@ -4309,7 +4655,7 @@ def read_status(host, check_code, include_details=False):
                 reply = command(sock, "M114", deadline)
                 position = {axis: manual_axis_position(reply, axis) for axis in "XYZ"}
                 if (serial and check_code and family == "5m"
-                        and re.search(r"^MoveMode:[ \t]*HOMING\b", status, re.M | re.I)):
+                        and move_mode == "HOMING"):
                     homing_park = bounded_5m_position(reply)
             except (OSError, ValueError):
                 pass
@@ -4324,12 +4670,17 @@ def read_status(host, check_code, include_details=False):
     layer = re.search(r"^Layer:\s*(\d+)\s*/\s*(\d+)", progress, re.M | re.I)
     current, total = (int(layer[1]), int(layer[2])) if layer else (0, 0)
     detail, time_hint = {}, ""
+    tcp_idle_after_cancel = False
     if serial:
         detail, time_hint = read_job_detail(serial[1], check_code, host)
-        if str(detail.get("status", "")).strip().casefold() not in {"ready", "idle"} or detail.get("errorCode"):
+        http_state = str(detail.get("status", "")).strip().upper()
+        if http_state not in {"READY", "IDLE"} or detail.get("errorCode"):
             homing_park = None
-        if str(detail.get("status", "")).strip().casefold() == "calibrate_doing":
+        if http_state == "CALIBRATE_DOING":
             state = "CALIBRATING"
+        elif family == "5m" and state in {"READY", "IDLE"} and http_state in CANCELLED_JOB:
+            state = http_state
+            tcp_idle_after_cancel = move_mode in {"READY", "IDLE"} and not detail.get("errorCode")
     elif state in ACTIVE_JOB:
         if not check_code:
             time_hint = "Enter your CheckCode in the plugin settings"
@@ -4381,12 +4732,12 @@ def read_status(host, check_code, include_details=False):
             if match:
                 endstops[axis] = int(match[1])
     led = re.search(r"^LED:[ \t]*(\d+)", status, re.M)
-    move = re.search(r"^MoveMode:[ \t]*(\S+)", status, re.M)
     sensors = {"endstops": endstops,
                "led": bool(int(led[1])) if led else None,
-               "moveMode": move[1] if move else "", "stationaryCandidate": homing_park,
+               "moveMode": move_mode, "stationaryCandidate": homing_park,
                "homingPark": homing_park if at_5m_park(homing_park) else None}
-    controls = manual_controls(detail, state, info.get("model", ""), readings["nozzle"])
+    controls = manual_controls(detail, state, info.get("model", ""), readings["nozzle"],
+                               tcp_idle_after_cancel=tcp_idle_after_cancel)
     if controls and position:
         limited = []
         for key in controls["allowed"]:
@@ -4878,14 +5229,20 @@ class PrinterMonitor:
             return
         state = status["state"]
         motion = sensors.get("moveMode", "").upper()
-        error = (status.get("manual") or {}).get("errorCode")
+        manual = status.get("manual") or {}
+        error = manual.get("errorCode")
         idle = state in {"READY", "IDLE"}
         settled = self.settled_homing_position(status)
         parked_after_home = at_5m_park(settled) and (self.manual_home_acknowledged or self.manual_home_seen)
+        position = manual.get("position") or {}
+        xyz = tuple(position.get(axis) for axis in "XYZ")
+        # G28 can finish before the first status poll observes any motion.
+        idle_after_home = motion in {"READY", "IDLE"} and (
+            self.manual_home_seen or (self.manual_home_acknowledged and at_5m_final_park(xyz)))
         if (now >= self.manual_home_until or status["active"] or error
                 or state in ENDED_JOB or state in {"ATTENTION", "CALIBRATING"}):
             self.manual_home_until = 0
-        elif idle and (parked_after_home or (self.manual_home_seen and motion in {"READY", "IDLE"})):
+        elif idle and (parked_after_home or idle_after_home):
             self.manual_home_until = 0
             try:
                 self.manual_release_marker.unlink(missing_ok=True)
@@ -5054,6 +5411,21 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
         self.monitors = {}
         self.error = ""
         self.state_lock = threading.Lock()
+        self.cleared_beds_path = storage / "cleared-beds.json"
+        try:
+            cleared = json.loads(self.cleared_beds_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            cleared = {}
+        self.cleared_beds = ({host: token for host, token in cleared.items()
+                              if isinstance(token, str) and re.fullmatch(r"[0-9a-f]{64}", token)}
+                             if isinstance(cleared, dict) else {})
+        self.history_names_path = storage / "history-printers.json"
+        try:
+            names = json.loads(self.history_names_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            names = {}
+        self.history_names = ({host: name[:60] for host, name in names.items() if isinstance(name, str) and name}
+                              if isinstance(names, dict) else {})
         self.printer_lock = threading.Lock()
         self.discovery_lock = threading.Lock()
         self.source_lock = threading.Lock()
@@ -5117,7 +5489,76 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
         return {"printers": printers, "endpoint": printers[0]["host"] if printers else "",
                 "notifications": self.notifications, "placement": self.placement}
 
+    def remember_history_names(self, entries):
+        names = {**self.history_names, **{entry["host"]: entry["name"] for entry in entries}}
+        if names == self.history_names:
+            return
+        pending = self.history_names_path.with_suffix(".tmp")
+        try:
+            pending.write_text(json.dumps(names, ensure_ascii=False), encoding="utf-8")
+            os.replace(pending, self.history_names_path)
+        except OSError:
+            return
+        self.history_names = names
+
+    def history_payload(self):
+        configured = {entry["host"]: entry["name"] for entry in self.printers()}
+        with self.state_lock:
+            monitors = self.monitors.copy()
+        paths = {}
+        for path in self.storage.glob("flashforge-*-history.json"):
+            try:
+                host = local_address(path.name.removeprefix("flashforge-").removesuffix("-history.json"))
+            except ValueError:
+                continue
+            if path.is_file() and not path.is_symlink():
+                paths[host] = path
+        now = int(time.time())
+        printers = []
+        for host in dict.fromkeys((*configured, *sorted(paths))):
+            name = configured.get(host) or self.history_names.get(host) or host
+            monitor = monitors.get(host)
+            if monitor is not None and host in configured:
+                with monitor.state_lock:
+                    jobs, error = monitor.history_snapshot, monitor.history_error
+            elif host in paths:
+                saved = PrintHistory(paths[host])
+                jobs = saved.jobs
+                error = "Print history is temporarily unavailable." if saved.error else ""
+                if host not in configured:
+                    # A retired printer is no longer sampled, so an unfinished
+                    # record is not a live print. Leave the saved row intact.
+                    jobs = [{**job, "result": "unknown"} if job["result"] == "active" else job for job in jobs]
+            else:
+                jobs, error = [], ""
+            printers.append({"host": host, "name": name, "jobs": jobs, "error": error,
+                             "stats": history_stats(jobs, now)})
+        jobs = [job for printer in printers for job in printer["jobs"]]
+        jobs.sort(key=lambda job: job["started"], reverse=True)
+        return {"printers": printers, "stats": history_stats(jobs, now)}
+
+    def confirm_bed_clear(self, host, token):
+        if host not in {entry["host"] for entry in self.printers()}:
+            return False
+        with self.state_lock:
+            monitor = self.monitors.get(host)
+            if monitor is None:
+                return False
+            with monitor.state_lock:
+                expected = bed_clear_token(monitor.history_snapshot, (monitor.latest or {}).get("active"))
+                if not expected or expected != token:
+                    return False
+                if self.cleared_beds.get(host) != token:
+                    updated = {**self.cleared_beds, host: token}
+                    pending = self.cleared_beds_path.with_suffix(".tmp")
+                    pending.write_text(json.dumps(updated), encoding="utf-8")
+                    os.replace(pending, self.cleared_beds_path)
+                    self.cleared_beds = updated
+                return True
+
     def fleet_payload(self, current=None):
+        with self.state_lock:
+            cleared = self.cleared_beds
         items = []
         for entry in self.printers():
             monitor = self.monitors.get(entry["host"])
@@ -5129,14 +5570,13 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
                     camera = monitor.camera_url
                     history = monitor.history_snapshot
             job = history[0] if history and history[0]["result"] == "active" else {}
-            completed = next((row for row in history if row["result"] == "complete" and row["file"]), None)
             item = {"host": entry["host"], "name": entry["name"],
                     "current": entry["host"] == current, "error": error,
                     "status": None, "percent": None, "remaining": None,
                     "file": "", "nozzle": None, "bed": None,
                     "printing": False, "complete": False, "cameraUrl": camera,
                     "events": job.get("events", []),
-                    "lastCompleted": {"file": completed["file"], "ended": completed.get("ended", 0)} if completed else None}
+                    "lastCompleted": last_completed_job(history)}
             if data:
                 item.update(state=data.get("state"), observedAt=data.get("observedAt"), status=data.get("status"), percent=data.get("percent"),
                             remaining=data.get("remaining"), file=data.get("file"),
@@ -5148,6 +5588,9 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
                 )})
             elif job and error:
                 item.update(printing=True, file=job["file"], layer=job.get("layer"))
+            token = bed_clear_token(history, item["printing"])
+            if token and cleared.get(entry["host"]) != token:
+                item["bedClearToken"] = token
             items.append(item)
         return items
 
@@ -5218,6 +5661,7 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
                 mono = time.monotonic()
                 try:
                     entries = self.printers()
+                    self.remember_history_names(entries)
                     hosts = {entry["host"] for entry in entries}
                     with self.state_lock:
                         for host in [name for name in self.monitors if name not in hosts]:
@@ -5357,11 +5801,11 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 or self.headers.get("Origin") != f"http://{authority}"
                 or self.headers.get("Sec-Fetch-Site") not in (None, "same-origin")
                 or action not in ("settings", "action", "diagnostics", "notifications", "camera-stream",
-                                  "discover", "test-printer", "print-source", "upload-file")):
+                                  "discover", "test-printer", "print-source", "upload-file", "confirm-bed-clear")):
             self.reply_json({"error": "Open the monitor in OrcaSlicer."}, 403)
             return
         endpoint, route = self.request_route()
-        if route in {"camera-stream", "action", "print-source", "upload-file"} or (route == "diagnostics" and "?" in self.path):
+        if route in {"camera-stream", "action", "print-source", "upload-file", "confirm-bed-clear"} or (route == "diagnostics" and "?" in self.path):
             try:
                 endpoint = self.checked_printer(endpoint)
             except (OSError, RuntimeError, ValueError) as error:
@@ -5391,6 +5835,26 @@ class MonitorHandler(BaseHTTPRequestHandler):
             return
         if route == action == "print-source":
             self.prepare_print_source(endpoint)
+            return
+        if route == action == "confirm-bed-clear":
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                if not 0 < length <= 256:
+                    raise ValueError
+                payload = json.loads(self.rfile.read(length))
+                token = payload.get("token") if isinstance(payload, dict) else None
+                if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{64}", token):
+                    raise ValueError
+                confirmed = self.server.confirm_bed_clear(endpoint, token)
+            except ValueError:
+                self.reply_json({"error": "Invalid request."}, 400)
+            except OSError:
+                self.reply_json({"error": "Could not save the settings."}, 503)
+            else:
+                if confirmed:
+                    self.reply_json({"confirmed": True})
+                else:
+                    self.reply_json({"error": "The print job changed. Refresh its status and try again."}, 409)
             return
         if route == action == "notifications":
             try:
@@ -5786,6 +6250,9 @@ class MonitorHandler(BaseHTTPRequestHandler):
         if route == "settings":
             self.reply_json(self.server.settings_payload())
             return
+        if route == "history":
+            self.reply_json(self.server.history_payload())
+            return
         if route == "placement":
             self.reply_json({"placement": self.server.placement})
             return
@@ -5838,7 +6305,8 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 error = monitor.error
                 calibration = monitor.calibration
                 if route == "status" and data is not None:
-                    data = {**data, "manual": monitor.manual_controls_view(data.get("manual"), data)}
+                    data = {**data, "manual": monitor.manual_controls_view(data.get("manual"), data),
+                            "lastCompleted": last_completed_job(monitor.history_snapshot)}
             if data is None:
                 self.reply_json({"error": error}, 503)
                 return
@@ -6524,7 +6992,8 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                         try:
                             result = tcp_manual_move(host, key, info.get("volume"), info.get("model", ""),
                                                      monitor.manual_release_marker, settled_homing, track_home,
-                                                     monitor.record_manual_target)
+                                                     monitor.record_manual_target,
+                                                     require_idle_axes=current["state"] in CANCELLED_JOB)
                         except (ManualAxesBusy, ManualTravelLimit):
                             may_move = False
                             raise
@@ -6656,6 +7125,15 @@ class FlashForgePage(orca.pages.PagesPluginCapabilityBase):
 # Embedded so installing the single .py file also installs its translations.
 TRANSLATIONS = {
     "ca": {
+        "While this tab is open": "Mentre aquesta pestanya estigui oberta",
+        "Only during an active print": "Només durant una impressió activa",
+        "Waiting for part removal": "Pendent de retirar la peça",
+        "Wait for part removal": "Esperar que es retiri la peça",
+        "Bed is clear": "El llit és lliure",
+        "Chart layout": "Disposició del gràfic",
+        "Shared scale": "Escala compartida",
+        "Separate scales": "Escales separades",
+        "Select at least one temperature line.": "Seleccioneu almenys una línia de temperatura.",
         " · Total print time: {time}": " · Temps total d'impressió: {time}",
         "0 min": "0 min",
         "1 mm": "1 mm",
@@ -7113,6 +7591,7 @@ TRANSLATIONS = {
         "Serial number": "Número de sèrie",
         "Serial number (required for Creator 5 / 5 Pro)": "Número de sèrie (necessari per a Creator 5 / 5 Pro)",
         "Set temperature": "Fixa la temperatura",
+        "Heat": "Escalfa",
         "Set up your first printer": "Configura la teva primera impressora",
         "Setting light…": "Canviant la llum de la cambra…",
         "Settings": "Configuració",
@@ -7238,6 +7717,15 @@ TRANSLATIONS = {
         "{time} left": "Queden {time}",
     },
     "cs": {
+        "While this tab is open": "Když je tato karta otevřená",
+        "Only during an active print": "Pouze během aktivního tisku",
+        "Waiting for part removal": "Čeká na sejmutí výtisku",
+        "Wait for part removal": "Čekat na sejmutí výtisku",
+        "Bed is clear": "Podložka je volná",
+        "Chart layout": "Rozložení grafu",
+        "Shared scale": "Společná stupnice",
+        "Separate scales": "Samostatné stupnice",
+        "Select at least one temperature line.": "Vyberte alespoň jednu teplotní křivku.",
         " · Total print time: {time}": " · Celkový čas tisku: {time}",
         "0 min": "0 min",
         "1 mm": "1 mm",
@@ -7695,6 +8183,7 @@ TRANSLATIONS = {
         "Serial number": "Sériové číslo",
         "Serial number (required for Creator 5 / 5 Pro)": "Sériové číslo (vyžadováno pro Creator 5 / 5 Pro)",
         "Set temperature": "Nastavit teplotu",
+        "Heat": "Ohřát",
         "Set up your first printer": "Nastavte svou první tiskárnu",
         "Setting light…": "Přepínání osvětlení…",
         "Settings": "Nastavení",
@@ -7820,6 +8309,15 @@ TRANSLATIONS = {
         "{time} left": "Zbývá {time}",
     },
     "de": {
+        "While this tab is open": "Solange dieser Tab geöffnet ist",
+        "Only during an active print": "Nur bei einem aktiven Druckauftrag",
+        "Waiting for part removal": "Wartet auf Entnahme des Druckteils",
+        "Wait for part removal": "Auf Entnahme des Druckteils warten",
+        "Bed is clear": "Druckbett ist frei",
+        "Chart layout": "Diagrammlayout",
+        "Shared scale": "Gemeinsame Skala",
+        "Separate scales": "Getrennte Skalen",
+        "Select at least one temperature line.": "Wählen Sie mindestens eine Temperaturkurve aus.",
         " · Total print time: {time}": " · Gesamtdruckzeit: {time}",
         "0 min": "0 Min",
         "1 mm": "1 mm",
@@ -8277,6 +8775,7 @@ TRANSLATIONS = {
         "Serial number": "Seriennummer",
         "Serial number (required for Creator 5 / 5 Pro)": "Seriennummer (erforderlich für Creator 5 / 5 Pro)",
         "Set temperature": "Solltemperatur einstellen",
+        "Heat": "Heizen",
         "Set up your first printer": "Richten Sie Ihren ersten Drucker ein",
         "Setting light…": "Beleuchtung wird umgeschaltet…",
         "Settings": "Einstellungen",
@@ -8402,6 +8901,15 @@ TRANSLATIONS = {
         "{time} left": "Noch {time}",
     },
     "es": {
+        "While this tab is open": "Mientras esta pestaña esté abierta",
+        "Only during an active print": "Solo con una impresión activa",
+        "Waiting for part removal": "Esperando retirar la pieza",
+        "Wait for part removal": "Esperar a que se retire la pieza",
+        "Bed is clear": "La cama está libre",
+        "Chart layout": "Diseño del gráfico",
+        "Shared scale": "Escala común",
+        "Separate scales": "Escalas independientes",
+        "Select at least one temperature line.": "Selecciona al menos una línea de temperatura.",
         " · Total print time: {time}": " · Tiempo total de impresión: {time}",
         "0 min": "0 minutos",
         "1 mm": "1mm",
@@ -8859,6 +9367,7 @@ TRANSLATIONS = {
         "Serial number": "Número de serie",
         "Serial number (required for Creator 5 / 5 Pro)": "Número de serie (obligatorio para Creator 5 / 5 Pro)",
         "Set temperature": "Fijar temperatura",
+        "Heat": "Calentar",
         "Set up your first printer": "Configure su primera impresora",
         "Setting light…": "Cambiando la iluminación…",
         "Settings": "Ajustes",
@@ -8984,6 +9493,15 @@ TRANSLATIONS = {
         "{time} left": "Quedan {time}",
     },
     "eu": {
+        "While this tab is open": "Fitxa hau irekita dagoen bitartean",
+        "Only during an active print": "Inprimaketa aktiboan soilik",
+        "Waiting for part removal": "Pieza kentzeko zain",
+        "Wait for part removal": "Pieza kendu arte itxaron",
+        "Bed is clear": "Ohea libre dago",
+        "Chart layout": "Grafikoaren diseinua",
+        "Shared scale": "Eskala partekatua",
+        "Separate scales": "Eskala bereiziak",
+        "Select at least one temperature line.": "Hautatu gutxienez tenperatura-lerro bat.",
         " · Total print time: {time}": " · Inprimatze-denbora osoa: {time}",
         "0 min": "0 min",
         "1 mm": "1 mm",
@@ -9441,6 +9959,7 @@ TRANSLATIONS = {
         "Serial number": "Serie-zenbakia",
         "Serial number (required for Creator 5 / 5 Pro)": "Serie-zenbakia (beharrezkoa Creator 5 / 5 Pro)",
         "Set temperature": "Ezarri tenperatura",
+        "Heat": "Berotu",
         "Set up your first printer": "Konfiguratu zure lehen inprimagailua",
         "Setting light…": "Ganberako argia aldatzen…",
         "Settings": "Ezarpenak",
@@ -9566,6 +10085,15 @@ TRANSLATIONS = {
         "{time} left": "{time} geratzen da",
     },
     "fr": {
+        "While this tab is open": "Tant que cet onglet est ouvert",
+        "Only during an active print": "Uniquement pendant une impression active",
+        "Waiting for part removal": "En attente du retrait de la pièce",
+        "Wait for part removal": "Attendre le retrait de la pièce",
+        "Bed is clear": "Plateau libre",
+        "Chart layout": "Disposition du graphique",
+        "Shared scale": "Échelle commune",
+        "Separate scales": "Échelles séparées",
+        "Select at least one temperature line.": "Sélectionnez au moins une courbe de température.",
         " · Total print time: {time}": " · Temps d'impression total : {time}",
         "0 min": "0 min",
         "1 mm": "1 mm",
@@ -10023,6 +10551,7 @@ TRANSLATIONS = {
         "Serial number": "Numéro de série",
         "Serial number (required for Creator 5 / 5 Pro)": "Numéro de série (obligatoire pour Creator 5 / 5 Pro)",
         "Set temperature": "Régler la température",
+        "Heat": "Chauffer",
         "Set up your first printer": "Configurer votre première imprimante",
         "Setting light…": "Commutation de l’éclairage…",
         "Settings": "Réglages",
@@ -10148,6 +10677,15 @@ TRANSLATIONS = {
         "{time} left": "Reste {time}",
     },
     "hu": {
+        "While this tab is open": "Amíg ez a lap nyitva van",
+        "Only during an active print": "Csak aktív nyomtatás közben",
+        "Waiting for part removal": "Az alkatrész eltávolítására vár",
+        "Wait for part removal": "Várakozás az alkatrész eltávolítására",
+        "Bed is clear": "Az asztal szabad",
+        "Chart layout": "Diagram elrendezése",
+        "Shared scale": "Közös skála",
+        "Separate scales": "Külön skálák",
+        "Select at least one temperature line.": "Válasszon legalább egy hőmérsékletgörbét.",
         " · Total print time: {time}": " · Teljes nyomtatási idő: {time}",
         "0 min": "0 perc",
         "1 mm": "1 mm",
@@ -10605,6 +11143,7 @@ TRANSLATIONS = {
         "Serial number": "Sorozatszám",
         "Serial number (required for Creator 5 / 5 Pro)": "Sorozatszám (szükséges a Creator 5 / 5 Pro-hez)",
         "Set temperature": "Hőmérséklet beállítása",
+        "Heat": "Fűtés",
         "Set up your first printer": "Állítsa be első nyomtatóját",
         "Setting light…": "Világítás kapcsolása…",
         "Settings": "Beállítások",
@@ -10730,6 +11269,15 @@ TRANSLATIONS = {
         "{time} left": "Hátralévő idő: {time}",
     },
     "it": {
+        "While this tab is open": "Finché questa scheda è aperta",
+        "Only during an active print": "Solo con una stampa attiva",
+        "Waiting for part removal": "In attesa della rimozione del pezzo",
+        "Wait for part removal": "Attendi la rimozione del pezzo",
+        "Bed is clear": "Piatto libero",
+        "Chart layout": "Disposizione del grafico",
+        "Shared scale": "Scala comune",
+        "Separate scales": "Scale separate",
+        "Select at least one temperature line.": "Seleziona almeno una curva di temperatura.",
         " · Total print time: {time}": " · Tempo di stampa totale: {time}",
         "0 min": "0 min",
         "1 mm": "1mm",
@@ -11187,6 +11735,7 @@ TRANSLATIONS = {
         "Serial number": "Numero di serie",
         "Serial number (required for Creator 5 / 5 Pro)": "Numero di serie (richiesto per Creator 5 / 5 Pro)",
         "Set temperature": "Imposta temperatura",
+        "Heat": "Scalda",
         "Set up your first printer": "Configura la tua prima stampante",
         "Setting light…": "Commutazione della luce…",
         "Settings": "Impostazioni",
@@ -11312,6 +11861,15 @@ TRANSLATIONS = {
         "{time} left": "Tempo rimasto: {time}",
     },
     "ja": {
+        "While this tab is open": "このタブを開いている間",
+        "Only during an active print": "印刷ジョブが進行中のときのみ",
+        "Waiting for part removal": "造形物の取り外し待ち",
+        "Wait for part removal": "造形物の取り外しを待つ",
+        "Bed is clear": "ベッドを空にした",
+        "Chart layout": "グラフの配置",
+        "Shared scale": "共通スケール",
+        "Separate scales": "個別スケール",
+        "Select at least one temperature line.": "温度の線を少なくとも1つ選択してください。",
         " · Total print time: {time}": " ・総印刷時間：{time}",
         "0 min": "0分",
         "1 mm": "1mm",
@@ -11769,6 +12327,7 @@ TRANSLATIONS = {
         "Serial number": "シリアルナンバー",
         "Serial number (required for Creator 5 / 5 Pro)": "シリアル番号（Creator 5 / 5 Proに必要）",
         "Set temperature": "目標温度を設定",
+        "Heat": "加熱",
         "Set up your first printer": "初めてのプリンターをセットアップする",
         "Setting light…": "照明を切り替え中…",
         "Settings": "設定",
@@ -11894,6 +12453,15 @@ TRANSLATIONS = {
         "{time} left": "残り {time}",
     },
     "ko": {
+        "While this tab is open": "이 탭이 열려 있는 동안",
+        "Only during an active print": "인쇄 작업이 진행 중일 때만",
+        "Waiting for part removal": "출력물 제거 대기 중",
+        "Wait for part removal": "출력물 제거 대기",
+        "Bed is clear": "베드 비움 확인",
+        "Chart layout": "그래프 레이아웃",
+        "Shared scale": "공통 눈금",
+        "Separate scales": "개별 눈금",
+        "Select at least one temperature line.": "온도 곡선을 하나 이상 선택하세요.",
         " · Total print time: {time}": " · 총 인쇄 시간: {time}",
         "0 min": "0분",
         "1 mm": "1mm",
@@ -12351,6 +12919,7 @@ TRANSLATIONS = {
         "Serial number": "일련번호",
         "Serial number (required for Creator 5 / 5 Pro)": "일련번호(Creator 5 / 5 Pro에 필요)",
         "Set temperature": "목표 온도 설정",
+        "Heat": "가열",
         "Set up your first printer": "첫 번째 프린터 설정",
         "Setting light…": "조명 전환 중…",
         "Settings": "설정",
@@ -12476,6 +13045,15 @@ TRANSLATIONS = {
         "{time} left": "남은 시간: {time}",
     },
     "lt": {
+        "While this tab is open": "Kol šis skirtukas atvertas",
+        "Only during an active print": "Tik vykstant spausdinimui",
+        "Waiting for part removal": "Laukiama, kol bus nuimta detalė",
+        "Wait for part removal": "Laukti, kol bus nuimta detalė",
+        "Bed is clear": "Stalas laisvas",
+        "Chart layout": "Diagramos išdėstymas",
+        "Shared scale": "Bendra skalė",
+        "Separate scales": "Atskiros skalės",
+        "Select at least one temperature line.": "Pasirinkite bent vieną temperatūros kreivę.",
         " · Total print time: {time}": " · Bendras spausdinimo laikas: {time}",
         "0 min": "0 min",
         "1 mm": "1 mm",
@@ -12933,6 +13511,7 @@ TRANSLATIONS = {
         "Serial number": "Serijos numeris",
         "Serial number (required for Creator 5 / 5 Pro)": "Serijos numeris (reikalingas Creator 5 / 5 Pro)",
         "Set temperature": "Nustatyti temperatūrą",
+        "Heat": "Šildyti",
         "Set up your first printer": "Nustatykite pirmąjį spausdintuvą",
         "Setting light…": "Perjungiamas apšvietimas…",
         "Settings": "Parametrai",
@@ -13058,6 +13637,15 @@ TRANSLATIONS = {
         "{time} left": "Liko {time}",
     },
     "nl": {
+        "While this tab is open": "Zolang dit tabblad open is",
+        "Only during an active print": "Alleen bij een actieve afdruktaak",
+        "Waiting for part removal": "Wacht op verwijderen van het onderdeel",
+        "Wait for part removal": "Wachten op verwijdering van het onderdeel",
+        "Bed is clear": "Printbed is vrij",
+        "Chart layout": "Grafiekindeling",
+        "Shared scale": "Gedeelde schaal",
+        "Separate scales": "Afzonderlijke schalen",
+        "Select at least one temperature line.": "Selecteer minstens één temperatuurlijn.",
         " · Total print time: {time}": " · Totale afdruktijd: {time}",
         "0 min": "0 min",
         "1 mm": "1 mm",
@@ -13515,6 +14103,7 @@ TRANSLATIONS = {
         "Serial number": "Serienummer",
         "Serial number (required for Creator 5 / 5 Pro)": "Serienummer (vereist voor Creator 5 / 5 Pro)",
         "Set temperature": "Temperatuur instellen",
+        "Heat": "Verwarmen",
         "Set up your first printer": "Uw eerste printer instellen",
         "Setting light…": "Verlichting schakelen…",
         "Settings": "Instellingen",
@@ -13640,6 +14229,15 @@ TRANSLATIONS = {
         "{time} left": "Nog {time}",
     },
     "pl": {
+        "While this tab is open": "Gdy ta karta jest otwarta",
+        "Only during an active print": "Tylko podczas aktywnego drukowania",
+        "Waiting for part removal": "Czeka na zdjęcie wydruku",
+        "Wait for part removal": "Czekaj na zdjęcie wydruku",
+        "Bed is clear": "Stół jest wolny",
+        "Chart layout": "Układ wykresu",
+        "Shared scale": "Wspólna skala",
+        "Separate scales": "Osobne skale",
+        "Select at least one temperature line.": "Wybierz co najmniej jedną linię temperatury.",
         " · Total print time: {time}": " · Całkowity czas drukowania: {time}",
         "0 min": "0 min",
         "1 mm": "1 mm",
@@ -14097,6 +14695,7 @@ TRANSLATIONS = {
         "Serial number": "Numer seryjny",
         "Serial number (required for Creator 5 / 5 Pro)": "Numer seryjny (wymagany dla Creator 5 / 5 Pro)",
         "Set temperature": "Ustaw temperaturę",
+        "Heat": "Grzej",
         "Set up your first printer": "Skonfiguruj swoją pierwszą drukarkę",
         "Setting light…": "Przełączanie oświetlenia…",
         "Settings": "Ustawienia",
@@ -14222,6 +14821,15 @@ TRANSLATIONS = {
         "{time} left": "Pozostało {time}",
     },
     "pt-BR": {
+        "While this tab is open": "Enquanto esta aba estiver aberta",
+        "Only during an active print": "Somente durante uma impressão ativa",
+        "Waiting for part removal": "Aguardando a retirada da peça",
+        "Wait for part removal": "Aguardar a retirada da peça",
+        "Bed is clear": "Mesa livre",
+        "Chart layout": "Layout do gráfico",
+        "Shared scale": "Escala comum",
+        "Separate scales": "Escalas separadas",
+        "Select at least one temperature line.": "Selecione pelo menos uma curva de temperatura.",
         " · Total print time: {time}": " · Tempo total de impressão: {time}",
         "0 min": "0 minutos",
         "1 mm": "1 mm",
@@ -14679,6 +15287,7 @@ TRANSLATIONS = {
         "Serial number": "Número de série",
         "Serial number (required for Creator 5 / 5 Pro)": "Número de série (obrigatório para Creator 5 / 5 Pro)",
         "Set temperature": "Definir temperatura",
+        "Heat": "Aquecer",
         "Set up your first printer": "Configure sua primeira impressora",
         "Setting light…": "Alternando a iluminação…",
         "Settings": "Configurações",
@@ -14804,6 +15413,15 @@ TRANSLATIONS = {
         "{time} left": "Tempo restante: {time}",
     },
     "ro": {
+        "While this tab is open": "Cât timp această filă este deschisă",
+        "Only during an active print": "Doar în timpul unei imprimări active",
+        "Waiting for part removal": "Așteaptă îndepărtarea piesei",
+        "Wait for part removal": "Așteaptă îndepărtarea piesei",
+        "Bed is clear": "Patul este liber",
+        "Chart layout": "Aspectul graficului",
+        "Shared scale": "Scară comună",
+        "Separate scales": "Scări separate",
+        "Select at least one temperature line.": "Selectați cel puțin o curbă de temperatură.",
         " · Total print time: {time}": " · Timp total de imprimare: {time}",
         "0 min": "0 min",
         "1 mm": "1 mm",
@@ -15261,6 +15879,7 @@ TRANSLATIONS = {
         "Serial number": "Număr de serie",
         "Serial number (required for Creator 5 / 5 Pro)": "Număr de serie (necesar pentru Creator 5 / 5 Pro)",
         "Set temperature": "Setează temperatura",
+        "Heat": "Încălzește",
         "Set up your first printer": "Configurați prima imprimantă",
         "Setting light…": "Se comută iluminarea…",
         "Settings": "Setări",
@@ -15386,6 +16005,15 @@ TRANSLATIONS = {
         "{time} left": "Timp rămas: {time}",
     },
     "ru": {
+        "While this tab is open": "Пока открыта эта вкладка",
+        "Only during an active print": "Только при активном задании",
+        "Waiting for part removal": "Ждёт снятия детали",
+        "Wait for part removal": "Ждать снятия детали",
+        "Bed is clear": "Стол свободен",
+        "Chart layout": "Вид графика",
+        "Shared scale": "Общая шкала",
+        "Separate scales": "Отдельные шкалы",
+        "Select at least one temperature line.": "Выберите хотя бы одну линию температуры.",
         " · Total print time: {time}": " · Общее время печати: {time}",
         "0 min": "0 мин.",
         "1 mm": "1 мм",
@@ -15584,6 +16212,7 @@ TRANSLATIONS = {
         "Gray": "Серый",
         "Green": "Зеленый",
         "Heat nozzle to 180 °C": "Нагрейте сопло до 180 °C.",
+        "Heat": "Нагреть",
         "Heat off": "Выключить нагрев",
         "Heat the nozzle to at least 180 °C.": "Нагрейте сопло минимум до 180 °C.",
         "Heating": "Нагрев",
@@ -15802,7 +16431,7 @@ TRANSLATIONS = {
         "Refresh": "Обновить",
         "Refresh the Creator printer's file list first.": "Сначала обновите список файлов принтера Creator.",
         "Refresh the file list and check the loaded materials.": "Обновите список файлов и проверьте загруженные материалы.",
-        "Release motors": "Разблокировать двигатели",
+        "Release motors": "Отпустить моторы",
         "Remove": "Удалить",
         "Replace Printer tab": "Заменить содержимое вкладки «Принтер»",
         "Request failed.": "Не удалось выполнить запрос.",
@@ -15968,6 +16597,15 @@ TRANSLATIONS = {
         "{time} left": "Осталось {time}",
     },
     "sv": {
+        "While this tab is open": "Medan den här fliken är öppen",
+        "Only during an active print": "Endast under en aktiv utskrift",
+        "Waiting for part removal": "Väntar på att delen tas bort",
+        "Wait for part removal": "Vänta tills delen tas bort",
+        "Bed is clear": "Byggplattan är fri",
+        "Chart layout": "Diagramlayout",
+        "Shared scale": "Gemensam skala",
+        "Separate scales": "Separata skalor",
+        "Select at least one temperature line.": "Välj minst en temperaturkurva.",
         " · Total print time: {time}": " · Total utskriftstid: {time}",
         "0 min": "0 min",
         "1 mm": "1 mm",
@@ -16425,6 +17063,7 @@ TRANSLATIONS = {
         "Serial number": "Serienummer",
         "Serial number (required for Creator 5 / 5 Pro)": "Serienummer (krävs för Creator 5 / 5 Pro)",
         "Set temperature": "Ställ in temperaturen",
+        "Heat": "Värm",
         "Set up your first printer": "Konfigurera din första skrivare",
         "Setting light…": "Växlar belysning…",
         "Settings": "Inställningar",
@@ -16550,6 +17189,15 @@ TRANSLATIONS = {
         "{time} left": "{time} kvar",
     },
     "th": {
+        "While this tab is open": "ขณะที่เปิดแท็บนี้",
+        "Only during an active print": "เฉพาะเมื่อมีงานพิมพ์ที่กำลังดำเนินการ",
+        "Waiting for part removal": "รอนำชิ้นงานออก",
+        "Wait for part removal": "รอให้นำชิ้นงานออก",
+        "Bed is clear": "แท่นพิมพ์ว่าง",
+        "Chart layout": "เค้าโครงกราฟ",
+        "Shared scale": "สเกลร่วม",
+        "Separate scales": "สเกลแยก",
+        "Select at least one temperature line.": "เลือกเส้นอุณหภูมิอย่างน้อยหนึ่งเส้น",
         " · Total print time: {time}": " · เวลาในการพิมพ์ทั้งหมด: {time}",
         "0 min": "0 นาที",
         "1 mm": "1 มม",
@@ -17007,6 +17655,7 @@ TRANSLATIONS = {
         "Serial number": "หมายเลขซีเรียล",
         "Serial number (required for Creator 5 / 5 Pro)": "หมายเลขซีเรียล (จำเป็นสำหรับ Creator 5 / 5 Pro)",
         "Set temperature": "ตั้งอุณหภูมิเป้าหมาย",
+        "Heat": "ให้ความร้อน",
         "Set up your first printer": "ตั้งค่าเครื่องพิมพ์เครื่องแรกของคุณ",
         "Setting light…": "กำลังสลับไฟในห้องพิมพ์…",
         "Settings": "การตั้งค่า",
@@ -17132,6 +17781,15 @@ TRANSLATIONS = {
         "{time} left": "เหลือ {time}",
     },
     "tr": {
+        "While this tab is open": "Bu sekme açıkken",
+        "Only during an active print": "Yalnızca etkin bir baskı işi sırasında",
+        "Waiting for part removal": "Parçanın çıkarılması bekleniyor",
+        "Wait for part removal": "Parçanın çıkarılmasını bekle",
+        "Bed is clear": "Tabla boş",
+        "Chart layout": "Grafik düzeni",
+        "Shared scale": "Ortak ölçek",
+        "Separate scales": "Ayrı ölçekler",
+        "Select at least one temperature line.": "En az bir sıcaklık çizgisi seçin.",
         " · Total print time: {time}": " · Toplam yazdırma süresi: {time}",
         "0 min": "0 dk",
         "1 mm": "1 mm",
@@ -17589,6 +18247,7 @@ TRANSLATIONS = {
         "Serial number": "Seri numarası",
         "Serial number (required for Creator 5 / 5 Pro)": "Seri numarası (Creator 5 / 5 Pro için gereklidir)",
         "Set temperature": "Sıcaklığı ayarla",
+        "Heat": "Isıt",
         "Set up your first printer": "İlk yazıcınızı kurun",
         "Setting light…": "Aydınlatma değiştiriliyor…",
         "Settings": "Ayarlar",
@@ -17714,6 +18373,15 @@ TRANSLATIONS = {
         "{time} left": "Kalan süre: {time}",
     },
     "uk": {
+        "While this tab is open": "Поки відкрита ця вкладка",
+        "Only during an active print": "Лише під час активного завдання",
+        "Waiting for part removal": "Чекає на зняття деталі",
+        "Wait for part removal": "Чекати на зняття деталі",
+        "Bed is clear": "Стіл вільний",
+        "Chart layout": "Вигляд графіка",
+        "Shared scale": "Спільна шкала",
+        "Separate scales": "Окремі шкали",
+        "Select at least one temperature line.": "Виберіть хоча б одну лінію температури.",
         " · Total print time: {time}": " · Загальний час друку: {time}",
         "0 min": "0 хв",
         "1 mm": "1 мм",
@@ -18171,6 +18839,7 @@ TRANSLATIONS = {
         "Serial number": "Серійний номер",
         "Serial number (required for Creator 5 / 5 Pro)": "Серійний номер (необхідний для Creator 5 / 5 Pro)",
         "Set temperature": "Задати температуру",
+        "Heat": "Нагріти",
         "Set up your first printer": "Налаштуйте свій перший принтер",
         "Setting light…": "Перемикання підсвічування…",
         "Settings": "Налаштування",
@@ -18296,6 +18965,15 @@ TRANSLATIONS = {
         "{time} left": "Залишилося {time}",
     },
     "vi": {
+        "While this tab is open": "Khi thẻ này đang mở",
+        "Only during an active print": "Chỉ khi có tác vụ in đang chạy",
+        "Waiting for part removal": "Đang chờ lấy chi tiết ra",
+        "Wait for part removal": "Chờ lấy chi tiết ra",
+        "Bed is clear": "Bàn in đã trống",
+        "Chart layout": "Bố cục biểu đồ",
+        "Shared scale": "Thang đo chung",
+        "Separate scales": "Thang đo riêng",
+        "Select at least one temperature line.": "Chọn ít nhất một đường nhiệt độ.",
         " · Total print time: {time}": " · Tổng thời gian in: {time}",
         "0 min": "0 phút",
         "1 mm": "1mm",
@@ -18753,6 +19431,7 @@ TRANSLATIONS = {
         "Serial number": "Số sê-ri",
         "Serial number (required for Creator 5 / 5 Pro)": "Số sê-ri (bắt buộc đối với Creator 5 / 5 Pro)",
         "Set temperature": "Đặt nhiệt độ",
+        "Heat": "Gia nhiệt",
         "Set up your first printer": "Thiết lập máy in đầu tiên của bạn",
         "Setting light…": "Đang chuyển trạng thái đèn…",
         "Settings": "Cài đặt",
@@ -18878,6 +19557,15 @@ TRANSLATIONS = {
         "{time} left": "Còn {time}",
     },
     "zh-CN": {
+        "While this tab is open": "此选项卡打开时",
+        "Only during an active print": "仅在有活动打印任务时",
+        "Waiting for part removal": "等待取下打印件",
+        "Wait for part removal": "等待取下打印件",
+        "Bed is clear": "热床已清空",
+        "Chart layout": "图表布局",
+        "Shared scale": "共用刻度",
+        "Separate scales": "分别设定刻度",
+        "Select at least one temperature line.": "请至少选择一条温度曲线。",
         " · Total print time: {time}": " ·总打印时间：{time}",
         "0 min": "0分钟",
         "1 mm": "1毫米",
@@ -19335,6 +20023,7 @@ TRANSLATIONS = {
         "Serial number": "序列号",
         "Serial number (required for Creator 5 / 5 Pro)": "序列号（Creator 5 / 5 Pro 必需）",
         "Set temperature": "设置目标温度",
+        "Heat": "加热",
         "Set up your first printer": "设置您的第一台打印机",
         "Setting light…": "正在切换照明…",
         "Settings": "设置",
@@ -19460,6 +20149,15 @@ TRANSLATIONS = {
         "{time} left": "剩余 {time}",
     },
     "zh-TW": {
+        "While this tab is open": "此分頁開啟時",
+        "Only during an active print": "僅在有進行中的列印工作時",
+        "Waiting for part removal": "等待取下列印件",
+        "Wait for part removal": "等待取下列印件",
+        "Bed is clear": "熱床已清空",
+        "Chart layout": "圖表配置",
+        "Shared scale": "共用刻度",
+        "Separate scales": "個別刻度",
+        "Select at least one temperature line.": "請至少選擇一條溫度曲線。",
         " · Total print time: {time}": " ·總列印時間：{time}",
         "0 min": "0分鐘",
         "1 mm": "1毫米",
@@ -19917,6 +20615,7 @@ TRANSLATIONS = {
         "Serial number": "序號",
         "Serial number (required for Creator 5 / 5 Pro)": "序號（Creator 5 / 5 Pro 必需）",
         "Set temperature": "設定目標溫度",
+        "Heat": "加熱",
         "Set up your first printer": "設定您的第一台印表機",
         "Setting light…": "正在切換照明…",
         "Settings": "設定",

@@ -1,5 +1,19 @@
 ﻿# Changelog
 
+## 1.14.0
+
+- Mark completed jobs as waiting for part removal in All printers. Keep the
+  state until the operator confirms the bed is clear. This can be turned off
+  in All printers settings.
+- Customize temperature plots in Monitor settings. Choose shared or separate
+  scales and visible readings and targets. Remember the selected time range.
+- Give Monitor, All printers, Printer Files, and Print History independent
+  settings pages alongside Appearance and Connection.
+- Combine print history across configured and archived printers. Filter by
+  printer or open a printer's history directly from Monitor.
+- Use the same compact job card in Monitor and All printers, with a model
+  preview, camera controls and the print status together.
+
 ## 1.13.1
 
 - Correct printer terminology across the translated interface, including axis movement, homing, and heating.

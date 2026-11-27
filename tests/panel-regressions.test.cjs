@@ -155,6 +155,18 @@ test('temperature trend compares recent readings with the selected nozzle five m
   assert.equal(nodes.chartTrend.textContent, 'Collecting readings…');
 });
 
+test('temperature axes can focus on separate heater values and exclude hidden targets', () => {
+  const context = panelContext();
+  vm.runInContext(section('function temperatureAxis', 'function drawTemperaturePlot'), context);
+  const samples = [{nozzle:218,bed:59,bedTarget:100}, {nozzle:221,bed:61,bedTarget:100}];
+  const nozzle = [{field:'nozzle'}], bed = [{field:'bed'}];
+  const axis = (series, separate) => JSON.parse(JSON.stringify(context.temperatureAxis(samples, series, separate)));
+  assert.deepEqual(axis([...nozzle,...bed], false), {min:0,max:250,steps:4});
+  assert.deepEqual(axis(nozzle, true), {min:215,max:225,steps:2});
+  assert.deepEqual(axis(bed, true), {min:55,max:65,steps:2});
+  assert.deepEqual(axis([{field:'missing'}], true), {min:0,max:100,steps:4});
+});
+
 test('calibration shows the requested operation and only animates a confirmed run', async () => {
   const ids = ['calibrationStatus','calibrationProgress','calibrationMessage','manualPanel','manualActivity',
     'manualState','manualHomeNotice','manualResult','manualBody','manualTimer','zPart','xyPosition','zPosition',

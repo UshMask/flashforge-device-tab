@@ -48,7 +48,7 @@ class LocalizationTests(unittest.TestCase):
         for language, heading in [("ru", "Оси"), ("fr", "Axes"), ("uk", "Осі")]:
             with self.subTest(language=language):
                 page = plugin.render_page(plugin.PAGE, language, printer="FlashForge")
-                self.assertIn(f'id="axesTitle">{heading}</h3>', page)
+                self.assertIn(f'data-group="motion" aria-label="{heading}"', page)
 
     def test_override_applies_to_http_pages_without_changing_host_locale(self):
         config = {"language": "zh_TW"}

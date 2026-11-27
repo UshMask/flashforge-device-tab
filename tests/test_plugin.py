@@ -369,6 +369,68 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual((stats["jobs"], stats["complete"], stats["seconds"]), (1, 1, 400))
 
 
+class FleetHistoryTests(unittest.TestCase):
+    def test_combines_live_jobs_and_archives_without_counting_stale_prints(self):
+        with tempfile.TemporaryDirectory() as folder:
+            storage = Path(folder)
+            config = {"printers": [{"host": "192.168.1.4", "name": "Studio", "code": "fixture"}]}
+            server = object.__new__(plugin.LoopbackServer)
+            server.configure(lambda: config, storage)
+            server.remember_history_names([{"host": "192.168.1.7", "name": "Workshop"}])
+            server.configure(lambda: config, storage)
+            completed = {"started": 200, "ended": 230, "elapsed": 30, "result": "complete", "file": "Part.3mf"}
+            (storage / "flashforge-192.168.1.4-history.json").write_text(json.dumps([completed]), encoding="utf-8")
+            (storage / "flashforge-192.168.1.7-history.json").write_text(json.dumps([
+                {**completed, "result": "active", "seen": 230},
+            ]), encoding="utf-8")
+            (storage / "flashforge-192.168.1.8-history.json").write_text("damaged", encoding="utf-8")
+            (storage / "flashforge-192.168.1.9-history.json").write_text(json.dumps([completed]), encoding="utf-8")
+            server.monitors["192.168.1.4"] = SimpleNamespace(
+                state_lock=threading.Lock(), history_error="",
+                history_snapshot=[{**completed, "file": "Live.3mf"}],
+            )
+            data = server.history_payload()
+            printers = {printer["host"]: printer for printer in data["printers"]}
+            self.assertEqual(printers["192.168.1.4"]["jobs"][0]["file"], "Live.3mf")
+            self.assertEqual(printers["192.168.1.7"]["name"], "Workshop")
+            self.assertEqual(printers["192.168.1.7"]["jobs"][0]["result"], "unknown")
+            self.assertEqual(plugin.PrintHistory(storage / "flashforge-192.168.1.7-history.json").jobs[0]["result"], "active")
+            self.assertTrue(printers["192.168.1.8"]["error"])
+            self.assertEqual(printers["192.168.1.9"]["name"], "192.168.1.9")
+            self.assertEqual((data["stats"]["jobs"], data["stats"]["complete"], data["stats"]["seconds"]), (3, 2, 90))
+            self.assertNotIn("code", printers["192.168.1.4"])
+
+
+class BedConfirmationTests(unittest.TestCase):
+    def test_clearance_persists_and_is_specific_to_the_completed_job(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config = {"printers": [{"host": "192.168.1.4", "name": "Studio"}]}
+            storage = Path(folder)
+            host = config["printers"][0]["host"]
+            server = object.__new__(plugin.LoopbackServer)
+            completed = {"started": 100, "ended": 200, "result": "complete", "file": "Part.3mf"}
+            monitor = SimpleNamespace(state_lock=threading.Lock(), latest={"state": "READY", "active": False},
+                                      error="", camera_url="", history_snapshot=[completed])
+            server.configure(lambda: config, storage)
+            server.monitors[host] = monitor
+            token = server.fleet_payload()[0]["bedClearToken"]
+            self.assertTrue(server.confirm_bed_clear(host, token))
+            self.assertTrue(server.confirm_bed_clear(host, token))
+            server.configure(lambda: config, storage)
+            server.monitors[host] = monitor
+            self.assertNotIn("bedClearToken", server.fleet_payload()[0])
+            monitor.history_snapshot = [{**completed, "started": 210, "ended": 300}, completed]
+            self.assertNotEqual(server.fleet_payload()[0]["bedClearToken"], token)
+            self.assertFalse(server.confirm_bed_clear(host, token))
+            new_token = server.fleet_payload()[0]["bedClearToken"]
+            monitor.latest = {"state": "PRINTING", "active": True}
+            self.assertFalse(server.confirm_bed_clear(host, new_token))
+            self.assertNotIn("bedClearToken", server.fleet_payload()[0])
+            monitor.latest = {"state": "READY", "active": False}
+            monitor.history_snapshot.insert(0, {**completed, "result": "cancelled"})
+            self.assertNotIn("bedClearToken", server.fleet_payload()[0])
+
+
 class ServerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -607,6 +669,16 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(data["printers"][0]["code"], "code")
         self.assertEqual(data["endpoint"], "127.0.0.1")
         self.assertEqual(data["placement"], "flashforge")
+
+    def test_history_endpoint_keeps_archived_jobs_without_a_configured_printer(self):
+        archive = Path(self.folder.name) / "flashforge-192.168.1.7-history.json"
+        archive.write_text(json.dumps([{"started": 100, "result": "complete", "file": "Saved.3mf"}]), encoding="utf-8")
+        self.config.clear()
+        status, body, _ = request(plugin.WEB_PORT, "/flashforge/history")
+        self.assertEqual(status, 200)
+        self.assertEqual(self.server.printers(), [])
+        saved = next(printer for printer in json.loads(body)["printers"] if printer["host"] == "192.168.1.7")
+        self.assertEqual(saved["jobs"][0]["file"], "Saved.3mf")
 
     def test_separate_tab_uses_configured_printers_and_obeys_placement(self):
         def reject_preset(host):
@@ -860,6 +932,58 @@ class ManualTransportTests(unittest.TestCase):
         self.position = b"X:0 Y:0 A:0\r\nok\r\n"
         self.assertEqual(self.adapter.status(True)["manual"]["travelLimited"], [])
 
+    def test_5m_canceled_job_retains_history_and_restores_confirmed_tcp_controls(self):
+        monitor = self.server.monitors["127.0.0.1"]
+        now = int(time.time())
+        self.printer.state = "BUILDING_FROM_SD"
+        self.printer.detail["status"] = "printing"
+        monitor.history.observe(self.adapter.status(True), now)
+
+        self.printer.state = "READY"
+        self.printer.detail["status"] = "cancelled"
+        status = self.adapter.status(True)
+        monitor.history.observe(status, now + 1)
+        self.assertEqual(status["status"], "Canceled")
+        self.assertFalse(status["active"])
+        self.assertEqual(monitor.history.jobs[0]["result"], "cancelled")
+        self.assertIn("heat0", status["manual"]["allowed"])
+        self.assertIn("x+1", status["manual"]["allowed"])
+        self.assertNotIn("level", status["manual"]["allowed"])
+        self.assertNotIn("release", status["manual"]["allowed"])
+        self.act("x+1")
+        self.assertEqual(self.commands[-2:], ["G1 X101.000 F300", "M602"])
+
+        self.printer.detail["status"] = "ready"
+        status = self.adapter.status(True)
+        self.assertEqual(status["status"], "Ready")
+        self.assertIn("level", status["manual"]["allowed"])
+
+    def test_5m_cancel_keeps_controls_locked_without_confirmed_idle_axes(self):
+        for state, detail_state, move_mode, error in (
+            ("CANCELING", "cancel", "READY", None),
+            ("CANCELED", "canceled", "READY", None),
+            ("READY", "canceled", "MOVING", None),
+            ("READY", "canceled", "", None),
+            ("READY", "canceled", "READY", "E1"),
+        ):
+            with self.subTest(state=state, detail=detail_state, motion=move_mode, error=error):
+                self.printer.state = state
+                self.printer.detail.update(status=detail_state, errorCode=error)
+                self.move_mode = move_mode
+                self.assertEqual(self.adapter.status(True)["manual"]["allowed"], [])
+                self.commands.clear()
+                with self.assertRaises(ValueError):
+                    self.act("x+1")
+                self.assertNotIn("M601 S1", self.commands)
+
+        self.printer.state = "READY"
+        self.printer.detail.update(status="canceled", errorCode=None)
+        self.control_state = "CANCELING"  # State changed when acquiring manual control.
+        self.commands.clear()
+        with self.assertRaisesRegex(plugin.ManualAxesBusy, "must be idle"):
+            self.act("x+1")
+        self.assertEqual(self.commands[-3:], ["M601 S1", "M119", "M602"])
+
     def test_5m_jog_and_reject_out_of_bounds_pause_or_denied_control(self):
         self.act("x-10")
         self.assertEqual(self.commands[-6:], ["M601 S1", "M119", "M114", "G90", "G1 X90.000 F300", "M602"])
@@ -1014,6 +1138,20 @@ class ManualTransportTests(unittest.TestCase):
             clock.return_value += 11
             monitor.update_manual_home(parked)
         self.assertFalse(monitor.manual_release_marker.is_file())
+
+    def test_5m_release_home_confirms_ready_at_final_park_without_a_motion_sample(self):
+        monitor = self.server.monitors["127.0.0.1"]
+        self.act("release")
+        self.act("home")
+        self.position = b"X:110.025 Y:110.062 Z:25 A:0\r\nok\r\n"
+        monitor.update_manual_home(self.adapter.status(True))
+        self.assertTrue(monitor.manual_release_marker.is_file())
+        self.position = b"X:110.025 Y:110.062 Z:220 A:0\r\nok\r\n"
+        status = self.adapter.status(True)
+        self.assertEqual(status["sensors"]["moveMode"], "READY")
+        monitor.update_manual_home(status)
+        self.assertFalse(monitor.manual_release_marker.is_file())
+        self.assertIn("x-1", monitor.manual_controls_view(status["manual"], status)["allowed"])
 
     def test_released_filament_with_stale_homing_requires_stable_park(self):
         monitor = self.server.monitors["127.0.0.1"]
@@ -1238,14 +1376,18 @@ class ManualTransportTests(unittest.TestCase):
 
     def test_nozzle_heat_feed_cool_cycle(self):
         actual, target = 25, 0
+        stale_target = None
         previous = self.printer.reply
         def thermal(cmd):
-            nonlocal target
+            nonlocal target, stale_target
             if cmd.startswith("M104 S"):
+                stale_target = target
                 target = int(cmd[6:])
                 return b"ok\r\n"
             if cmd == "M105":
-                return f"T0:{actual}/{target} B:25/0\r\nok\r\n".encode()
+                reported = target if stale_target is None else stale_target
+                stale_target = None
+                return f"T0:{actual}/{reported} B:25/0\r\nok\r\n".encode()
             return previous(cmd)
         self.printer.reply = thermal
         self.act("release")
