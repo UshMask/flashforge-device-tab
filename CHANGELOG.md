@@ -1,5 +1,11 @@
 ﻿# Changelog
 
+## 1.13.1
+
+- Correct printer terminology across the translated interface, including axis movement, homing, and heating.
+- Fix wording for print jobs, build plates, filament, and sliced .3mf files.
+- Translate compact nozzle and bed readings, door status, and the message shown while waiting for readings.
+
 ## 1.13.0
 
 - Add **Appearance** settings to the plugin panel. Choose the theme and layout
