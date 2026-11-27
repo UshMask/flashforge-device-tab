@@ -12,6 +12,7 @@ env:
   # OrcaCloud wants a target suffix in the file name: name_win_x86_64.py
   PLUGIN_FILE: "flashforge_device_tab.py"
   PLUGIN_TARGET: "flashforge_device_tab_win_x86_64.py"
+  DESCRIPTION_FILE: "docs/orca-cloud.md"
 
 jobs:
   publish:
@@ -28,7 +29,9 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           changelog="$(jq -r '.release.body // ""' "$GITHUB_EVENT_PATH" | head -c 4000)"
           metadata="$(jq -cn --arg version "$version" --arg changelog "$changelog" \
-            '{version: $version} + (if $changelog == "" then {} else {changelog: $changelog} end)')"
+            --rawfile description "$DESCRIPTION_FILE" --arg description_path "$DESCRIPTION_FILE" \
+            '{version: $version, description: $description, description_path: $description_path}
+              + (if $changelog == "" then {} else {changelog: $changelog} end)')"
           status="$(curl -sS -o response.json -w '%{http_code}' \
             -H "Authorization: Bearer $oidc_token" \
             -F "metadata=$metadata" \

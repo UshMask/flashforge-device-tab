@@ -5,6 +5,7 @@ The fixture printer speaks the same TCP and HTTP dialects as an Adventurer 5M,
 so the plugin is exercised end to end without a real machine.
 """
 import base64
+import io
 import json
 import socket
 import sys
@@ -12,11 +13,13 @@ import tempfile
 import threading
 import time
 import unittest
+import zipfile
 from http.client import HTTPConnection
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.parse import urlencode
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -63,6 +66,17 @@ def file_list(*paths):
 
 def image_frame(image=PNG):
     return b"**\xa2\xa2" + len(image).to_bytes(4, "big") + image
+
+
+def sliced_source():
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w") as bundle:
+        bundle.writestr("Metadata/plate_1.gcode", "; fixture plate")
+        bundle.writestr("Metadata/slice_info.config", '<config><plate>'
+                        '<filament id="1" type="PLA" color="#112233"/>'
+                        '<filament id="3" type="PETG" color="#445566"/>'
+                        '</plate></config>')
+    return stream.getvalue()
 
 
 class FakePrinter:
@@ -177,6 +191,38 @@ def request(port, path, method="GET", headers=None, body=None):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_upload_multipart_has_storage_only_flag_and_exact_length(self):
+        content = b"; Storage-only upload fixture\n"
+        with patch.object(plugin.http.client, "HTTPConnection") as factory:
+            connection = factory.return_value
+            response = connection.getresponse.return_value
+            response.status = 200
+            response.read.return_value = b'{"code":0}'
+            transmitted = []
+            connection.request.side_effect = lambda method, path, chunks, headers: transmitted.append(
+                (method, path, b"".join(chunks), headers))
+            plugin.upload_flashforge_file("127.0.0.1", "serial", "code", "Test.gcode",
+                                         io.BytesIO(content), len(content), lambda: None)
+        method, path, body, headers = transmitted[0]
+        self.assertEqual((method, path), ("POST", "/uploadGcode"))
+        self.assertEqual(headers["printNow"], "false")
+        self.assertEqual(headers["fileSize"], str(len(content)))
+        self.assertEqual(int(headers["Content-Length"]), len(body))
+        self.assertIn(b'name="gcodeFile"; filename="Test.gcode"', body)
+        self.assertIn(content, body)
+
+    def test_discovery_decodes_flashforge_big_endian_and_deduplicates(self):
+        packet = bytearray(276)
+        packet[0x86:0x8a] = bytes.fromhex("2b710029")
+        packet[0x92:0x98] = b"SN-C5P"
+        with patch.object(plugin.socket, "socket") as socket_factory:
+            sock = socket_factory.return_value.__enter__.return_value
+            sock.recvfrom.side_effect = [(packet, ("192.168.1.12", 48899)), (packet, ("192.168.1.12", 48899)),
+                                         (packet, ("8.8.8.8", 48899)), (b"short", ("192.168.1.13", 48899)),
+                                         socket.timeout()]
+            self.assertEqual(plugin.discover_printers(), [{"host": "192.168.1.12", "name": "Creator 5 Pro", "serial": "SN-C5P"}])
+            sock.sendto.assert_called_once_with(b"\0", ("255.255.255.255", 48899))
+
     def test_ifs_slots_are_ordered_and_missing_slots_stay_unknown(self):
         detail = {"matlStationInfo": {"slotCnt": 4, "currentSlot": 2, "slotInfos": [
             {"slotId": 4, "hasFilament": False},
@@ -277,6 +323,23 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(len(history.jobs), 1)
             self.assertEqual(history.jobs[0]["result"], "complete")
             self.assertEqual(history.jobs[0]["elapsed"], 52)
+
+    def test_job_activity_persists_and_records_each_connection_change_once(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "history.json"
+            history = plugin.PrintHistory(path)
+            history.observe(self.status("PRINTING", "Cube", 20, 2), 1000)
+            self.assertTrue(history.connection_lost(1005))
+            self.assertFalse(history.connection_lost(1006))
+            history = plugin.PrintHistory(path)
+            history.observe(self.status("PAUSED", "Cube", 26, 2), 1010)
+            history.observe(self.status("PRINTING", "Cube", 27, 2), 1020)
+            history.observe(self.status("COMPLETED", "Cube", 40, 5), 1035)
+            job = plugin.PrintHistory(path).jobs[0]
+            self.assertEqual(job["events"], [
+                [980, "Printing started"], [1005, "Connection lost"], [1010, "Connection restored"],
+                [1010, "Print paused"], [1020, "Print resumed"], [1035, "Print completed"],
+            ])
 
     def test_gap_ends_job(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -445,6 +508,56 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(headers["Content-Type"], "image/png")
         self.assertEqual(image[:8], plugin.PNG_HEADER)
 
+    def test_upload_uses_storage_only_and_verifies_the_new_file_and_ready_state(self):
+        self.addCleanup(setattr, self.printer, "files", self.printer.files)
+        self.addCleanup(setattr, self.printer, "state", self.printer.state)
+        old_detail = self.printer.detail.copy()
+        self.addCleanup(setattr, self.printer, "detail", old_detail)
+        self.printer.state = "READY"
+        self.printer.detail["status"] = "ready"
+        data = b"; Storage-only upload fixture\n"
+        headers = {"Origin": f"http://127.0.0.1:{plugin.WEB_PORT}", "X-FlashForge-Tab-Action": "upload-file"}
+        calls = []
+
+        def upload(host, serial, check_code, name, stream, length, available):
+            available()
+            calls.append((name, stream.read(), length))
+            self.printer.files = [*self.printer.files, "/user/" + name]
+
+        with patch.object(plugin, "upload_flashforge_file", side_effect=upload):
+            status, body, _ = request(plugin.WEB_PORT, self.url("upload-file?name=Upload.gcode"), "POST", headers, data)
+            self.assertEqual(status, 200, body)
+            self.assertEqual(json.loads(body), {"file": "Upload.gcode", "state": "READY"})
+            status, body, _ = request(plugin.WEB_PORT, self.url("upload-file?name=Upload.gcode"), "POST", headers, data)
+            self.assertEqual(status, 400)
+            self.assertIn(b"already exists", body)
+            self.printer.state = "BUILDING_FROM_SD"
+            self.printer.detail["status"] = "printing"
+            status, body, _ = request(plugin.WEB_PORT, self.url("upload-file?name=Busy.gcode"), "POST", headers, data)
+            self.assertEqual(status, 400)
+            self.assertIn(b"must be idle", body)
+        self.assertEqual(calls, [("Upload.gcode", data, len(data))])
+        _, body, _ = request(plugin.WEB_PORT, self.url("files"))
+        self.assertEqual(json.loads(body)["files"][0]["name"], "Upload.gcode")
+        monitor = self.server.monitors["127.0.0.1"]
+        restored = plugin.PrinterMonitor(monitor.adapter, monitor.history.path)
+        self.assertEqual(next(iter(restored.update_file_catalog(restored.adapter.files()).values()))[0], "Upload.gcode")
+
+    def test_file_refresh_promotes_new_entries_without_reordering_known_files(self):
+        self.addCleanup(setattr, self.printer, "files", self.printer.files)
+
+        def file_names():
+            status, body, _ = request(plugin.WEB_PORT, self.url("files"))
+            self.assertEqual(status, 200)
+            return [entry["name"] for entry in json.loads(body)["files"]]
+
+        self.assertEqual(file_names(), ["Fixture.3mf", "Second.3mf"])
+        self.printer.files = ["/user/Second.3mf", "/user/Fixture.3mf", "/user/New.3mf"]
+        self.assertEqual(file_names(), ["New.3mf", "Fixture.3mf", "Second.3mf"])
+        self.assertEqual(file_names(), ["New.3mf", "Fixture.3mf", "Second.3mf"])
+        self.printer.files = ["/user/Second.3mf", "/user/New.3mf", "/user/Later.3mf"]
+        self.assertEqual(file_names(), ["Later.3mf", "New.3mf", "Second.3mf"])
+
     def test_telemetry_has_chart_and_history(self):
         status, body, _ = request(plugin.WEB_PORT, self.url("telemetry"))
         data = json.loads(body)
@@ -466,6 +579,26 @@ class ServerTests(unittest.TestCase):
         status, _, _ = request(plugin.WEB_PORT, self.url("status"))
         self.assertEqual(status, 200)
 
+    def test_discover_and_test_unsaved_printer_are_loopback_actions(self):
+        origin = f"http://127.0.0.1:{plugin.WEB_PORT}"
+        device = {"host": "192.168.1.12", "serial": "SN-C5P", "name": "Creator 5 Pro"}
+        with patch.object(plugin, "discover_printers", return_value=[device]) as discover:
+            denied, _, _ = request(plugin.WEB_PORT, self.url("discover"), "POST",
+                                   {"Origin": "https://example.com", "X-FlashForge-Tab-Action": "discover"})
+            self.assertEqual(denied, 403)
+            discover.assert_not_called()
+            status, body, _ = request(plugin.WEB_PORT, self.url("discover"), "POST",
+                                      {"Origin": origin, "X-FlashForge-Tab-Action": "discover"})
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body)["printers"], [device])
+        with patch.object(plugin.FlashForge, "status", return_value={"info": {"model": device["name"]}, "transport": "HTTP"}):
+            status, body, _ = request(plugin.WEB_PORT, self.url("test-printer"), "POST",
+                                      {"Origin": origin, "X-FlashForge-Tab-Action": "test-printer"},
+                                      json.dumps({**device, "code": "demo"}))
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body), {"model": device["name"], "transport": "HTTP"})
+            self.assertFalse(self.applied)
+
     def test_settings_get(self):
         status, body, _ = request(plugin.WEB_PORT, self.url("settings"))
         data = json.loads(body)
@@ -473,7 +606,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(data["printers"][0]["host"], "127.0.0.1")
         self.assertEqual(data["printers"][0]["code"], "code")
         self.assertEqual(data["endpoint"], "127.0.0.1")
-        self.assertEqual(data["placement"], "device")
+        self.assertEqual(data["placement"], "flashforge")
 
     def test_separate_tab_uses_configured_printers_and_obeys_placement(self):
         def reject_preset(host):
@@ -481,6 +614,7 @@ class ServerTests(unittest.TestCase):
 
         self.server.check_view = reject_preset
         path = "/flashforge/status"
+        self.server.placement = "device"
         status, _, _ = request(plugin.WEB_PORT, path)
         self.assertEqual(status, 409)
         self.server.placement = "flashforge"
@@ -596,6 +730,20 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(json.loads(body)["state"], "PAUSED")
         self.assertEqual(self.acted, [("127.0.0.1", "pause")])
 
+    def test_out_of_range_manual_action_reports_travel_limit(self):
+        def act(host, action):
+            return plugin.checked_manual_target(action.removeprefix("manual/"), 110, (220, 220, 220), "5m")
+
+        with patch.object(self.server, "act", act):
+            status, body, _ = request(plugin.WEB_PORT, self.url("action"), method="POST",
+                                      headers={"Origin": f"http://{plugin.WEB_HOST}:{plugin.WEB_PORT}",
+                                               "Content-Type": "application/json",
+                                               "X-FlashForge-Tab-Action": "action"},
+                                      body=json.dumps({"action": "manual/x+1"}))
+        self.assertEqual(status, 409)
+        self.assertEqual(json.loads(body), {"code": "travel_limit",
+                                            "error": "X move exceeds the axis travel limits (-110 to 110 mm)."})
+
     def test_telemetry_has_stats(self):
         status, body, _ = request(plugin.WEB_PORT, self.url("telemetry"))
         data = json.loads(body)
@@ -631,9 +779,13 @@ class ManualTransportTests(unittest.TestCase):
         self.printer.state = "READY"
         self.printer.detail.update(status="ready", pid="0023")
         self.model = "FlashForge Adventurer 5M"
+        self.volume = (220, 220, 220)
         self.commands = []
         self.grant = True
         self.control_state = "READY"
+        self.move_mode = "READY"
+        self.position = b"X:100 Y:20 Z:5 A:0\r\nok\r\n"
+        self.jog_reply = None
         original = self.printer.reply
 
         def reply(cmd):
@@ -641,11 +793,18 @@ class ManualTransportTests(unittest.TestCase):
             if cmd == "M601 S1":
                 return b"Control Success V2.1.\r\nok\r\n" if self.grant else b"Control Failed.\r\nok\r\n"
             if cmd == "M119" and self.commands[-2:] == ["M601 S1", "M119"]:
-                return f"MachineStatus: {self.control_state}\r\nok\r\n".encode()
+                return f"MachineStatus: {self.control_state}\r\nMoveMode: {self.move_mode}\r\nok\r\n".encode()
             if cmd == "M114":
-                return b"X:100 Y:20 Z:5 A:0\r\nok\r\n"
+                return self.position
+            if cmd.startswith("G1 X") and self.jog_reply is not None:
+                return self.jog_reply
             if cmd == "M115":
-                return original(cmd).replace(b"Flashforge Adventurer 5M", self.model.encode())
+                x, y, z = self.volume
+                return original(cmd).replace(b"Flashforge Adventurer 5M", self.model.encode()).replace(
+                    b"X: 220 Y: 220 Z: 220", f"X: {x} Y: {y} Z: {z}".encode()
+                )
+            if cmd == "M119":
+                return original(cmd).replace(b"ok\r\n", f"MoveMode: {self.move_mode}\r\nok\r\n".encode())
             return original(cmd)
         self.printer.reply = reply
         storage = tempfile.TemporaryDirectory()
@@ -662,6 +821,45 @@ class ManualTransportTests(unittest.TestCase):
     def act(self, key):
         return self.service.act("127.0.0.1", "manual/" + key)
 
+    def test_stored_print_routes_and_busy_guard(self):
+        monitor = self.server.monitors["127.0.0.1"]
+        monitor.files = self.adapter.files()
+        file_id = next(iter(monitor.files))
+        name = monitor.files[file_id][0]
+        for model in ("Flashforge Adventurer III", "Flashforge Adventurer 4 Pro",
+                      "Flashforge Adventurer 5M", "AD5X"):
+            with self.subTest(model=model):
+                self.model = model
+                monitor.print_request_until = 0
+                current = self.adapter.status(True)
+                current["info"]["model"] = model
+                current["materials"] = [{"id": 1, "name": "PLA", "color": "#334455", "present": True}]
+                mapped = model == "AD5X"
+                action = "print/" + file_id + "/0/" + ("1000" if mapped else "")
+                with patch.object(self.adapter, "status", return_value=current), patch.object(plugin, "printer_api", return_value={}) as http:
+                    self.service.act("127.0.0.1", action)
+                    if model.endswith(("III", "4 Pro")):
+                        self.assertIn("M23 0:/user/" + name, self.commands)
+                    else:
+                        args = http.call_args.args
+                        self.assertEqual(args[3], "/printGcode")
+                        self.assertEqual(args[4]["fileName"], name)
+                        if mapped:
+                            self.assertEqual(args[4]["materialMappings"][0]["slotId"], 1)
+                    with self.assertRaisesRegex(ValueError, "already sent"):
+                        self.service.act("127.0.0.1", action)
+                    current["state"] = "PRINTING"
+                    with self.assertRaisesRegex(ValueError, "idle"):
+                        self.service.act("127.0.0.1", action)
+
+    def test_5m_warns_for_only_the_steps_that_would_cross_a_limit(self):
+        self.position = b"X:107.037 Y:-108.037 Z:220.000 A:0\r\nok\r\n"
+        controls = self.adapter.status(True)["manual"]
+        self.assertEqual(set(controls["travelLimited"]), {"x+10", "y-10", "z+1", "z+10"})
+        self.assertTrue(set(controls["travelLimited"]).issubset(controls["allowed"]))
+        self.position = b"X:0 Y:0 A:0\r\nok\r\n"
+        self.assertEqual(self.adapter.status(True)["manual"]["travelLimited"], [])
+
     def test_5m_jog_and_reject_out_of_bounds_pause_or_denied_control(self):
         self.act("x-10")
         self.assertEqual(self.commands[-6:], ["M601 S1", "M119", "M114", "G90", "G1 X90.000 F300", "M602"])
@@ -671,6 +869,361 @@ class ManualTransportTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.act(key)
             self.assertFalse(any(c.startswith(("G1 ", "G28")) for c in self.commands))
+        with self.assertRaisesRegex(ValueError, "Printer denied manual control"):
+            self.act("home")
+
+    def test_5m_release_persists_until_home_completes(self):
+        host = "127.0.0.1"
+        monitor = self.server.monitors[host]
+        status = self.adapter.status(True)
+        self.commands.clear()
+        self.assertEqual(self.act("release"), "Motor release sent.")
+        self.assertEqual(self.commands[-4:], ["M601 S1", "M119", "M18", "M602"])
+
+        monitor = plugin.PrinterMonitor(self.adapter, monitor.history.path)
+        self.server.monitors[host] = monitor
+        controls = status["manual"]
+        self.assertTrue(monitor.manual_controls_view(controls)["released"])
+        self.assertIn("home", monitor.manual_controls_view(controls)["allowed"])
+        for key in ("x+1", "z+1", "level", "release"):
+            with self.subTest(key=key):
+                self.commands.clear()
+                with self.assertRaises(ValueError):
+                    self.act(key)
+                self.assertFalse(any(code.startswith(("G1 ", "G28", "M18")) for code in self.commands))
+
+        for key in ("e+10", "e-10"):
+            self.assertIn(key, monitor.manual_controls_view(controls, status)["allowed"])
+            self.act(key)
+        self.assertIn("Waiting", self.act("home"))
+        self.assertEqual(self.commands[-2:], ["G28", "M602"])
+        for key in ("e+10", "e-10"):
+            with self.assertRaises(ValueError):
+                self.act(key)
+        self.assertTrue(monitor.manual_controls_view(controls)["releaseHoming"])
+        with self.assertRaises(ValueError):
+            self.act("home")
+        monitor.update_manual_home(status)
+        self.assertTrue(monitor.manual_release_marker.is_file())
+        monitor.update_manual_home({**status, "state": "BUSY", "sensors": {"moveMode": "HOMING"}})
+        self.assertTrue(monitor.manual_release_marker.is_file())
+        monitor.update_manual_home(status)
+        self.assertFalse(monitor.manual_release_marker.is_file())
+        self.act("x+1")
+        self.assertEqual(self.commands[-2:], ["G1 X101.000 F300", "M602"])
+
+    def test_5m_release_checks_idle_and_does_not_clear_lock_after_failed_home(self):
+        monitor = self.server.monitors["127.0.0.1"]
+        self.move_mode = "MOVING"
+        with self.assertRaisesRegex(ValueError, "must be idle"):
+            self.act("release")
+        self.assertNotIn("M18", self.commands)
+        self.assertFalse(monitor.manual_release_marker.is_file())
+        self.move_mode = "WAIT_ON_TOOL"
+        with self.assertRaisesRegex(ValueError, "did not confirm that the axes are idle"):
+            self.act("release")
+        self.assertNotIn("M18", self.commands)
+        self.assertFalse(monitor.manual_release_marker.is_file())
+        self.move_mode = "READY"
+        self.act("release")
+        self.act("home")
+        status = self.adapter.status(True)
+        monitor.update_manual_home({**status, "state": "BUSY", "sensors": {"moveMode": "HOMING"}})
+        monitor.update_manual_home({**status, "state": "ERROR"})
+        monitor.update_manual_home(status)
+        self.assertTrue(monitor.manual_release_marker.is_file())
+        self.assertIn("home", monitor.manual_controls_view(status["manual"])["allowed"])
+        with self.assertRaises(plugin.ManualHomeRequired):
+            self.act("x+1")
+
+    def test_5m_release_home_recovers_after_lost_reply_and_poll(self):
+        monitor = self.server.monitors["127.0.0.1"]
+        self.act("release")
+        original_command = plugin.command
+
+        def lose_home_reply(sock, code, *args):
+            reply = original_command(sock, code, *args)
+            if code == "G28":
+                raise TimeoutError("Lost the G28 reply")
+            return reply
+
+        with patch.object(plugin, "command", side_effect=lose_home_reply):
+            with self.assertRaises(TimeoutError):
+                self.act("home")
+        self.assertEqual(self.commands[-2:], ["G28", "M602"])
+        status = self.adapter.status(True)
+        controls = status["manual"]
+        self.assertTrue(monitor.manual_controls_view(controls)["releaseHoming"])
+        with patch.object(plugin.time, "monotonic", return_value=monitor.manual_home_until - 30) as clock:
+            parked = {**status, "sensors": {"moveMode": "HOMING", "homingPark": (110, 110, 220)}}
+            monitor.update_manual_home(parked)
+            clock.return_value += 11
+            monitor.update_manual_home(parked)
+            self.assertTrue(monitor.manual_release_marker.is_file())
+            monitor.update_manual_home({**status, "state": "BUSY", "sensors": {"moveMode": "HOMING"}})
+            with patch.object(self.adapter, "status", side_effect=TimeoutError):
+                monitor.sample(0)
+            self.assertTrue(monitor.manual_controls_view(controls)["releaseHoming"])
+            monitor.update_manual_home(status)
+        self.assertFalse(monitor.manual_release_marker.is_file())
+        self.act("x+1")
+        self.act("z+1")
+        self.assertIn("G1 X101.000 F300", self.commands)
+        self.assertIn("G1 Z6.000 F300", self.commands)
+
+    def test_5m_release_home_confirms_parked_when_session_close_fails(self):
+        monitor = self.server.monitors["127.0.0.1"]
+        self.act("release")
+        original_command = plugin.command
+
+        def lose_close_reply(sock, code, *args):
+            reply = original_command(sock, code, *args)
+            if code == "M602":
+                raise TimeoutError("Lost the M602 reply")
+            return reply
+
+        with patch.object(plugin, "command", side_effect=lose_close_reply):
+            with self.assertRaises(TimeoutError):
+                self.act("home")
+        status = self.adapter.status(True)
+        parked = {**status, "sensors": {"moveMode": "HOMING", "homingPark": (110, 110, 220)}}
+        with patch.object(plugin.time, "monotonic", return_value=monitor.manual_home_until - 30) as clock:
+            monitor.update_manual_home(parked)
+            self.assertTrue(monitor.manual_release_marker.is_file())
+            clock.return_value += 11
+            monitor.update_manual_home(parked)
+        self.assertFalse(monitor.manual_release_marker.is_file())
+
+    def test_5m_release_home_accepts_reply_after_normal_command_deadline(self):
+        monitor = self.server.monitors["127.0.0.1"]
+        self.act("release")
+        reply = self.printer.reply
+
+        def slow_home(command):
+            if command == "G28":
+                time.sleep(2.1)
+            return reply(command)
+
+        self.printer.reply = slow_home
+        self.assertIn("Waiting", self.act("home"))
+        status = self.adapter.status(True)
+        self.assertTrue(monitor.manual_controls_view(status["manual"])["releaseHomeAcknowledged"])
+        parked = {**status, "sensors": {"moveMode": "HOMING", "homingPark": (110, 110, 220)}}
+        with patch.object(plugin.time, "monotonic", return_value=monitor.manual_home_until - 30) as clock:
+            monitor.update_manual_home(parked)
+            clock.return_value += 11
+            monitor.update_manual_home(parked)
+        self.assertFalse(monitor.manual_release_marker.is_file())
+
+    def test_released_filament_with_stale_homing_requires_stable_park(self):
+        monitor = self.server.monitors["127.0.0.1"]
+        self.act("release")
+        self.move_mode = "HOMING"
+        self.position = b"X:110.037 Y:110.050 Z:220 A:0\r\nok\r\n"
+        status = self.adapter.status(True)
+        now = time.monotonic()
+        with patch.object(plugin.time, "monotonic", return_value=now - 11):
+            monitor.update_manual_home(status)
+        with self.assertRaises(ValueError):
+            self.act("e+10")
+        monitor.update_manual_home(status)
+        self.act("e+10")
+        self.act("e-10")
+        self.assertTrue(monitor.manual_release_marker.is_file())
+        self.assertIn("G1 E10 F120", self.commands)
+        self.assertIn("G1 E-10 F120", self.commands)
+
+    def test_short_settle_only_at_full_parking_position(self):
+        monitor = self.server.monitors["127.0.0.1"]
+        for z, ready in ((220, True), (25, False)):
+            position = (110.05, 110.025, z)
+            status = {"sensors": {"stationaryCandidate": position}}
+            with patch.object(plugin.time, "monotonic", return_value=100):
+                monitor.homing_park_observation = (position, 99, 100)
+                self.assertIsNone(monitor.settled_homing_position(status))
+                monitor.homing_park_observation = (position, 98, 100)
+                self.assertEqual(bool(monitor.settled_homing_position(status)), ready)
+
+    def test_5m_stale_homing_requires_stable_parking_telemetry_and_wire_recheck(self):
+        monitor = self.server.monitors["127.0.0.1"]
+        self.position = b"X:110.050 Y:110.037 Z:220.000 A:0\r\nok\r\n"
+        self.move_mode = "HOMING"
+        reply = self.printer.reply
+
+        def reply_with_homing(command):
+            data = reply(command)
+            if command == "M119" and b"MoveMode:" not in data:
+                data = data.replace(b"ok\r\n", b"MoveMode: HOMING\r\nok\r\n")
+            return data
+
+        self.printer.reply = reply_with_homing
+        status = self.adapter.status(True)
+        self.assertEqual(status["sensors"]["homingPark"], (110.05, 110.037, 220))
+        now = time.monotonic()
+        with patch.object(plugin.time, "monotonic", return_value=now - 10):
+            monitor.update_manual_home(status)
+        with self.assertRaises(plugin.ManualAxesBusy):
+            self.act("x-1")
+        with self.assertRaises(plugin.ManualAxesBusy):
+            self.act("home")
+        with patch.object(plugin.time, "monotonic", return_value=now):
+            monitor.update_manual_home(status)
+        self.act("x-1")
+        self.assertEqual(self.commands[-4:], ["M114", "G90", "G1 X109.050 F300", "M602"])
+
+        self.position = b"X:109.050 Y:110.037 Z:220.000 A:0\r\nok\r\n"
+        self.commands.clear()
+        with self.assertRaises(plugin.ManualAxesBusy):
+            plugin.tcp_manual_move("127.0.0.1", "x-1", self.volume, self.model,
+                                   settled_homing=(110.05, 110.037, 220))
+        self.assertEqual(self.commands, ["M601 S1", "M119", "M114", "M602"])
+
+        status = self.adapter.status(True)
+        monitor.update_manual_home(status)
+        self.act("z-1")
+        self.assertIn("G1 Z219.000 F300", self.commands)
+
+        # A fresh session away from park requires Home before another jog.
+        monitor.expected_manual_position = None
+        monitor.update_manual_home(status)
+        with patch.object(plugin.time, "monotonic", return_value=time.monotonic() + 11):
+            monitor.update_manual_home(status)
+            allowed = monitor.manual_controls_view(status["manual"], status)["allowed"]
+            self.assertIn("home", allowed)
+            self.assertNotIn("x-1", allowed)
+            self.act("home")
+            self.assertEqual(self.commands[-2:], ["G28", "M602"])
+
+    def test_only_explicit_homing_refusal_requires_home(self):
+        self.jog_reply = b"CMD G1 Received.\r\nError: Must home axis first: 101.000 20.000 5.000\r\nok\r\n"
+        with self.assertRaises(plugin.ManualHomeRequired):
+            self.act("x+1")
+        self.assertEqual(self.commands[-1], "M602")
+        self.assertNotIn("G28", self.commands)
+        self.jog_reply = b"Error: Move out of range.\r\nok\r\n"
+        with self.assertRaisesRegex(ValueError, "Printer rejected G1"):
+            self.act("x+1")
+
+    def test_5m_jog_checks_centered_xy_limits_before_sending_motion(self):
+        for axis, reading in (("X", 109.050), ("Y", 109.025)):
+            self.position = f"X:{reading} Y:{reading} Z:220\r\nok\r\n".encode()
+            key = axis.lower() + "+1"
+            self.assertNotIn(key, self.adapter.status(True)["manual"]["travelLimited"])
+            self.act(key)
+            self.assertEqual(self.commands[-2:], [f"G1 {axis}110.000 F300", "M602"])
+        for position, key in (
+            (b"X:110.037 Y:0 Z:5\r\nok\r\n", "x+1"),
+            (b"X:-109.500 Y:0 Z:5\r\nok\r\n", "x-1"),
+            (b"X:0 Y:109.500 Z:5\r\nok\r\n", "y+1"),
+            (b"X:0 Y:-109.500 Z:5\r\nok\r\n", "y-1"),
+            (b"X:0 Y:0 Z:0.500\r\nok\r\n", "z-1"),
+            (b"X:0 Y:0 Z:219.500\r\nok\r\n", "z+1"),
+        ):
+            with self.subTest(key=key, position=position):
+                self.position = position
+                self.commands.clear()
+                with self.assertRaisesRegex(ValueError, "axis travel limits"):
+                    self.act(key)
+                self.assertEqual(self.commands[-4:], ["M601 S1", "M119", "M114", "M602"])
+
+        self.position = b"X:110.037 Y:-109.500 Z:5\r\nok\r\n"
+        self.act("x-1")
+        self.assertEqual(self.commands[-2:], ["G1 X109.037 F300", "M602"])
+        self.act("y+1")
+        self.assertEqual(self.commands[-2:], ["G1 Y-108.500 F300", "M602"])
+
+    def test_jog_without_reported_axis_limits_sends_no_motion(self):
+        self.commands.clear()
+        with self.assertRaisesRegex(ValueError, "did not report the axis travel limits"):
+            plugin.tcp_manual_move("127.0.0.1", "x+1", None, self.model)
+        self.assertEqual(self.commands, ["M601 S1", "M119", "M114", "M602"])
+
+    def test_ad5x_position_probe_only_reads_the_position(self):
+        self.position = b"X:219.5 Y:15 Z:20\r\nok\r\n"
+        self.assertEqual(plugin.ad5x_axis_position("127.0.0.1", "X"), 219.5)
+        self.assertEqual(self.commands, ["M114"])
+
+    def test_legacy_xyz_jogs_respect_model_limits(self):
+        self.printer.detail["pid"] = None
+        for model, x, y, z in (("Adventurer 3", 75, 75, 150), ("Adventurer 4 Pro", 110, 100, 250)):
+            self.model = model
+            self.volume = (x * 2, y * 2, z)
+            self.position = f"X:{x} Y:{-y} Z:{z - 0.5}\r\nok\r\n".encode()
+            with self.subTest(model=model):
+                self.commands.clear()
+                for key in ("x+1", "y-1", "z+1"):
+                    with self.assertRaisesRegex(ValueError, "axis travel limits"):
+                        self.act(key)
+                self.assertFalse(any(code.startswith("G1 ") for code in self.commands))
+                self.act("x-1")
+                self.assertIn(f"G1 X{x - 1:.3f} F300", self.commands)
+                self.act("y+1")
+                self.assertIn(f"G1 Y{1 - y:.3f} F300", self.commands)
+                self.act("z-1")
+                self.assertIn(f"G1 Z{z - 1.5:.3f} F300", self.commands)
+
+    def test_jog_waits_for_active_motion_even_when_machine_status_is_ready(self):
+        for mode in ("MOVING", "HOMING"):
+            with self.subTest(mode=mode):
+                self.move_mode = mode
+                self.commands.clear()
+                with self.assertRaisesRegex(ValueError, "must be idle"):
+                    self.act("x+1")
+                if mode == "MOVING":
+                    self.assertEqual(self.commands[-3:], ["M601 S1", "M119", "M602"])
+                self.assertFalse(any(code.startswith("G1 ") for code in self.commands))
+
+    def test_calibration_tracks_confirmed_activity_and_return_to_ready(self):
+        monitor = self.server.monitors["127.0.0.1"]
+        now = int(time.time())
+        printer_api = plugin.printer_api
+
+        def accept_calibration(host, serial, code, path, fields=None, **options):
+            if path == "/control":
+                return {"code": 0}
+            return printer_api(host, serial, code, path, fields, **options)
+
+        with patch.object(plugin, "printer_api", side_effect=accept_calibration):
+            self.act("level")
+            self.assertEqual(monitor.calibration, {"key": "level", "phase": "waiting"})
+            with self.assertRaisesRegex(ValueError, "Waiting for the printer"):
+                self.act("shaper")
+        monitor.sample(now + 1)
+        self.assertEqual(monitor.calibration["phase"], "waiting")
+        self.printer.state = "HEATING"
+        self.printer.detail["status"] = "calibrate_doing"
+        monitor.sample(now + 5)
+        self.assertEqual(monitor.latest["state"], "CALIBRATING")
+        self.assertIsNone(monitor.latest["percent"])
+        self.assertFalse(monitor.latest["active"])
+        self.assertEqual(monitor.calibration, {"key": "level", "phase": "running"})
+        self.printer.state = "READY"
+        self.printer.detail["status"] = "ready"
+        monitor.sample(now + 10)
+        self.assertEqual(monitor.calibration, {"key": "level", "phase": "ready"})
+        monitor.sample(now + 42)
+        self.assertIsNone(monitor.calibration)
+        with patch.object(plugin, "printer_api", side_effect=accept_calibration):
+            self.act("shaper")
+        monitor.sample(monitor.calibration_deadline + 1)
+        self.assertEqual(monitor.calibration, {"key": "shaper", "phase": "unconfirmed"})
+
+    def test_repeat_feed_and_retract_each_start_from_zero(self):
+        for key in ("e+10", "e+10", "e-10", "e-10"):
+            self.act(key)
+            distance = int(key[1:])
+            self.assertEqual(self.commands[-4:], ["M105", "G92 E0", f"G1 E{distance} F120", "M602"])
+
+    def test_ready_jog_records_target_for_rounded_homing_readback(self):
+        monitor = self.server.monitors["127.0.0.1"]
+        self.act("x-1")
+        target = monitor.expected_manual_position
+        self.assertIsNotNone(target)
+        measured = (target[0] + 0.013, *target[1:])
+        status = self.adapter.status(True)
+        status["sensors"].update(moveMode="HOMING", stationaryCandidate=measured)
+        monitor.update_manual_home(status)
+        self.assertEqual(monitor.settled_homing_position(status), measured)
 
     def test_legacy_tcp_without_checkcode(self):
         self.entry["code"] = self.adapter.check_code = ""
@@ -683,16 +1236,64 @@ class ManualTransportTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.act("shaper")
 
+    def test_nozzle_heat_feed_cool_cycle(self):
+        actual, target = 25, 0
+        previous = self.printer.reply
+        def thermal(cmd):
+            nonlocal target
+            if cmd.startswith("M104 S"):
+                target = int(cmd[6:])
+                return b"ok\r\n"
+            if cmd == "M105":
+                return f"T0:{actual}/{target} B:25/0\r\nok\r\n".encode()
+            return previous(cmd)
+        self.printer.reply = thermal
+        self.act("release")
+        self.act("heat200")
+        self.assertEqual(target, 200)
+        with self.assertRaises(ValueError):
+            self.act("e+10")
+        actual = 181
+        self.act("e+10")
+        self.act("e-10")
+        self.act("heat0")
+        self.assertEqual(target, 0)
+        actual = 179
+        with self.assertRaises(ValueError):
+            self.act("e-10")
+        with self.assertRaises(ValueError):
+            self.act("heat999")
+
     def test_model_capability_matrix(self):
+        for model, part in (("Adventurer 3", "nozzle"), ("Adventurer 4 Pro", "nozzle"),
+                            ("Adventurer 5M", "bed"), ("Adventurer 5M Pro", "bed"), ("AD5X", "bed")):
+            with self.subTest(model=model):
+                controls = plugin.manual_controls({"model": model, "status": "ready"}, "READY", model)
+                self.assertEqual(controls["zPart"], part)
+                self.assertEqual("release" in controls["allowed"], model.startswith("Adventurer 5M"))
         for pid in ("0023", "0024", "0028", "0029", 35, 36, 40, 41):
             d = dict(pid=pid, status="ready", autoShutdown="close", moveCtrl=1, extrudeCtrl=1)
             controls = plugin.manual_controls(d, "READY")
-            self.assertCountEqual(controls["groups"], ["calibration", "timer"])
+            expected_groups = ["calibration", "timer"]
+            if pid in ("0023", "0024", 35, 36):
+                expected_groups.append("release")
+            self.assertCountEqual(controls["groups"], expected_groups)
             self.assertIn("shaper", controls["allowed"])
             self.assertNotIn("home", controls["allowed"])
+            self.assertNotIn("release", controls["allowed"])
             self.assertFalse(plugin.manual_controls(d, "PAUSED")["allowed"])
         self.assertIsNone(plugin.manual_controls({"pid":"9999", "model":"AD5X"}, "READY"))
         self.assertIsNone(plugin.manual_controls({"pid":"0028"}, "READY", "Adventurer 5M"))
+
+    def test_manual_status_keeps_heat_and_timer_with_their_controls(self):
+        detail = dict(model=self.model, status="ready", autoShutdown="open", autoShutdownTime=30)
+        for temperature, needs_heat in ((25, True), (180, False)):
+            with self.subTest(temperature=temperature):
+                controls = plugin.manual_controls(detail, "READY", self.model, nozzle=temperature)
+                self.assertEqual(controls["description"], "Ready")
+                self.assertEqual(controls["timerValue"], "30")
+                self.assertEqual(controls["filamentNeedsHeat"], needs_heat)
+                self.assertEqual("e+10" in controls["allowed"], not needs_heat)
 
 
 class CreatorHTTPTests(unittest.TestCase):
@@ -712,6 +1313,7 @@ class CreatorHTTPTests(unittest.TestCase):
         self.lan_only = True
         self.bad_detail = False
         self.control_readbacks = None
+        self.ignore_light = False
         self.pending_states = []
         fixture = self
 
@@ -736,8 +1338,14 @@ class CreatorHTTPTests(unittest.TestCase):
                     result = {"code": 0, "imageData": image}
                 elif self.path == "/control":
                     args = body["payload"].get("args", {})
-                    if fixture.detail.get("pid") == "0026" or body["payload"]["cmd"] in ("calibration_cmd", "delayClose_cmd"):
-                        cmd = body["payload"]["cmd"]
+                    cmd = body["payload"]["cmd"]
+                    if cmd == "lightControl_cmd":
+                        if not fixture.ignore_light:
+                            fixture.detail["lightStatus"] = args["status"]
+                    elif cmd == "msConfig_cmd":
+                        info = fixture.detail["matlStationInfo"]["slotInfos"][args["slot"] - 1]
+                        info.update(materialName=args["mt"], materialColor="#" + args["rgb"].lstrip("#"))
+                    elif fixture.detail.get("pid") == "0026" or cmd in ("calibration_cmd", "delayClose_cmd"):
                         if cmd == "errorCodeCtrl_cmd" and args["errorCode"] == fixture.detail["errorCode"]:
                             fixture.detail["errorCode"] = ""
                         elif cmd == "delayClose_cmd":
@@ -749,6 +1357,9 @@ class CreatorHTTPTests(unittest.TestCase):
                                                     "cancel": "canceling"}[args["action"]]
                     else:
                         fixture.pending_states = list(fixture.control_readbacks)
+                    result = {"code": 0}
+                elif self.path == "/printGcode":
+                    fixture.detail.update(status="heating", printFileName=body["fileName"])
                     result = {"code": 0}
                 else:
                     self.send_error(404)
@@ -775,7 +1386,7 @@ class CreatorHTTPTests(unittest.TestCase):
         self.addCleanup(ports.stop)
         self.adapter = plugin.FlashForge("127.0.0.1", "abc01234", "SN-C5P")
 
-    def act_with_readbacks(self, action, states):
+    def act_with_readbacks(self, action, states, **options):
         with tempfile.TemporaryDirectory() as folder:
             host = "127.0.0.1"
             entry = {"host": host, "code": "abc01234", "serial": "SN-C5P"}
@@ -787,7 +1398,76 @@ class CreatorHTTPTests(unittest.TestCase):
                 service._server = server
                 monitor.sample(int(time.time()))
                 self.control_readbacks = states
-                return service.act(host, action)
+                return service.act(host, action, **options)
+
+    def set_material_station(self):
+        self.detail["matlStationInfo"] = {"slotCnt": 4, "stateAction": 0, "slotInfos": [
+            {"slotId": 1, "hasFilament": True, "materialName": "PLA", "materialColor": "#112233"},
+            {"slotId": 2, "hasFilament": True, "materialName": "PETG", "materialColor": "#445566"},
+        ]}
+
+    def test_light_requires_observed_change_and_slot_uses_model_palette(self):
+        self.assertEqual(self.act_with_readbacks("light/off", []), "Off")
+        self.ignore_light = True
+        with self.assertRaisesRegex(ValueError, "did not confirm"):
+            self.act_with_readbacks("light/on", [])
+        self.set_material_station()
+        with self.assertRaisesRegex(ValueError, "station are idle"):
+            self.act_with_readbacks("slot/1/PETG/4CAAF8", [])
+        self.detail["status"] = "ready"
+        for model, pid, color, wire in (("Creator 5 Pro", "29", "4CAAF8", "#4CAAF8"), ("AD5X", "0026", "45A8F9", "45A8F9")):
+            with self.subTest(model=model):
+                self.detail.update(model=model, pid=pid)
+                self.assertEqual(self.act_with_readbacks(f"slot/1/PETG/{color}", []), "Slot updated.")
+                command = next(body["payload"] for path, body in reversed(self.calls) if path == "/control")
+                self.assertEqual(command, {"cmd": "msConfig_cmd", "args": {"slot": 1, "mt": "PETG", "rgb": wire}})
+
+    def test_creator_reprint_uses_original_materials_and_caches_only_after_observation(self):
+        self.detail["status"] = "ready"
+        self.set_material_station()
+        host = "127.0.0.1"
+        entry = {"host": host, "code": "abc01234", "serial": "SN-C5P"}
+        with tempfile.TemporaryDirectory() as folder, plugin.LoopbackServer((host, 0), plugin.MonitorHandler) as server:
+            server.configure(lambda: {"printers": [entry]}, Path(folder))
+            monitor = plugin.PrinterMonitor(self.adapter, Path(folder) / "history.json")
+            server.monitors[host] = monitor
+            service = plugin.FlashForgeService()
+            service._server = server
+            monitor.sample(int(time.time()))
+            monitor.files = self.adapter.files()
+            file_id = next(iter(monitor.files))
+            action = f"print/{file_id}/0/1020"
+            with self.assertRaisesRegex(ValueError, "original sliced"):
+                service.act(host, action)
+            port = server.server_port
+            worker = threading.Thread(target=HTTPServer.serve_forever, args=(server, 0.05), daemon=True)
+            worker.start()
+            try:
+                url = f"/{host}/print-source?" + urlencode({"file": file_id, "name": "Тест 5.gcode.3mf"})
+                headers = {"Origin": f"http://{host}:{port}", "X-FlashForge-Tab-Action": "print-source"}
+                with patch.object(plugin, "WEB_PORT", port):
+                    status, body, _ = request(port, url, "POST", headers, sliced_source())
+                self.assertEqual(status, 200, body)
+                token = json.loads(body)["token"]
+                with self.assertRaisesRegex(ValueError, "requires PETG"):
+                    service.act(host, f"print/{file_id}/0/1010/{token}")
+                service.act(host, action + "/" + token)
+                payload = next(body for path, body in self.calls if path == "/printGcode")
+                self.assertEqual([(item["toolId"], item["slotId"]) for item in payload["materialMappings"]], [(0, 1), (2, 2)])
+                self.assertFalse(server.sources)
+                monitor.sample(int(time.time()))
+                server.confirm_print_source(monitor)
+                self.assertTrue(server.sources)
+                self.assertTrue(server.source_path.exists())
+                with patch.object(plugin, "WEB_PORT", port):
+                    status, body, _ = request(port, f"/{host}/print-source?file={file_id}", "POST", headers)
+                self.assertEqual(status, 200, body)
+                self.assertEqual([item["toolId"] for item in json.loads(body)["requirements"]], [0, 2])
+                server.begin_upload()
+                self.assertFalse(server.sources)
+            finally:
+                server.shutdown()
+                worker.join()
 
     def test_ad5x_manual_controls_over_http(self):
         self.detail.update(pid="0026", model="AD5X", status="ready", rightTemp=195,
@@ -814,6 +1494,25 @@ class CreatorHTTPTests(unittest.TestCase):
                 self.assertEqual(commands, [{"cmd": cmd, **({"args": args} if args else {})}])
                 if key in ("timer60", "clear"):
                     self.assertNotIn("not confirmed", result)
+                if cmd == "moveCtrl_cmd":
+                    self.assertIn("Axis limits could not be checked", result)
+
+    def test_ad5x_checks_travel_before_http_jog_when_position_is_available(self):
+        self.detail.update(pid="0026", model="AD5X", status="ready", moveCtrl=1, measure="220x220x220")
+        for key, position in (("x+1", 220), ("y-10", 5), ("z-1", 0), ("z+10", 215)):
+            with self.subTest(key=key), patch.object(plugin, "ad5x_axis_position", return_value=position) as read:
+                self.calls.clear()
+                with self.assertRaisesRegex(ValueError, "axis travel limits"):
+                    self.act_with_readbacks("manual/" + key, [])
+                read.assert_called_once_with("127.0.0.1", key[0].upper())
+                self.assertFalse(any(path == "/control" for path, _ in self.calls))
+        with patch.object(plugin, "ad5x_axis_position", return_value=220):
+            self.calls.clear()
+            self.assertEqual(self.act_with_readbacks("manual/x-1", []), "Printer accepted the command.")
+            self.assertEqual(
+                [body["payload"] for path, body in self.calls if path == "/control"],
+                [{"cmd": "moveCtrl_cmd", "args": {"axis": "x", "delta": -1}}],
+            )
 
     def test_ad5x_blocks_stale_idle_and_invalid_commands(self):
         self.detail.update(pid="0026", model="AD5X", status="ready", rightTemp=25, moveCtrl=1, extrudeCtrl=1)
@@ -839,6 +1538,13 @@ class CreatorHTTPTests(unittest.TestCase):
     def test_delayed_pause_checks_status_without_repeating_command(self):
         self.assertEqual(self.act_with_readbacks("pause", ["printing", "pause"]), "PAUSED")
         self.assertEqual(sum(path == "/control" for path, _ in self.calls), 1)
+
+    def test_grid_action_refuses_to_control_a_different_file(self):
+        with self.assertRaisesRegex(ValueError, "print job changed"):
+            self.act_with_readbacks("cancel", [], expected_file="Older.3mf")
+        self.assertFalse(any(path == "/control" for path, _ in self.calls))
+        self.assertEqual(self.act_with_readbacks(
+            "pause", ["pause"], expected_file=self.detail["printFileName"]), "PAUSED")
 
     def test_ignored_cancel_reports_observed_state_and_sends_once(self):
         with self.assertRaisesRegex(RuntimeError, "did not confirm cancel.*PRINTING"):
@@ -881,6 +1587,13 @@ class CreatorHTTPTests(unittest.TestCase):
         self.lan_only = True
         self.adapter.configure("abc01234", "SN-C5P")
         self.assertEqual(self.adapter.status(False)["state"], "PRINTING")
+
+    def test_single_nozzle_models_ignore_extra_temperature_channels(self):
+        for model in ("AD5X", "Adventurer 5M"):
+            self.detail.update(model=model, pid="0026", rightTemp=201, rightTargetTemp=215)
+            data = self.adapter.status(False)
+            self.assertEqual((data["nozzle"], data["nozzleTarget"]), (201, 215))
+            self.assertEqual(data["tools"], [])
 
     def test_invalid_detail_recovers_and_preview_rejects_invalid_data(self):
         self.bad_detail = True
@@ -972,7 +1685,8 @@ class SwitchViewTests(unittest.TestCase):
             preset_bundle=lambda: SimpleNamespace(printers=presets, current_printer_preset=lambda: self.preset),
         )
         self.service = plugin.FlashForgeService()
-        self.config = {"flashforge_host": "127.0.0.1", "check_code": "code"}
+        self.service.active_placement = "device"
+        self.config = {"flashforge_host": "127.0.0.1", "check_code": "code", "placement": "device"}
         self.service.get_config = lambda: json.dumps(self.config)
         self.service._page_store = Path(self.folder.name) / "device-pages.json"
         self.service._switch_lock = threading.Lock()
@@ -1004,7 +1718,7 @@ class SwitchViewTests(unittest.TestCase):
         # Orca discards the edited profile on exit: only plugin storage survives.
         previous = self.service
         self.service = plugin.FlashForgeService()
-        for key in ("_page_store", "_server", "get_config"):
+        for key in ("_page_store", "_server", "get_config", "active_placement"):
             setattr(self.service, key, getattr(previous, key))
         self.service._switch_lock = threading.Lock()
         self.service._stopping = threading.Event()
@@ -1092,29 +1806,41 @@ class SwitchViewTests(unittest.TestCase):
         self.service.restore_selected_view()
         self.assertEqual(self.preset.values["print_host_webui"], "")
 
+    def test_page_supplies_a_standalone_svg_tab_icon(self):
+        from xml.etree import ElementTree
+        page = plugin.FlashForgePage()
+        path = Path(page.get_icon())
+        self.assertEqual(path.parent, Path(self.folder.name))
+        self.assertEqual(ElementTree.parse(path).getroot().tag, "{http://www.w3.org/2000/svg}svg")
+        modified = path.stat().st_mtime_ns
+        self.assertEqual(page.get_icon(), str(path))
+        self.assertEqual(path.stat().st_mtime_ns, modified)
+
     def test_plugin_settings_register_flashforge_page_only_after_reload(self):
         self.service._placement_lock = threading.Lock()
-        self.service._next_placement = "device"
+        self.service._next_placement = "flashforge"
+        self.config.pop("placement")
         path = Path(self.folder.name) / "monitor-placement.txt"
         with patch.object(plugin, "PLACEMENT_FILE", path), patch.object(orca, "register_capability") as register, \
-                patch.object(plugin.FlashForgeService, "active_placement", "device"):
+                patch.object(plugin.FlashForgeService, "active_placement", "flashforge"):
             package = plugin.FlashForgeDeviceTab()
-            package.register_capabilities()
-            register.assert_called_once_with(plugin.FlashForgeService)
-
-            self.config["placement"] = "flashforge"
-            self.service.sync_next_placement()
-            self.assertEqual(plugin.FlashForgeService.active_placement, "device")
-            register.reset_mock()
-            package.register_capabilities()
-            self.assertEqual([call.args[0] for call in register.call_args_list],
-                             [plugin.FlashForgeService, plugin.FlashForgePage])
-
-            self.config["placement"] = "device"
-            self.service.sync_next_placement()
-            register.reset_mock()
-            package.register_capabilities()
-            register.assert_called_once_with(plugin.FlashForgeService)
+            for index, choice in enumerate(("flashforge", "device", "flashforge")):
+                if index:
+                    previous = plugin.FlashForgeService.active_placement
+                    self.config["placement"] = choice
+                    self.service.sync_next_placement()
+                    self.assertEqual(plugin.FlashForgeService.active_placement, previous)
+                self.assertEqual(self.service.config()["placement"], choice)
+                register.reset_mock()
+                package.register_capabilities()
+                self.service.active_placement = plugin.FlashForgeService.active_placement
+                self.service.restore_selected_view()
+                expected = [plugin.FlashForgeService]
+                if choice == "flashforge":
+                    expected.append(plugin.FlashForgePage)
+                self.assertEqual([call.args[0] for call in register.call_args_list], expected)
+                self.assertEqual(self.preset.values["print_host_webui"],
+                                 plugin.monitor_url("127.0.0.1") if choice == "device" else "")
 
     def test_startup_worker_and_preset_events_restore_page_without_manual_execution(self):
         self.service._server = None

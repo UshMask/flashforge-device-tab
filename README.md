@@ -5,31 +5,39 @@ is left, check nozzle and bed temperatures, or open the printer camera.
 Switch between your local printers and review completed jobs after a restart.
 Printers with a working authenticated control API also offer pause, resume and cancel.
 
-**Stable release 1.12.1** scopes keyboard jogging to the XY pad and keeps
-Manual control visible when printer readings become unavailable.
+**Version 1.13.0** brings printer status and print jobs together in **All printers**.
+Open **Monitor** for a single printer or **History** for past jobs.
 
-[![Live print monitoring in the Device tab](docs/01-live-monitor.png)](docs/panel.png)
+[![Monitor with a print in progress](docs/orca-cloud/01-monitor.png)](docs/orca-cloud/01-monitor.png)
 
 | All printers | Print history |
 | --- | --- |
-| [![Fleet view with printing, paused and ready printers](docs/02-printer-fleet.png)](docs/02-printer-fleet.png) | [![Print history with durations and outcomes](docs/03-print-history.png)](docs/03-print-history.png) |
+| [![All printers with active, idle and disconnected rows](docs/orca-cloud/02-all-printers.png)](docs/orca-cloud/02-all-printers.png) | [![Print history with totals, durations and outcomes](docs/orca-cloud/03-history.png)](docs/orca-cloud/03-history.png) |
 
 The screenshots show the plugin running with demonstration data. Select an image for a closer look.
 
+[Appearance settings for theme, density and individual views](docs/orca-cloud/06-appearance.png)
+
 ## Manual control by model
 
-![Manual control and the file catalog on a simulated idle Adventurer 5M](docs/04-manual-control.jpg)
+![Manual control on a simulated idle Adventurer 5M](docs/orca-cloud/04-manual-control.png)
 
 | Printer | Commands in the manual panel |
 | --- | --- |
-| Adventurer 3, 3 Lite, 3 Pro, 3 Pro 2, 4, 4 Pro and 4 Lite | Home, XYZ jogs (1 or 10 mm), feed and retract (10 mm) via TCP. |
-| Adventurer 5M and 5M Pro | Home, XYZ jogs and filament via TCP with authenticated telemetry. Level bed, input shaper and the firmware-reported shutdown timer via HTTP. |
-| AD5X | Home, XYZ jogs, feed and retract when enabled by firmware, level bed, input shaper, clear the active error and the firmware-reported shutdown timer. |
+| Adventurer 3, 3 Lite, 3 Pro, 3 Pro 2, 4, 4 Pro and 4 Lite | Home, XYZ jogs (1 or 10 mm) via TCP. |
+| Adventurer 5M and 5M Pro | Home, XYZ jogs, nozzle target (180–280 °C in 20 °C steps or off), and 10 mm feed/retract at a measured 180 °C or higher via TCP with authenticated telemetry. Level bed, input shaper and the firmware-reported shutdown timer via HTTP. |
+| AD5X | Home, XYZ jogs when enabled by firmware, level bed, input shaper, clear the active error and the firmware-reported shutdown timer. |
 | Creator 5 and Creator 5 Pro | Level bed, input shaper and the firmware-reported shutdown timer via HTTP. Stock firmware has no manual motion or extrusion API. |
 
-Manual commands require an idle printer. Filament controls require at least
-180 °C at the nozzle. Where available, the shutdown timer offers Off, 30, 60
+Manual commands require an idle printer. Where available, the shutdown timer offers Off, 30, 60
 and 120 minutes. The manual controls were verified with simulated printers.
+TCP axis jogs check the current position against the model's print envelope
+before sending a move. On AD5X, the plugin also checks the target when the
+printer reports its position over TCP. HTTP-only AD5X setups keep the existing
+jog controls and report when the plugin could not check the limits.
+On the Adventurer 5M and 5M Pro, **Release motors** removes motor holding torque
+while the printer is idle. The axes can move by hand. Manual movement stays
+locked, including after reconnecting, until **Home** completes in the plugin.
 Focus the XY pad to jog by 1 mm with the arrow keys or by 10 mm with Shift.
 Press Enter on the Home button to home the printer. If readings become
 unavailable, the panel stays open and commands are disabled until fresh readings arrive.
@@ -41,12 +49,22 @@ unavailable, the panel stays open and commands are disabled until fresh readings
   and speed.
 - **Temperatures chart** — the last 30 minutes, sampled every five seconds.
 - **Camera** — the printer's MJPEG stream, if the printer exposes one.
-- **Printer files** — the on-printer file list with previews, 10 per page.
+- **Chamber light** — switch it from the Camera panel on authenticated Creator 5,
+  Creator 5 Pro, and Adventurer 5M Pro printers that report its state.
+- **Printer files** — the on-printer file list with previews, up to three rows per page.
+  Select a file and choose **Print** to start it while the printer is idle.
+  On an authenticated Adventurer 5M, **Upload file** saves prepared G-code or
+  a sliced single-plate 3MF without starting a print. Newly detected files
+  appear first, and the catalog remembers that order across restarts.
+- **Material station** — view, then edit a slot's material and color while the
+  printer and station are idle on supported AD5X and Creator 5 models.
 - **Print history** — jobs with start, end, duration and result, kept on disk so
   it survives OrcaSlicer restarts.
-- **Several printers** — every printer in the plugin settings is monitored. Open
-  **All printers** to see them side by side or filter for attention, then open
-  its full panel.
+- **Several printers** — **All printers** shows one row per configured printer,
+  including idle and disconnected printers. Search by printer or job and
+  filter by status. See progress, the model preview and the live camera for
+  active jobs. Control camera playback for the whole list. On a ready printer,
+  browse files or open print confirmation for its last completed job.
 - **Pause, resume, cancel** — from the panel header. Cancel asks for a second
   click; nothing is sent until you confirm.
 - **Printer card** — model, firmware, serial number, MAC, build volume and light
@@ -55,15 +73,20 @@ unavailable, the panel stays open and commands are disabled until fresh readings
 - **Save snapshot** — one camera frame, saved by the browser.
 - **Host notifications** — “Print finished”, “Print cancelled”, “Printer error”
   appear in the 3D view, so you notice without watching the tab.
+- **Display settings** — choose a theme and layout density in **Settings →
+  Appearance**. Open **Printer Files** there to set card size, rows per page
+  and preview visibility. The other subsections control the temperature chart
+  and printer details, live cameras and job details, and print history totals.
 
 ## Install
 
 1. Download `flashforge_device_tab.py` from the latest release.
 2. In OrcaSlicer open **Plugins → Install from file** and pick the file.
 3. Enable **FlashForge Device Tab**.
-4. Make sure the printer profile uses the **FlashForge** host type.
-5. Open the **Device tab**. The plugin panel opens automatically for a configured
-   FlashForge printer. For initial setup, use **Speed Dial → FlashForge Device Tab**.
+4. Open the separate **FlashForge** tab.
+5. Open **Settings** in the monitor to configure your printer.
+
+[![Connect a printer in two steps: open Settings, enter the printer details and save](docs/orca-cloud/05-connect-printer.png)](docs/orca-cloud/05-connect-printer.png)
 
 OrcaSlicer 2.5.0 or newer, Windows x64. The plugin needs no extra software: no
 Node, no Docker, no Raspberry Pi, no second application.
@@ -75,14 +98,22 @@ when it loads for the configured FlashForge profile.
 
 ## Settings
 
-In **Plugins → FlashForge Device Tab → Config**, choose **Show monitor in** and
-save, then restart OrcaSlicer. **Printer tab** is the default and hides the extra
-tab. **FlashForge tab** adds a dedicated tab for the configured printers and
-restores OrcaSlicer's original Device page for the active FlashForge profile.
+The plugin includes 24 interface languages and follows OrcaSlicer by default.
+Use **Plugins → FlashForge Device Tab → Config → Interface language** to choose
+a language explicitly. Save and reopen the monitor. Some OrcaSlicer 2.5.x builds
+report a reduced set of languages through the plugin API, so an explicit
+selection can be needed for languages such as Euskara or Traditional Chinese.
+
+In **Plugins → FlashForge Device Tab → Config**, set **Tab placement** and
+save, then restart OrcaSlicer. **Separate FlashForge tab (default)** shows the
+monitor in its own tab and keeps the native Printer page. **Replace Printer tab**
+uses the built-in tab for configured FlashForge profiles and hides the separate tab.
 
 Open **Settings** and enter the printer address, optional display name, CheckCode
-and serial number. **Check saved connection** reads status from the saved
-device. **Edit as text** accepts one printer per line:
+and serial number. **Find printers** can fill the model, address, and reported
+serial number for the 5M series, AD5X, and Creator 5 series on the local network.
+**Check connection** tests the values in the form before saving. If discovery is
+unavailable, enter the address manually. **Edit as text** accepts one printer per line:
 
 ```
 192.168.1.50 | 1a2b3c4d | Adventurer 5M
@@ -106,20 +137,34 @@ On **Creator 5 Pro**, open **Camera → Connect** to start the built-in camera.
 the Device tab releases the camera. Returning to the monitor reconnects when
 the Camera panel is open. Choose **Disconnect** to turn off automatic reopening.
 
-Creator stock firmware returns a list of file names and serves thumbnails
-separately. It does not report the active tool, TCP endstops, or per-file material
-and time estimates. The temperature chart compares the selected tool and the bed. The readings
-panel also shows T2–T4 and the Pro chamber temperature when available. The
-plugin does not upload files, start prints or change material mappings.
+Creator stock firmware returns file names and serves thumbnails separately. It
+does not report the active tool, TCP endstops, or per-file material and time
+estimates. The temperature chart compares the selected tool and the bed. The
+readings panel also shows T2–T4 and the Pro chamber temperature when available.
+
+### Repeat a Creator print
+
+1. Select the stored `.3mf` in **Printer Files**, then choose **Print**.
+2. Choose the original sliced, single-plate `.3mf` with the same name. The
+   plugin reads the material, color, and filament number from its slice metadata.
+3. Choose a loaded slot for each filament and confirm. The panel reports the
+   start when it observes that file active on the printer.
+
+If the printer supplies a thumbnail, the plugin links the materials to the
+stored file after it observes the start. Use **Use linked materials** the next
+time you print the same file, after checking that it has not been replaced.
+A changed thumbnail or a new transfer through OrcaSlicer requires linking the
+source again. The source file is only read locally. Use OrcaSlicer's normal
+**Upload and Print** workflow to send a new plate to the printer.
 
 ## Other FlashForge models
 
 | Family | Compatibility evidence and scope |
 | --- | --- |
-| Adventurer 3 / 4 families | Experimental TCP control for recognized models: Home, XYZ jogging and filament feed/retraction. [Adventurer 3 protocol](https://github.com/Parallel-7/flashforge-api-docs/blob/main/endpoints/networkserver_commands_adventurer3.yaml) · [Adventurer 4 protocol](https://github.com/Parallel-7/flashforge-api-docs/wiki/Adventurer-4-Series) |
+| Adventurer 3 / 4 families | Experimental TCP control for recognized models: Home, XYZ jogging. [Adventurer 3 protocol](https://github.com/Parallel-7/flashforge-api-docs/blob/main/endpoints/networkserver_commands_adventurer3.yaml) · [Adventurer 4 protocol](https://github.com/Parallel-7/flashforge-api-docs/wiki/Adventurer-4-Series) |
 | Adventurer 5M / 5M Pro | TCP motion controls plus leveling and input shaping with authenticated HTTP telemetry. [5M protocol](https://github.com/Parallel-7/flashforge-api-docs/wiki/Adventurer-5M-Series) |
 | Creator 5 / 5 Pro | Leveling and input shaping over HTTP. The stock API has no manual motion, Home, extrusion or error-clear command. [Creator protocol](https://github.com/Parallel-7/flashforge-api-docs/wiki/Creator-5-Series) |
-| AD5X | IFS slot monitoring, Home, XYZ jogging, filament feed/retraction, leveling, input shaping and clearing an active error. [AD5X protocol](https://github.com/Parallel-7/flashforge-api-docs/wiki/AD5X) |
+| AD5X | IFS slot monitoring, Home, XYZ jogging, leveling, input shaping and clearing an active error. [AD5X protocol](https://github.com/Parallel-7/flashforge-api-docs/wiki/AD5X) |
 | Guider 3 Ultra | FlashForge lists this printer in Flash Studio Desktop. Compatibility with this plugin's LAN requests still needs sample responses. [Vendor software page](https://www.flashforge.com/pages/flash-studio-desktop) |
 | Finder | An existing Cura integration provides a starting point for research. Identify the specific Finder generation and capture its monitoring responses before adding it here. [Finder integration](https://github.com/ronoaldo/FlashforgeFinderIntegration) |
 
@@ -144,7 +189,6 @@ status read. Creator cameras use a separate MJPEG stream on port 8080.
   the printer's TCP control session. The shutdown timer appears on supported
   HTTP models when the firmware reports the setting. Manual controls have been
   tested against simulated printers. Physical verification is pending.
-  Filament jogging requires a reported nozzle temperature of at least 180 °C.
 - Reads **only its own configuration** from OrcaSlicer; printer profiles are
   never read for credentials.
 - Talks to the local network: the printers you configure, nothing else.
@@ -176,6 +220,8 @@ the browser tab.
 3. Publish a GitHub release for the tag. `.github/workflows/publish-orcacloud.yml`
    uploads the plugin to the OrcaSlicer catalogue through GitHub OIDC — the tag
    becomes the published version and the release notes become the changelog.
+   The workflow also updates the catalogue description and screenshots from
+   [docs/orca-cloud.md](docs/orca-cloud.md).
 
 The catalogue requires a platform suffix in the uploaded file name, so the
 workflow sends `flashforge_device_tab_win_x86_64.py`.
