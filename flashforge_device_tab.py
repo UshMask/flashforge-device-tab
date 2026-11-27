@@ -4,7 +4,7 @@
 # name = "FlashForge Device Tab"
 # description = "Follow local FlashForge prints in OrcaSlicer's Device or FlashForge tab."
 # author = "Max"
-# version = "1.14.0"
+# version = "1.14.1"
 # ///
 import base64
 import hashlib
@@ -146,6 +146,7 @@ JOB_CARD_CONTENT = Template('''
           <progress max="100" aria-label="{{t:Print progress}}" hidden></progress>
           $metrics
           <div class="jobs-last" hidden>{{t:Last completed}} <strong></strong></div>
+          <p class="jobs-completion-hint" role="status" hidden>{{t:Remove the print and close the completion dialog on the printer, if shown.}}</p>
           <div class="jobs-actions">$actions</div>
           $extra
         </div>
@@ -702,6 +703,7 @@ details.panel:not([open]) > summary.panel-title {border-radius:11px}
 .jobs-meta:has(>span:empty):has(>strong:empty) {display:none}
 .jobs-last {display:flex;flex-wrap:wrap;gap:2px 6px}
 .jobs-last strong {font-weight:600;color:var(--text);overflow-wrap:anywhere;min-width:0}
+.jobs-completion-hint {color:var(--warn);font-size:12px}
 .jobs-actions {display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px}
 .jobs-actions:not(:has(:is(button,a):not([hidden]))) {display:none}
 .jobs-actions :is(a,.jobs-link) {padding-block:4px}
@@ -1020,7 +1022,7 @@ main:has(.dashboard.stale) #job > * {opacity:.65}
           </div>
         </div>
       </details>
-      <section id="materials" class="panel" hidden><h2 class="panel-title"><svg class="section-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 6c0-4 14-4 14 0s-14 4-14 0z M5 6v12c0 4 14 4 14 0V6 M5 12c0 4 14 4 14 0"/></svg>{{t:Materials · IFS}}</h2><div id="slots"></div></section>
+      <section id="materials" class="panel" hidden><h2 class="panel-title"><svg class="section-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 6c0-4 14-4 14 0s-14 4-14 0z M5 6v12c0 4 14 4 14 0V6 M5 12c0 4 14 4 14 0"/></svg><span id="materialsTitle">{{t:Materials · IFS}}</span></h2><div id="slots"></div></section>
       <details class="panel" id="printerDetails">
         <summary class="panel-title"><svg class="section-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M21 12a9 9 0 1 1-18 0 9 9 0 1 1 18 0 M12 11v6 M12 7v1"/></svg>{{t:Printer details}}</summary>
         <div class="tool-body detail-groups">
@@ -1285,7 +1287,7 @@ async function diagnose(host) {
     const url = host ? new URL('/' + encodeURIComponent(host) + '/diagnostics', location.origin) : endpoint('/diagnostics');
     const data = await postLocal('diagnostics', url);
     if (!current()) return;
-    showInfo(t("Connection check"), ['FlashForge Device Tab 1.14.0', t("Transport: {transport}", {transport:data.transport}), t("Status: received"),
+    showInfo(t("Connection check"), ['FlashForge Device Tab 1.14.1', t("Transport: {transport}", {transport:data.transport}), t("Status: received"),
       t("Authenticated readings: {availability}", {availability:data.authenticated ? t("available") : t("unavailable")}),
       t("Camera URL: {status}", {status:data.cameraReported ? t("reported; stream not tested") : t("not reported")})].join('\n'), true);
   } catch (error) { if (current()) showInfo(t("Connection check"), error.message, true); }
@@ -1307,17 +1309,20 @@ el('notifyForm').onsubmit = async event => {
   catch(error) {el('notifyStatus').textContent = error.message;}
 };
 let lastSlots = [], slotSignature = '', editedSlot = null, editedColor = '', lightState = null, lightPending = false;
+let creatorMaterials = false;
 function showSlots(slots, editor) {
   el('materials').hidden = !slots?.length;
-  const signature = JSON.stringify([slots || [], editor || null]);
+  const signature = JSON.stringify([slots || [], editor || null, creatorMaterials]);
   if (signature === slotSignature) return;
   slotSignature = signature;
+  el('materialsTitle').textContent = creatorMaterials ? t("Materials") : t("Materials · IFS");
   const focusedSlot = document.activeElement?.dataset?.slotId;
   el('slots').replaceChildren(...(slots || []).map(slot => {
     const editable = editor && Object.hasOwn(slot, 'present');
     const box = document.createElement(editable ? 'button' : 'div'), reel = document.createElement('span'), text = document.createElement('span');
     box.className = 'slot' + (slot.active ? ' active' : '');
-    box.textContent = 'A' + slot.id;
+    const slotId = creatorMaterials ? String(slot.id) : 'A' + slot.id;
+    box.textContent = creatorMaterials ? t("Slot {number}", {number:slot.id}) : slotId;
     reel.className = 'spool';
     reel.style.display = 'block';
     reel.style.setProperty('--spool', slot.present === false ? '#818681' : slot.color || '#889088');
@@ -1327,21 +1332,21 @@ function showSlots(slots, editor) {
       box.type = 'button';
       box.dataset.slotId = slot.id;
       box.dataset.icon = 'edit';
-      box.setAttribute('aria-label', t("Edit slot A{slot} · {material}", {slot:slot.id, material:text.textContent}));
+      box.setAttribute('aria-label', t("Edit slot {slot} · {material}", {slot:slotId, material:text.textContent}));
       box.setAttribute('aria-haspopup', 'dialog');
-      box.onclick = () => openSlot(slot, editor);
+      box.onclick = () => openSlot(slot, editor, slotId);
     }
     box.append(reel,text);return box;
   }));
   if (focusedSlot) el('slots').querySelector('button[data-slot-id="' + focusedSlot + '"]')?.focus();
 }
-function openSlot(slot, editor) {
+function openSlot(slot, editor, slotId) {
   editedSlot = slot.id;
   editedColor = (slot.color || '').slice(1).toUpperCase();
   const material = el('slotMaterial');
   material.replaceChildren(new Option(t("Choose material"), ''), ...editor.materials.map(value => new Option(value)));
   material.value = editor.materials.includes(slot.name) ? slot.name : '';
-  el('slotTitle').textContent = t("Edit slot A{slot}", {slot:slot.id});
+  el('slotTitle').textContent = t("Edit slot {slot}", {slot:slotId});
   el('slotStatus').textContent = '';
   const names = [t("White"),t("Yellow"),t("Light green"),t("Green"),t("Dark green"),t("Teal"),t("Cyan"),t("Light blue"),t("Blue"),t("Dark blue"),t("Purple"),t("Violet"),t("Magenta"),t("Pink"),t("Coral"),t("Red"),t("Brown"),t("Orange"),t("Cream"),t("Tan"),t("Dark brown"),t("Gray"),t("Light gray"),t("Black")];
   el('slotColors').replaceChildren(...editor.colors.map((color, index) => {
@@ -2081,11 +2086,16 @@ function isReadyForReprint(state, active) {
   return !active && ['READY', 'IDLE'].includes(state);
 }
 
+function showCompletionHint(card, complete, ready) {
+  card.querySelector('.jobs-completion-hint').hidden = !complete || ready;
+}
+
 function updateJob(data) {
   const card = el('job');
   const previousJob = jobFile;
   lastCompletedFile = data.active ? '' : data.lastCompleted?.file || '';
   jobReady = isReadyForReprint(data.state, data.active);
+  showCompletionHint(card, data.complete, jobReady);
   jobFile = data.active || (data.complete && !lastCompletedFile) ? data.file || '' : '';
   if (catalogLoaded && (data.fileCatalogRevision !== catalogRevision
       || (data.active && jobFile && previousJob !== jobFile && !files.some(file => file.name === jobFile)))) refreshFiles();
@@ -2132,6 +2142,7 @@ async function updateStatus() {
       submittedFile = null;
     }
     lastSlots = data.materials || [];
+    creatorMaterials = data.materialFamily === 'creator';
     showSlots(lastSlots, data.slotEditor);
     updateLight(data.light);
     connection.className = ['Error', 'Needs Attention', 'Paused', 'Pausing'].includes(data.status)
@@ -2206,6 +2217,7 @@ async function updateStatus() {
     updateActions({}, error.status !== 409);
     jobReady = false;
     updateJobReprint();
+    showCompletionHint(el('job'), false, false);
     el('time').hidden = true;
     el('timeHint').hidden = true;
     if (error.status === 409) {
@@ -2466,7 +2478,9 @@ function renderPrintSlots(requirements) {
   for (const item of requirements) {
     const label = document.createElement('label'), select = document.createElement('select');
     const title = document.createElement('span');
-    title.textContent = t("Filament {number}", {number:item.toolId + 1}) + (item.materialName ? ' · ' + item.materialName : '');
+    const number = item.toolId + 1;
+    title.textContent = (printOptions.family === 'creator' ? 'T' + number : t("Filament {number}", {number}))
+      + (item.materialName ? ' · ' + item.materialName : '');
     select.dataset.tool = item.toolId;
     select.required = Boolean(item.materialName);
     select.add(new Option(item.materialName ? t("Choose a loaded slot") : t("Unused"), ''));
@@ -3244,6 +3258,7 @@ function updateJobTile(tile, item) {
   node.dataset.group = fleetGroup(item);
   const waiting = waitingForPartRemoval(item);
   const ready = !item.error && isReadyForReprint(item.state, item.printing);
+  showCompletionHint(node, item.complete && !item.error && !item.printing, ready);
   node.dataset.ready = String(ready && !waiting);
   node.querySelector('[data-clear-bed]').hidden = !waiting;
   node.querySelector('[data-monitor]').href = jobPage(item);
@@ -3893,6 +3908,7 @@ def translate_error(language, message):
 
 
 ACTIVE_JOB = {"PRINTING", "BUILDING", "BUILDING_FROM_SD", "PAUSED", "HEATING", "PAUSING"}
+COMPLETED_JOB = {"COMPLETED", "BUILDING_COMPLETED", "FINISHED"}
 CANCELLED_JOB = {"CANCELLED", "CANCELED", "STOPPED"}
 ENDED_JOB = {**dict.fromkeys(CANCELLED_JOB, "cancelled"), "ERROR": "error"}
 ACK = re.compile(rb"(?:^|\n)ok\r?\n")
@@ -4198,12 +4214,14 @@ def chamber_light(detail):
     return value == "open" if value in ("open", "close") else None
 
 
+def printer_pid(value):
+    if isinstance(value, str) and re.fullmatch(r"(?:0x)?[0-9a-f]{1,4}", value.strip().lower()):
+        return int(value, 16)
+    return value if type(value) is int else None
+
+
 def accessory_options(detail, model, state, slots):
-    pid = detail.get("pid")
-    if isinstance(pid, str) and re.fullmatch(r"(?:0x)?[0-9a-f]{1,4}", pid.lower()):
-        pid = int(pid, 16)
-    if type(pid) is not int:
-        pid = None
+    pid = printer_pid(detail.get("pid"))
     name = re.sub(r"[\s_-]+", "", str(model).casefold()).removeprefix("flashforge")
     family = manual_family(DISCOVERY_MODELS.get(pid, "")) if pid is not None else manual_family(model)
     light_model = pid in (0x24, 0x28, 0x29) if pid is not None else (
@@ -4271,12 +4289,8 @@ def manual_family(model):
 def manual_controls(detail, state, tcp_model="", nozzle=None, *, tcp_idle_after_cancel=False):
     tcp = manual_family(tcp_model)
     pid = detail.get("pid")
-    if pid is None:
-        family = manual_family(detail.get("model") or tcp_model)
-    else:
-        if isinstance(pid, str) and re.fullmatch(r"(?:0x)?[0-9a-f]{1,4}", pid.lower()):
-            pid = int(pid, 16)
-        family = {35:"5m", 36:"5m", 38:"ad5x", 40:"creator", 41:"creator"}.get(pid) if type(pid) is int else None
+    model = (detail.get("model") or tcp_model) if pid is None else DISCOVERY_MODELS.get(printer_pid(pid))
+    family = manual_family(model)
     legacy = family in {"3", "4"}
     if not family or (tcp and tcp != family) or (legacy and tcp != family):
         return None
@@ -4287,8 +4301,13 @@ def manual_controls(detail, state, tcp_model="", nozzle=None, *, tcp_idle_after_
         state in {"READY", "IDLE"} and (legacy or str(detail.get("status", "")).strip().upper() in {"READY", "IDLE"})
     )
     tcp_motion = tcp == family and (legacy or family == "5m")
-    motion = tcp_motion or family == "ad5x"
-    filament = tcp_motion or (family == "ad5x" and detail.get("extrudeCtrl") == 1)
+    ad5x_manual = family == "ad5x"
+    if ad5x_manual:
+        firmware = re.search(r"(?<!\d)(\d+)\.(\d+)\.(\d+)", str(detail.get("firmwareVersion", "")))
+        if firmware:
+            ad5x_manual = tuple(map(int, firmware.groups())) >= (1, 1, 6)
+    motion = tcp_motion or ad5x_manual
+    filament = tcp_motion or (ad5x_manual and detail.get("extrudeCtrl") == 1)
     hot = (nozzle if nozzle is not None else detail_number(detail, "rightTemp", 0, 500)) or 0
     groups = []
     if motion:
@@ -4301,7 +4320,7 @@ def manual_controls(detail, state, tcp_model="", nozzle=None, *, tcp_idle_after_
         groups.append("nozzleHeat")
     if not legacy:
         groups.append("calibration")
-    if family == "ad5x":
+    if ad5x_manual:
         groups.append("clear")
     if not legacy and detail.get("autoShutdown") in ("open", "close"):
         groups.append("timer")
@@ -4312,7 +4331,7 @@ def manual_controls(detail, state, tcp_model="", nozzle=None, *, tcp_idle_after_
             allowed.extend(f"heat{temp}" for temp in range(180, 281, 20))
     if idle:
         if isinstance(error, str) and error.strip():
-            if family == "ad5x":
+            if ad5x_manual:
                 allowed.append("clear")
         else:
             if motion:
@@ -4321,7 +4340,7 @@ def manual_controls(detail, state, tcp_model="", nozzle=None, *, tcp_idle_after_
                 allowed.append("release")
             if not legacy:
                 allowed.extend(("level", "shaper"))
-            if tcp_motion or (family == "ad5x" and detail.get("moveCtrl") == 1):
+            if tcp_motion or (ad5x_manual and detail.get("moveCtrl") == 1):
                 allowed.extend(f"{axis}{delta:+d}" for axis in "xyz" for delta in (-10, -1, 1, 10))
             if filament and hot >= 180:
                 allowed.extend(("e+10", "e-10"))
@@ -4547,13 +4566,13 @@ def read_http_status(host, serial, check_code):
     state = {"PAUSE": "PAUSED", "CANCEL": "CANCELING", "CALIBRATE_DOING": "CALIBRATING"}.get(state, state)
     if not state:
         raise PrinterAPIError("The printer returned invalid status data.")
-    complete = state in {"COMPLETED", "BUILDING_COMPLETED", "FINISHED"}
+    complete = state in COMPLETED_JOB
     active = state in ACTIVE_JOB
     has_job = active or complete or state in ENDED_JOB
-    model = field("model")
-    pid = detail.get("pid")
-    creator_pro = model.casefold() == "creator 5 pro" or pid in (41, "29", "0x29")
-    creator = creator_pro or model.casefold() == "creator 5" or pid in (40, "28", "0x28")
+    model = DISCOVERY_MODELS.get(printer_pid(detail.get("pid"))) or field("model")
+    family = manual_family(model)
+    creator = family == "creator"
+    creator_pro = creator and model.casefold().endswith("pro")
     volume = re.fullmatch(r"(\d{1,4})[xX](\d{1,4})[xX](\d{1,4})", field("measure"))
 
     def tool_values(key):
@@ -4565,7 +4584,7 @@ def read_http_status(host, serial, check_code):
 
     actuals = tool_values("nozzleTemps")
     targets = tool_values("nozzleTargetTemps")
-    single = manual_family(model) in {"ad5x", "5m", "3", "4"}
+    single = family in {"ad5x", "5m", "3", "4"}
     count = 4 if creator else max(len(actuals), len(targets))
     tools = [] if single else [
         {"actual": actuals[i] if i < len(actuals) else None,
@@ -4603,7 +4622,7 @@ def read_http_status(host, serial, check_code):
     return {
         "status": STATES.get(state, state), "state": state, **readings,
         "temperatures": readings, "tools": tools, "jobControls": True,
-        "materials": slots, "light": light, "slotEditor": editor, "transport": "HTTP",
+        "materials": slots, "materialFamily": family, "light": light, "slotEditor": editor, "transport": "HTTP",
         "chamber": chamber if creator_pro and any(value is not None for value in chamber.values()) else None,
         "layer": int(layer) if layer is not None else None,
         "layerTotal": int(total) if total is not None else None,
@@ -4616,7 +4635,7 @@ def read_http_status(host, serial, check_code):
         "filament": None,
         "fan": detail_number(detail, "coolingFanSpeed", 0, 100),
         "speed": detail_number(detail, "printSpeedAdjust", 1, 1000),
-        "cameraUrl": camera, "managedCamera": creator_pro, "manual": manual_controls(detail, state),
+        "cameraUrl": camera, "managedCamera": creator, "manual": manual_controls(detail, state),
         "info": {"model": model, "name": field("name"), "firmware": field("firmwareVersion"),
                  "serial": serial, "mac": field("macAddr"), "volume": list(map(int, volume.groups())) if volume else None,
                  "tools": detail_number(detail, "nozzleCnt", 1, 16)},
@@ -4669,7 +4688,7 @@ def read_status(host, check_code, include_details=False):
     filename = re.search(r"^CurrentFile:[ \t]*([^\r\n]*)", status, re.M)
     layer = re.search(r"^Layer:\s*(\d+)\s*/\s*(\d+)", progress, re.M | re.I)
     current, total = (int(layer[1]), int(layer[2])) if layer else (0, 0)
-    detail, time_hint = {}, ""
+    detail, time_hint, http_state = {}, "", ""
     tcp_idle_after_cancel = False
     if serial:
         detail, time_hint = read_job_detail(serial[1], check_code, host)
@@ -4686,7 +4705,7 @@ def read_status(host, check_code, include_details=False):
             time_hint = "Enter your CheckCode in the plugin settings"
         else:
             time_hint = "Printer serial number unavailable"
-    complete = state in {"COMPLETED", "BUILDING_COMPLETED"}
+    complete = state in COMPLETED_JOB or (state == "BUSY" and http_state in COMPLETED_JOB)
     active = state in ACTIVE_JOB
     percent = 100 if complete else min(100, round(current * 100 / total)) if active and total else None
     if active and percent is None:
@@ -6076,34 +6095,23 @@ class MonitorHandler(BaseHTTPRequestHandler):
         with monitor.state_lock:
             status = monitor.latest or {}
         if not status.get("managedCamera"):
-            self.reply_json({"error": "The Creator 5 Pro camera is unavailable."}, 409)
+            self.reply_json({"error": "Camera unavailable."}, 409)
             return
         if not monitor.camera_lock.acquire(timeout=6):
             self.reply_json({"error": "Camera is in use. Close the other view and reconnect."}, 409)
             return
 
-        def control(action):
-            printer_api(endpoint, entry["serial"], entry["code"], "/control",
-                        {"payload": {"cmd": "streamCtrl", "args": {"action": action}}})
-
         def disconnected(timeout=0):
             return (self.server.stopping.is_set() or self.server.monitors.get(endpoint) is not monitor
                     or bool(select.select([self.connection], [], [], timeout)[0]))
 
-        started = attempted = False
+        started = False
         try:
-            if disconnected():
-                return
             parts = urlsplit(status.get("cameraUrl") or "/?action=stream")
             path = (parts.path or "/") + ("?" + parts.query if parts.query else "")
-            # Some firmware acknowledges open before the video listener is ready.
+            # Creator firmware serves MJPEG directly, without opening it via /control.
             for attempt in range(4):
-                if disconnected():
-                    return
-                with self.server.printer_io():
-                    attempted = True
-                    control("open")
-                if disconnected(2):
+                if disconnected(0.35 if attempt else 0):
                     return
                 upstream = http.client.HTTPConnection(endpoint, CAMERA_PORT, timeout=3)
                 try:
@@ -6129,17 +6137,11 @@ class MonitorHandler(BaseHTTPRequestHandler):
                         raise
                 finally:
                     upstream.close()
-        except (ValueError, OSError, http.client.HTTPException, UploadInProgress):
+        except (ValueError, OSError, http.client.HTTPException):
             if not started and not disconnected():
-                self.reply_json({"error": "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect."}, 503)
+                self.reply_json({"error": "No camera frame received. Connect to try again."}, 503)
         finally:
-            try:
-                if attempted:
-                    control("close")
-            except (OSError, ValueError):
-                pass
-            finally:
-                monitor.camera_lock.release()
+            monitor.camera_lock.release()
 
     def run_action(self, endpoint):
         try:
@@ -7125,6 +7127,7 @@ class FlashForgePage(orca.pages.PagesPluginCapabilityBase):
 # Embedded so installing the single .py file also installs its translations.
 TRANSLATIONS = {
     "ca": {
+        "Remove the print and close the completion dialog on the printer, if shown.": "Retira la peça i tanca el diàleg de finalització a la impressora, si apareix.",
         "While this tab is open": "Mentre aquesta pestanya estigui oberta",
         "Only during an active print": "Només durant una impressió activa",
         "Waiting for part removal": "Pendent de retirar la peça",
@@ -7272,7 +7275,6 @@ TRANSLATIONS = {
         "Could not save notification settings.": "No s'ha pogut desar la configuració de notificació.",
         "Could not save print history. New entries are still available for this session.": "No s'ha pogut desar l'historial d'impressió. Encara hi ha noves entrades disponibles per a aquesta sessió.",
         "Could not save the settings.": "No s'ha pogut desar la configuració.",
-        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "No s'ha pogut iniciar la càmera Creator 5 Pro. Comproveu el mode LAN i torneu a connectar-vos.",
         "Cream": "Crema",
         "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "Creator 5 and 5 Pro requereix tant CheckCode com el número de sèrie de la impressora. Adventurer 5M llegeix el seu número de sèrie automàticament.",
         "Creator repeat printing requires a .3mf.": "La impressió repetida del creador requereix un .3mf.",
@@ -7289,8 +7291,8 @@ TRANSLATIONS = {
         "Down": "Avall",
         "Edit as text": "Edita com a text",
         "Edit slot": "Edita l'espai",
-        "Edit slot A{slot}": "Edita la ranura A{slot}",
-        "Edit slot A{slot} · {material}": "Edita ranura A{slot} · {material}",
+        "Edit slot {slot}": "Edita la ranura {slot}",
+        "Edit slot {slot} · {material}": "Edita ranura {slot} · {material}",
         "Elapsed": "Transcorregut",
         "Elapsed: {time}": "Transcorregut: {time}",
         "Empty": "Buit",
@@ -7394,6 +7396,7 @@ TRANSLATIONS = {
         "Manual controls require an idle printer": "Els controls manuals requereixen una impressora inactiva",
         "Material": "Material",
         "Materials · IFS": "Materials · IFS",
+        "Materials": "Materials",
         "Medium": "Mitjà",
         "Model": "Model",
         "Monitor": "Monitor",
@@ -7619,7 +7622,6 @@ TRANSLATIONS = {
         "The .3mf has invalid or unsupported filament assignments.": "El .3mf té assignacions de filaments no vàlides o no admeses.",
         "The .3mf transfer was interrupted.": "La transferència .3mf s'ha interromput.",
         "The CheckCode must be printable ASCII, up to 32 characters.": "El CheckCode ha de ser ASCII imprimible, amb un màxim de 32 caràcters.",
-        "The Creator 5 Pro camera is unavailable.": "La càmera Creator 5 Pro no està disponible.",
         "The active printer profile changed. Try again.": "El perfil de la impressora actiu ha canviat. Torna-ho a provar.",
         "The current job changed before {command} could be confirmed.": "La feina actual ha canviat abans que es pogués confirmar {command}.",
         "The end of this job was not observed.": "No s'ha observat el final d'aquest treball.",
@@ -7717,6 +7719,7 @@ TRANSLATIONS = {
         "{time} left": "Queden {time}",
     },
     "cs": {
+        "Remove the print and close the completion dialog on the printer, if shown.": "Sejměte výtisk a zavřete dialog o dokončení na tiskárně, pokud se zobrazuje.",
         "While this tab is open": "Když je tato karta otevřená",
         "Only during an active print": "Pouze během aktivního tisku",
         "Waiting for part removal": "Čeká na sejmutí výtisku",
@@ -7864,7 +7867,6 @@ TRANSLATIONS = {
         "Could not save notification settings.": "Nelze uložit nastavení oznámení.",
         "Could not save print history. New entries are still available for this session.": "Nelze uložit historii tisku. Pro tuto relaci jsou stále k dispozici nové položky.",
         "Could not save the settings.": "Nelze uložit nastavení.",
-        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "Nelze spustit kameru Creator 5 Pro. Zkontrolujte režim LAN a znovu se připojte.",
         "Cream": "Krém",
         "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "Creator 5 and 5 Pro vyžadují CheckCode i sériové číslo tiskárny. Adventurer 5M načte sériové číslo automaticky.",
         "Creator repeat printing requires a .3mf.": "Opakovaný tisk Creator vyžaduje .3mf.",
@@ -7881,8 +7883,8 @@ TRANSLATIONS = {
         "Down": "Dolů",
         "Edit as text": "Upravit jako text",
         "Edit slot": "Upravit slot",
-        "Edit slot A{slot}": "Upravit slot A{slot}",
-        "Edit slot A{slot} · {material}": "Upravit slot A{slot} · {material}",
+        "Edit slot {slot}": "Upravit slot {slot}",
+        "Edit slot {slot} · {material}": "Upravit slot {slot} · {material}",
         "Elapsed": "Uplynulo",
         "Elapsed: {time}": "Uplynulo: {time}",
         "Empty": "Prázdné",
@@ -7986,6 +7988,7 @@ TRANSLATIONS = {
         "Manual controls require an idle printer": "Ruční ovládání vyžaduje nečinnou tiskárnu",
         "Material": "Materiál",
         "Materials · IFS": "Materiály · IFS",
+        "Materials": "Materiály",
         "Medium": "Střední",
         "Model": "Model",
         "Monitor": "Monitor",
@@ -8211,7 +8214,6 @@ TRANSLATIONS = {
         "The .3mf has invalid or unsupported filament assignments.": ".3mf má neplatná nebo nepodporovaná přiřazení vlákna.",
         "The .3mf transfer was interrupted.": "Přenos .3mf byl přerušen.",
         "The CheckCode must be printable ASCII, up to 32 characters.": "CheckCode musí být tisknutelné ASCII, až 32 znaků.",
-        "The Creator 5 Pro camera is unavailable.": "Kamera Creator 5 Pro není k dispozici.",
         "The active printer profile changed. Try again.": "Aktivní profil tiskárny se změnil. Zkuste to znovu.",
         "The current job changed before {command} could be confirmed.": "Aktuální úloha se změnila před potvrzením {command}.",
         "The end of this job was not observed.": "Nebyl dodržen konec této úlohy.",
@@ -8309,6 +8311,7 @@ TRANSLATIONS = {
         "{time} left": "Zbývá {time}",
     },
     "de": {
+        "Remove the print and close the completion dialog on the printer, if shown.": "Entferne das Druckteil und schließe den Abschlussdialog am Drucker, falls er angezeigt wird.",
         "While this tab is open": "Solange dieser Tab geöffnet ist",
         "Only during an active print": "Nur bei einem aktiven Druckauftrag",
         "Waiting for part removal": "Wartet auf Entnahme des Druckteils",
@@ -8456,7 +8459,6 @@ TRANSLATIONS = {
         "Could not save notification settings.": "Benachrichtigungseinstellungen konnten nicht gespeichert werden.",
         "Could not save print history. New entries are still available for this session.": "Der Druckverlauf konnte nicht gespeichert werden. Für diese Sitzung sind noch neue Einträge verfügbar.",
         "Could not save the settings.": "Die Einstellungen konnten nicht gespeichert werden.",
-        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "Die Creator 5 Pro-Kamera konnte nicht gestartet werden. Überprüfen Sie den LAN-Modus und stellen Sie die Verbindung wieder her.",
         "Cream": "Creme",
         "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "Für Creator 5 and 5 Pro sind sowohl CheckCode als auch die Seriennummer des Druckers erforderlich. Adventurer 5M liest seine Seriennummer automatisch.",
         "Creator repeat printing requires a .3mf.": "Für den wiederholten Druck des Creators ist ein .3mf erforderlich.",
@@ -8473,8 +8475,8 @@ TRANSLATIONS = {
         "Down": "Unten",
         "Edit as text": "Als Text bearbeiten",
         "Edit slot": "Steckplatz bearbeiten",
-        "Edit slot A{slot}": "Steckplatz bearbeiten A{slot}",
-        "Edit slot A{slot} · {material}": "Steckplatz bearbeiten A{slot} · {material}",
+        "Edit slot {slot}": "Steckplatz bearbeiten {slot}",
+        "Edit slot {slot} · {material}": "Steckplatz bearbeiten {slot} · {material}",
         "Elapsed": "Verstrichen",
         "Elapsed: {time}": "Verstrichen: {time}",
         "Empty": "Leer",
@@ -8578,6 +8580,7 @@ TRANSLATIONS = {
         "Manual controls require an idle printer": "Manuelle Steuerungen erfordern einen inaktiven Drucker",
         "Material": "Material",
         "Materials · IFS": "Materialien · IFS",
+        "Materials": "Materialien",
         "Medium": "Mittel",
         "Model": "Modell",
         "Monitor": "Monitor",
@@ -8803,7 +8806,6 @@ TRANSLATIONS = {
         "The .3mf has invalid or unsupported filament assignments.": "Der .3mf verfügt über ungültige oder nicht unterstützte Filamentzuweisungen.",
         "The .3mf transfer was interrupted.": "Die .3mf-Übertragung wurde unterbrochen.",
         "The CheckCode must be printable ASCII, up to 32 characters.": "Das CheckCode muss druckbares ASCII mit bis zu 32 Zeichen sein.",
-        "The Creator 5 Pro camera is unavailable.": "Die Creator 5 Pro-Kamera ist nicht verfügbar.",
         "The active printer profile changed. Try again.": "Das aktive Druckerprofil hat sich geändert. Versuchen Sie es erneut.",
         "The current job changed before {command} could be confirmed.": "Der aktuelle Job wurde geändert, bevor {command} bestätigt werden konnte.",
         "The end of this job was not observed.": "Das Ende dieses Auftrags wurde nicht beobachtet.",
@@ -8901,6 +8903,7 @@ TRANSLATIONS = {
         "{time} left": "Noch {time}",
     },
     "es": {
+        "Remove the print and close the completion dialog on the printer, if shown.": "Retira la pieza y cierra el aviso de finalización en la impresora si aparece.",
         "While this tab is open": "Mientras esta pestaña esté abierta",
         "Only during an active print": "Solo con una impresión activa",
         "Waiting for part removal": "Esperando retirar la pieza",
@@ -9048,7 +9051,6 @@ TRANSLATIONS = {
         "Could not save notification settings.": "No se pudo guardar la configuración de notificaciones.",
         "Could not save print history. New entries are still available for this session.": "No se pudo guardar el historial de impresión. Todavía hay nuevas entradas disponibles para esta sesión.",
         "Could not save the settings.": "No se pudo guardar la configuración.",
-        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "No se pudo iniciar la cámara Creator 5 Pro. Verifique el modo LAN y vuelva a conectarse.",
         "Cream": "Crema",
         "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "Creator 5 and 5 Pro requiere tanto CheckCode como el número de serie de la impresora. Adventurer 5M lee su número de serie automáticamente.",
         "Creator repeat printing requires a .3mf.": "La impresión repetida de Creator requiere un .3mf.",
@@ -9065,8 +9067,8 @@ TRANSLATIONS = {
         "Down": "Abajo",
         "Edit as text": "Editar como texto",
         "Edit slot": "Editar espacio",
-        "Edit slot A{slot}": "Editar ranura A{slot}",
-        "Edit slot A{slot} · {material}": "Editar ranura A{slot} · {material}",
+        "Edit slot {slot}": "Editar ranura {slot}",
+        "Edit slot {slot} · {material}": "Editar ranura {slot} · {material}",
         "Elapsed": "Transcurrido",
         "Elapsed: {time}": "Transcurrido: {time}",
         "Empty": "Vacío",
@@ -9170,6 +9172,7 @@ TRANSLATIONS = {
         "Manual controls require an idle printer": "Los controles manuales requieren una impresora inactiva",
         "Material": "Materiales",
         "Materials · IFS": "Materiales · IFS",
+        "Materials": "Materiales",
         "Medium": "Medio",
         "Model": "Modelo",
         "Monitor": "Monitor",
@@ -9395,7 +9398,6 @@ TRANSLATIONS = {
         "The .3mf has invalid or unsupported filament assignments.": "El .3mf tiene asignaciones de filamentos no válidas o no admitidas.",
         "The .3mf transfer was interrupted.": "La transferencia .3mf fue interrumpida.",
         "The CheckCode must be printable ASCII, up to 32 characters.": "El CheckCode debe ser ASCII imprimible, de hasta 32 caracteres.",
-        "The Creator 5 Pro camera is unavailable.": "La cámara Creator 5 Pro no está disponible.",
         "The active printer profile changed. Try again.": "El perfil de la impresora activa cambió. Intentar otra vez.",
         "The current job changed before {command} could be confirmed.": "El trabajo actual cambió antes de que se pudiera confirmar {command}.",
         "The end of this job was not observed.": "No se observó el final de este trabajo.",
@@ -9493,6 +9495,7 @@ TRANSLATIONS = {
         "{time} left": "Quedan {time}",
     },
     "eu": {
+        "Remove the print and close the completion dialog on the printer, if shown.": "Kendu inprimatutako pieza eta itxi amaierako elkarrizketa inprimagailuan, agertzen bada.",
         "While this tab is open": "Fitxa hau irekita dagoen bitartean",
         "Only during an active print": "Inprimaketa aktiboan soilik",
         "Waiting for part removal": "Pieza kentzeko zain",
@@ -9640,7 +9643,6 @@ TRANSLATIONS = {
         "Could not save notification settings.": "Ezin izan dira gorde jakinarazpen-ezarpenak.",
         "Could not save print history. New entries are still available for this session.": "Ezin izan da inprimatze-historia gorde. Saio honetarako sarrera berriak eskuragarri daude oraindik.",
         "Could not save the settings.": "Ezin izan dira ezarpenak gorde.",
-        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "Ezin izan da Creator 5 Pro kamera abiarazi. Egiaztatu LAN modua eta berriro konektatu.",
         "Cream": "Krema",
         "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "Creator 5 and 5 Pro CheckCode eta inprimagailuaren serie zenbakia behar dira. Adventurer 5M-k bere serie-zenbakia automatikoki irakurtzen du.",
         "Creator repeat printing requires a .3mf.": "Sortzaileak errepikatzeko inprimaketak .3mf behar du.",
@@ -9657,8 +9659,8 @@ TRANSLATIONS = {
         "Down": "Behera",
         "Edit as text": "Editatu testu gisa",
         "Edit slot": "Editatu zirrikitua",
-        "Edit slot A{slot}": "Editatu zirrikitua A{slot}",
-        "Edit slot A{slot} · {material}": "Editatu zirrikitua A{slot} · {material}",
+        "Edit slot {slot}": "Editatu zirrikitua {slot}",
+        "Edit slot {slot} · {material}": "Editatu zirrikitua {slot} · {material}",
         "Elapsed": "Igaro",
         "Elapsed: {time}": "Igaro da: {time}",
         "Empty": "Hutsik",
@@ -9762,6 +9764,7 @@ TRANSLATIONS = {
         "Manual controls require an idle printer": "Eskuzko kontrolek inaktibo inprimagailu bat behar dute",
         "Material": "Materiala",
         "Materials · IFS": "Materialak · IFS",
+        "Materials": "Materialak",
         "Medium": "Ertaina",
         "Model": "Eredua",
         "Monitor": "Monitorea",
@@ -9987,7 +9990,6 @@ TRANSLATIONS = {
         "The .3mf has invalid or unsupported filament assignments.": ".3mf-k harizpi-esleipen baliogabeak edo onartzen ez ditu.",
         "The .3mf transfer was interrupted.": ".3mf transferentzia eten egin da.",
         "The CheckCode must be printable ASCII, up to 32 characters.": "CheckCode ASCII inprimagarria izan behar du, 32 karaktere gehienez.",
-        "The Creator 5 Pro camera is unavailable.": "Creator 5 Pro kamera ez dago erabilgarri.",
         "The active printer profile changed. Try again.": "Inprimagailuaren profil aktiboa aldatu da. Saiatu berriro.",
         "The current job changed before {command} could be confirmed.": "Uneko lana aldatu da {command} berretsi aurretik.",
         "The end of this job was not observed.": "Lan honen amaiera ez da ikusi.",
@@ -10085,6 +10087,7 @@ TRANSLATIONS = {
         "{time} left": "{time} geratzen da",
     },
     "fr": {
+        "Remove the print and close the completion dialog on the printer, if shown.": "Retirez la pièce et fermez la boîte de dialogue de fin sur l’imprimante si elle s’affiche.",
         "While this tab is open": "Tant que cet onglet est ouvert",
         "Only during an active print": "Uniquement pendant une impression active",
         "Waiting for part removal": "En attente du retrait de la pièce",
@@ -10232,7 +10235,6 @@ TRANSLATIONS = {
         "Could not save notification settings.": "Impossible d'enregistrer les paramètres de notification.",
         "Could not save print history. New entries are still available for this session.": "Impossible de sauvegarder l'historique des impressions. De nouvelles entrées sont encore disponibles pour cette session.",
         "Could not save the settings.": "Impossible d'enregistrer les paramètres.",
-        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "Impossible de démarrer la caméra Creator 5 Pro. Vérifiez le mode LAN et reconnectez-vous.",
         "Cream": "Crème",
         "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "Creator 5 and 5 Pro nécessite à la fois CheckCode et le numéro de série de l'imprimante. Adventurer 5M lit automatiquement son numéro de série.",
         "Creator repeat printing requires a .3mf.": "L'impression répétée du créateur nécessite un .3mf.",
@@ -10249,8 +10251,8 @@ TRANSLATIONS = {
         "Down": "Bas",
         "Edit as text": "Modifier sous forme de texte",
         "Edit slot": "Modifier l'emplacement",
-        "Edit slot A{slot}": "Modifier l'emplacement A{slot}",
-        "Edit slot A{slot} · {material}": "Modifier l'emplacement A{slot} · {material}",
+        "Edit slot {slot}": "Modifier l'emplacement {slot}",
+        "Edit slot {slot} · {material}": "Modifier l'emplacement {slot} · {material}",
         "Elapsed": "Écoulé",
         "Elapsed: {time}": "Écoulé : {time}",
         "Empty": "Vide",
@@ -10354,6 +10356,7 @@ TRANSLATIONS = {
         "Manual controls require an idle printer": "Les commandes manuelles nécessitent une imprimante inactive",
         "Material": "Matériel",
         "Materials · IFS": "Matériaux · IFS",
+        "Materials": "Matériaux",
         "Medium": "Moyen",
         "Model": "Modèle",
         "Monitor": "Moniteur",
@@ -10579,7 +10582,6 @@ TRANSLATIONS = {
         "The .3mf has invalid or unsupported filament assignments.": "Le .3mf a des affectations de filaments invalides ou non prises en charge.",
         "The .3mf transfer was interrupted.": "Le transfert .3mf a été interrompu.",
         "The CheckCode must be printable ASCII, up to 32 characters.": "Le CheckCode doit être en ASCII imprimable, comportant jusqu'à 32 caractères.",
-        "The Creator 5 Pro camera is unavailable.": "La caméra Creator 5 Pro n'est pas disponible.",
         "The active printer profile changed. Try again.": "Le profil d'imprimante actif a changé. Essayer à nouveau.",
         "The current job changed before {command} could be confirmed.": "Le travail en cours a été modifié avant que {command} puisse être confirmé.",
         "The end of this job was not observed.": "La fin de ce travail n'a pas été observée.",
@@ -10677,6 +10679,7 @@ TRANSLATIONS = {
         "{time} left": "Reste {time}",
     },
     "hu": {
+        "Remove the print and close the completion dialog on the printer, if shown.": "Vedd le a nyomatot, és zárd be a nyomtatón a befejezési ablakot, ha megjelenik.",
         "While this tab is open": "Amíg ez a lap nyitva van",
         "Only during an active print": "Csak aktív nyomtatás közben",
         "Waiting for part removal": "Az alkatrész eltávolítására vár",
@@ -10824,7 +10827,6 @@ TRANSLATIONS = {
         "Could not save notification settings.": "Nem sikerült menteni az értesítési beállításokat.",
         "Could not save print history. New entries are still available for this session.": "Nem sikerült menteni a nyomtatási előzményeket. Még mindig elérhetők új bejegyzések erre a munkamenetre.",
         "Could not save the settings.": "Nem sikerült menteni a beállításokat.",
-        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "Nem sikerült elindítani a Creator 5 Pro kamerát. Ellenőrizze a LAN módot, és csatlakoztassa újra.",
         "Cream": "Krém",
         "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "A Creator 5 and 5 Pro esetén a CheckCode és a nyomtató sorozatszáma is szükséges. A Adventurer 5M automatikusan beolvassa a sorozatszámát.",
         "Creator repeat printing requires a .3mf.": "Az alkotói ismételt nyomtatáshoz .3mf szükséges.",
@@ -10841,8 +10843,8 @@ TRANSLATIONS = {
         "Down": "Le",
         "Edit as text": "Szerkesztés szövegként",
         "Edit slot": "Szerkesztési hely",
-        "Edit slot A{slot}": "A{slot} bővítőhely szerkesztése",
-        "Edit slot A{slot} · {material}": "Szerkesztőhely A{slot} · {material}",
+        "Edit slot {slot}": "{slot} bővítőhely szerkesztése",
+        "Edit slot {slot} · {material}": "Szerkesztőhely {slot} · {material}",
         "Elapsed": "Eltelt",
         "Elapsed: {time}": "Eltelt: {time}",
         "Empty": "Üres",
@@ -10946,6 +10948,7 @@ TRANSLATIONS = {
         "Manual controls require an idle printer": "A kézi vezérléshez üresjárati nyomtatóra van szükség",
         "Material": "Anyag",
         "Materials · IFS": "Anyagok · IFS",
+        "Materials": "Anyagok",
         "Medium": "Közepes",
         "Model": "Modell",
         "Monitor": "Monitor",
@@ -11171,7 +11174,6 @@ TRANSLATIONS = {
         "The .3mf has invalid or unsupported filament assignments.": "A .3mf izzószál-hozzárendelései érvénytelenek vagy nem támogatottak.",
         "The .3mf transfer was interrupted.": "A .3mf átvitel megszakadt.",
         "The CheckCode must be printable ASCII, up to 32 characters.": "A CheckCode-nek nyomtatható ASCII-nek kell lennie, legfeljebb 32 karakterből.",
-        "The Creator 5 Pro camera is unavailable.": "A Creator 5 Pro kamera nem elérhető.",
         "The active printer profile changed. Try again.": "Az aktív nyomtatóprofil megváltozott. Próbáld újra.",
         "The current job changed before {command} could be confirmed.": "Az aktuális feladat megváltozott, mielőtt a {command} megerősítést nyert volna.",
         "The end of this job was not observed.": "Ennek a munkának a végét nem figyelték meg.",
@@ -11269,6 +11271,7 @@ TRANSLATIONS = {
         "{time} left": "Hátralévő idő: {time}",
     },
     "it": {
+        "Remove the print and close the completion dialog on the printer, if shown.": "Rimuovi il pezzo e chiudi l’avviso di fine stampa sulla stampante, se visualizzato.",
         "While this tab is open": "Finché questa scheda è aperta",
         "Only during an active print": "Solo con una stampa attiva",
         "Waiting for part removal": "In attesa della rimozione del pezzo",
@@ -11416,7 +11419,6 @@ TRANSLATIONS = {
         "Could not save notification settings.": "Impossibile salvare le impostazioni di notifica.",
         "Could not save print history. New entries are still available for this session.": "Impossibile salvare la cronologia di stampa. Sono ancora disponibili nuove voci per questa sessione.",
         "Could not save the settings.": "Impossibile salvare le impostazioni.",
-        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "Impossibile avviare la fotocamera Creator 5 Pro. Controllare la modalità LAN e riconnettersi.",
         "Cream": "Panna",
         "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "Creator 5 and 5 Pro richiedono sia CheckCode che il numero di serie della stampante. Adventurer 5M legge automaticamente il proprio numero di serie.",
         "Creator repeat printing requires a .3mf.": "La stampa ripetuta del creatore richiede un .3mf.",
@@ -11433,8 +11435,8 @@ TRANSLATIONS = {
         "Down": "Giù",
         "Edit as text": "Modifica come testo",
         "Edit slot": "Modifica slot",
-        "Edit slot A{slot}": "Modifica slot A{slot}",
-        "Edit slot A{slot} · {material}": "Modifica slot A{slot} · {material}",
+        "Edit slot {slot}": "Modifica slot {slot}",
+        "Edit slot {slot} · {material}": "Modifica slot {slot} · {material}",
         "Elapsed": "Trascorso",
         "Elapsed: {time}": "Trascorso: {time}",
         "Empty": "Vuoto",
@@ -11538,6 +11540,7 @@ TRANSLATIONS = {
         "Manual controls require an idle printer": "I controlli manuali richiedono una stampante inattiva",
         "Material": "Materiale",
         "Materials · IFS": "Materiali · IFS",
+        "Materials": "Materiali",
         "Medium": "Medio",
         "Model": "Modello",
         "Monitor": "Monitor",
@@ -11763,7 +11766,6 @@ TRANSLATIONS = {
         "The .3mf has invalid or unsupported filament assignments.": ".3mf ha assegnazioni di filamenti non valide o non supportate.",
         "The .3mf transfer was interrupted.": "Il trasferimento .3mf è stato interrotto.",
         "The CheckCode must be printable ASCII, up to 32 characters.": "CheckCode deve essere ASCII stampabile, fino a 32 caratteri.",
-        "The Creator 5 Pro camera is unavailable.": "La fotocamera Creator 5 Pro non è disponibile.",
         "The active printer profile changed. Try again.": "Il profilo della stampante attiva è cambiato. Riprova.",
         "The current job changed before {command} could be confirmed.": "Il lavoro corrente è stato modificato prima che {command} potesse essere confermato.",
         "The end of this job was not observed.": "La fine di questo lavoro non è stata rispettata.",
@@ -11861,6 +11863,7 @@ TRANSLATIONS = {
         "{time} left": "Tempo rimasto: {time}",
     },
     "ja": {
+        "Remove the print and close the completion dialog on the printer, if shown.": "造形物を取り外し、プリンターに完了ダイアログが表示されていれば閉じてください。",
         "While this tab is open": "このタブを開いている間",
         "Only during an active print": "印刷ジョブが進行中のときのみ",
         "Waiting for part removal": "造形物の取り外し待ち",
@@ -12008,7 +12011,6 @@ TRANSLATIONS = {
         "Could not save notification settings.": "通知設定を保存できませんでした。",
         "Could not save print history. New entries are still available for this session.": "印刷履歴を保存できませんでした。このセッションでは引き続き新しいエントリを利用できます。",
         "Could not save the settings.": "設定を保存できませんでした。",
-        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "Creator 5 Proカメラを起動できませんでした。 LAN モードを確認して再接続します。",
         "Cream": "クリーム",
         "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "Creator 5 and 5 Pro には、CheckCode とプリンターのシリアル番号の両方が必要です。 Adventurer 5M はシリアル番号を自動的に読み取ります。",
         "Creator repeat printing requires a .3mf.": "クリエイターリピート印刷には.3mfが必要です。",
@@ -12025,8 +12027,8 @@ TRANSLATIONS = {
         "Down": "下へ",
         "Edit as text": "テキストとして編集",
         "Edit slot": "スロットの編集",
-        "Edit slot A{slot}": "スロット編集 A{slot}",
-        "Edit slot A{slot} · {material}": "スロット編集 A{slot}・{material}",
+        "Edit slot {slot}": "スロット編集 {slot}",
+        "Edit slot {slot} · {material}": "スロット編集 {slot}・{material}",
         "Elapsed": "経過",
         "Elapsed: {time}": "経過時間: {time}",
         "Empty": "空",
@@ -12130,6 +12132,7 @@ TRANSLATIONS = {
         "Manual controls require an idle printer": "手動制御にはアイドル状態のプリンターが必要です",
         "Material": "素材",
         "Materials · IFS": "素材・IFS",
+        "Materials": "素材",
         "Medium": "中",
         "Model": "モデル",
         "Monitor": "モニター",
@@ -12355,7 +12358,6 @@ TRANSLATIONS = {
         "The .3mf has invalid or unsupported filament assignments.": ".3mf には無効またはサポートされていないフィラメント割り当てがあります。",
         "The .3mf transfer was interrupted.": ".3mf転送が中断されました。",
         "The CheckCode must be printable ASCII, up to 32 characters.": "CheckCode は、最大 32 文字の印刷可能な ASCII でなければなりません。",
-        "The Creator 5 Pro camera is unavailable.": "Creator 5 Pro カメラは使用できません。",
         "The active printer profile changed. Try again.": "アクティブなプリンタープロファイルが変更されました。もう一度やり直してください。",
         "The current job changed before {command} could be confirmed.": "{command}を確認する前に現在のジョブが変更されました。",
         "The end of this job was not observed.": "このジョブの終了は観察されませんでした。",
@@ -12453,6 +12455,7 @@ TRANSLATIONS = {
         "{time} left": "残り {time}",
     },
     "ko": {
+        "Remove the print and close the completion dialog on the printer, if shown.": "출력물을 제거하고 프린터에 완료 창이 표시되면 닫으세요.",
         "While this tab is open": "이 탭이 열려 있는 동안",
         "Only during an active print": "인쇄 작업이 진행 중일 때만",
         "Waiting for part removal": "출력물 제거 대기 중",
@@ -12600,7 +12603,6 @@ TRANSLATIONS = {
         "Could not save notification settings.": "알림 설정을 저장할 수 없습니다.",
         "Could not save print history. New entries are still available for this session.": "인쇄 기록을 저장할 수 없습니다. 이 세션에는 아직 새 항목을 사용할 수 있습니다.",
         "Could not save the settings.": "설정을 저장할 수 없습니다.",
-        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "Creator 5 Pro 카메라를 시작할 수 없습니다. LAN 모드를 확인하고 다시 연결하세요.",
         "Cream": "크림",
         "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "Creator 5 and 5 Pro에는 CheckCode와 프린터 일련 번호가 모두 필요합니다. Adventurer 5M는 일련번호를 자동으로 읽습니다.",
         "Creator repeat printing requires a .3mf.": "Creator 반복 인쇄에는 .3mf가 필요합니다.",
@@ -12617,8 +12619,8 @@ TRANSLATIONS = {
         "Down": "다운",
         "Edit as text": "텍스트로 편집",
         "Edit slot": "슬롯 편집",
-        "Edit slot A{slot}": "슬롯 A{slot} 편집",
-        "Edit slot A{slot} · {material}": "슬롯 편집 A{slot} · {material}",
+        "Edit slot {slot}": "슬롯 {slot} 편집",
+        "Edit slot {slot} · {material}": "슬롯 편집 {slot} · {material}",
         "Elapsed": "경과",
         "Elapsed: {time}": "경과: {time}",
         "Empty": "비어 있음",
@@ -12722,6 +12724,7 @@ TRANSLATIONS = {
         "Manual controls require an idle printer": "수동 제어에는 유휴 프린터가 필요합니다.",
         "Material": "소재",
         "Materials · IFS": "재료 · IFS",
+        "Materials": "재료",
         "Medium": "중형",
         "Model": "모델",
         "Monitor": "모니터",
@@ -12947,7 +12950,6 @@ TRANSLATIONS = {
         "The .3mf has invalid or unsupported filament assignments.": ".3mf에 유효하지 않거나 지원되지 않는 필라멘트 할당이 있습니다.",
         "The .3mf transfer was interrupted.": ".3mf 전송이 중단되었습니다.",
         "The CheckCode must be printable ASCII, up to 32 characters.": "CheckCode는 인쇄 가능한 ASCII여야 하며 최대 32자까지 가능합니다.",
-        "The Creator 5 Pro camera is unavailable.": "Creator 5 Pro 카메라를 사용할 수 없습니다.",
         "The active printer profile changed. Try again.": "활성 프린터 프로필이 변경되었습니다. 다시 시도해 보세요.",
         "The current job changed before {command} could be confirmed.": "{command}를 확인하기 전에 현재 작업이 변경되었습니다.",
         "The end of this job was not observed.": "이 작업의 종료가 관찰되지 않았습니다.",
@@ -13045,6 +13047,7 @@ TRANSLATIONS = {
         "{time} left": "남은 시간: {time}",
     },
     "lt": {
+        "Remove the print and close the completion dialog on the printer, if shown.": "Nuimkite spaudinį ir užverkite baigimo langą spausdintuve, jei jis rodomas.",
         "While this tab is open": "Kol šis skirtukas atvertas",
         "Only during an active print": "Tik vykstant spausdinimui",
         "Waiting for part removal": "Laukiama, kol bus nuimta detalė",
@@ -13192,7 +13195,6 @@ TRANSLATIONS = {
         "Could not save notification settings.": "Nepavyko išsaugoti pranešimų nustatymų.",
         "Could not save print history. New entries are still available for this session.": "Nepavyko išsaugoti spausdinimo istorijos. Šioje sesijoje vis dar yra naujų įrašų.",
         "Could not save the settings.": "Nepavyko išsaugoti nustatymų.",
-        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "Nepavyko paleisti Creator 5 Pro fotoaparato. Patikrinkite LAN režimą ir vėl prijunkite.",
         "Cream": "Kremas",
         "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "Creator 5 and 5 Pro reikalingas ir CheckCode, ir spausdintuvo serijos numeris. Adventurer 5M automatiškai nuskaito savo serijos numerį.",
         "Creator repeat printing requires a .3mf.": "Kūrėjo pakartotiniam spausdinimui reikalingas .3mf.",
@@ -13209,8 +13211,8 @@ TRANSLATIONS = {
         "Down": "Žemyn",
         "Edit as text": "Redaguoti kaip tekstą",
         "Edit slot": "Redaguoti lizdą",
-        "Edit slot A{slot}": "Redaguoti lizdą A{slot}",
-        "Edit slot A{slot} · {material}": "Redagavimo lizdas A{slot} · {material}",
+        "Edit slot {slot}": "Redaguoti lizdą {slot}",
+        "Edit slot {slot} · {material}": "Redagavimo lizdas {slot} · {material}",
         "Elapsed": "Praėjo",
         "Elapsed: {time}": "Praėjo: {time}",
         "Empty": "Tuščia",
@@ -13314,6 +13316,7 @@ TRANSLATIONS = {
         "Manual controls require an idle printer": "Rankiniam valdymui reikalingas neveikiantis spausdintuvas",
         "Material": "Medžiaga",
         "Materials · IFS": "Medžiagos · IFS",
+        "Materials": "Medžiagos",
         "Medium": "Vidutinis",
         "Model": "Modelis",
         "Monitor": "Stebėjimas",
@@ -13539,7 +13542,6 @@ TRANSLATIONS = {
         "The .3mf has invalid or unsupported filament assignments.": ".3mf yra netinkamų arba nepalaikomų kaitinamųjų siūlų priskyrimų.",
         "The .3mf transfer was interrupted.": ".3mf perdavimas buvo nutrauktas.",
         "The CheckCode must be printable ASCII, up to 32 characters.": "CheckCode turi būti spausdinamas ASCII, iki 32 simbolių.",
-        "The Creator 5 Pro camera is unavailable.": "Fotoaparatas Creator 5 Pro nepasiekiamas.",
         "The active printer profile changed. Try again.": "Pakeistas aktyvus spausdintuvo profilis. Bandykite dar kartą.",
         "The current job changed before {command} could be confirmed.": "Dabartinis darbas pasikeitė prieš patvirtinant {command}.",
         "The end of this job was not observed.": "Šio darbo pabaigos nepastebėta.",
@@ -13637,6 +13639,7 @@ TRANSLATIONS = {
         "{time} left": "Liko {time}",
     },
     "nl": {
+        "Remove the print and close the completion dialog on the printer, if shown.": "Verwijder de afdruk en sluit het voltooiingsvenster op de printer als het wordt weergegeven.",
         "While this tab is open": "Zolang dit tabblad open is",
         "Only during an active print": "Alleen bij een actieve afdruktaak",
         "Waiting for part removal": "Wacht op verwijderen van het onderdeel",
@@ -13784,7 +13787,6 @@ TRANSLATIONS = {
         "Could not save notification settings.": "Kan meldingsinstellingen niet opslaan.",
         "Could not save print history. New entries are still available for this session.": "Kon de afdrukgeschiedenis niet opslaan. Er zijn nog nieuwe aanmeldingen beschikbaar voor deze sessie.",
         "Could not save the settings.": "Kon de instellingen niet opslaan.",
-        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "Kan de Creator 5 Pro-camera niet starten. Controleer de LAN-modus en maak opnieuw verbinding.",
         "Cream": "Crème",
         "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "Voor Creator 5 and 5 Pro zijn zowel CheckCode als het serienummer van de printer vereist. Adventurer 5M leest het serienummer automatisch.",
         "Creator repeat printing requires a .3mf.": "Voor herhaaldelijk afdrukken van Creator is een .3mf vereist.",
@@ -13801,8 +13803,8 @@ TRANSLATIONS = {
         "Down": "Omlaag",
         "Edit as text": "Bewerken als tekst",
         "Edit slot": "Slot bewerken",
-        "Edit slot A{slot}": "Slot A{slot} bewerken",
-        "Edit slot A{slot} · {material}": "Slot A{slot} bewerken · {material}",
+        "Edit slot {slot}": "Slot {slot} bewerken",
+        "Edit slot {slot} · {material}": "Slot {slot} bewerken · {material}",
         "Elapsed": "Verstreken",
         "Elapsed: {time}": "Verstreken: {time}",
         "Empty": "Leeg",
@@ -13906,6 +13908,7 @@ TRANSLATIONS = {
         "Manual controls require an idle printer": "Voor handmatige bediening is een inactieve printer vereist",
         "Material": "Materiaal",
         "Materials · IFS": "Materialen · IFS",
+        "Materials": "Materialen",
         "Medium": "Gemiddeld",
         "Model": "Model",
         "Monitor": "Monitor",
@@ -14131,7 +14134,6 @@ TRANSLATIONS = {
         "The .3mf has invalid or unsupported filament assignments.": "De .3mf heeft ongeldige of niet-ondersteunde filamenttoewijzingen.",
         "The .3mf transfer was interrupted.": "De .3mf-overdracht is onderbroken.",
         "The CheckCode must be printable ASCII, up to 32 characters.": "De CheckCode moet afdrukbaar ASCII zijn, maximaal 32 tekens.",
-        "The Creator 5 Pro camera is unavailable.": "De Creator 5 Pro-camera is niet beschikbaar.",
         "The active printer profile changed. Try again.": "Het actieve printerprofiel is gewijzigd. Probeer het opnieuw.",
         "The current job changed before {command} could be confirmed.": "De huidige taak is gewijzigd voordat {command} kon worden bevestigd.",
         "The end of this job was not observed.": "Het einde van deze klus werd niet in acht genomen.",
@@ -14229,6 +14231,7 @@ TRANSLATIONS = {
         "{time} left": "Nog {time}",
     },
     "pl": {
+        "Remove the print and close the completion dialog on the printer, if shown.": "Zdejmij wydruk i zamknij okno zakończenia na drukarce, jeśli jest widoczne.",
         "While this tab is open": "Gdy ta karta jest otwarta",
         "Only during an active print": "Tylko podczas aktywnego drukowania",
         "Waiting for part removal": "Czeka na zdjęcie wydruku",
@@ -14376,7 +14379,6 @@ TRANSLATIONS = {
         "Could not save notification settings.": "Nie można zapisać ustawień powiadomień.",
         "Could not save print history. New entries are still available for this session.": "Nie można zapisać historii drukowania. W tej sesji nadal dostępne są nowe wpisy.",
         "Could not save the settings.": "Nie można zapisać ustawień.",
-        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "Nie można uruchomić kamery Creator 5 Pro. Sprawdź tryb LAN i podłącz ponownie.",
         "Cream": "Krem",
         "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "Creator 5 and 5 Pro wymaga zarówno CheckCode, jak i numeru seryjnego drukarki. Adventurer 5M automatycznie odczytuje swój numer seryjny.",
         "Creator repeat printing requires a .3mf.": "Ponowne drukowanie przez twórcę wymaga .3mf.",
@@ -14393,8 +14395,8 @@ TRANSLATIONS = {
         "Down": "W dół",
         "Edit as text": "Edytuj jako tekst",
         "Edit slot": "Edytuj miejsce",
-        "Edit slot A{slot}": "Edytuj szczelinę A{slot}",
-        "Edit slot A{slot} · {material}": "Edytuj szczelinę A{slot} · {material}",
+        "Edit slot {slot}": "Edytuj szczelinę {slot}",
+        "Edit slot {slot} · {material}": "Edytuj szczelinę {slot} · {material}",
         "Elapsed": "Upłynęło",
         "Elapsed: {time}": "Upłynęło: {time}",
         "Empty": "Puste",
@@ -14498,6 +14500,7 @@ TRANSLATIONS = {
         "Manual controls require an idle printer": "Sterowanie ręczne wymaga bezczynnej drukarki",
         "Material": "Materiał",
         "Materials · IFS": "Materiały · IFS",
+        "Materials": "Materiały",
         "Medium": "Średni",
         "Model": "Model",
         "Monitor": "Monitor",
@@ -14723,7 +14726,6 @@ TRANSLATIONS = {
         "The .3mf has invalid or unsupported filament assignments.": ".3mf ma nieprawidłowe lub nieobsługiwane przypisania żarników.",
         "The .3mf transfer was interrupted.": "Przesyłanie .3mf zostało przerwane.",
         "The CheckCode must be printable ASCII, up to 32 characters.": "Wartość CheckCode musi być zapisywana w formacie ASCII i mieć maksymalnie 32 znaki.",
-        "The Creator 5 Pro camera is unavailable.": "Kamera Creator 5 Pro jest niedostępna.",
         "The active printer profile changed. Try again.": "Zmienił się aktywny profil drukarki. Spróbuj ponownie.",
         "The current job changed before {command} could be confirmed.": "Bieżące zadanie zostało zmienione przed potwierdzeniem {command}.",
         "The end of this job was not observed.": "Nie zaobserwowano końca tego zadania.",
@@ -14821,6 +14823,7 @@ TRANSLATIONS = {
         "{time} left": "Pozostało {time}",
     },
     "pt-BR": {
+        "Remove the print and close the completion dialog on the printer, if shown.": "Retire a peça e feche o aviso de conclusão na impressora, se estiver visível.",
         "While this tab is open": "Enquanto esta aba estiver aberta",
         "Only during an active print": "Somente durante uma impressão ativa",
         "Waiting for part removal": "Aguardando a retirada da peça",
@@ -14968,7 +14971,6 @@ TRANSLATIONS = {
         "Could not save notification settings.": "Não foi possível salvar as configurações de notificação.",
         "Could not save print history. New entries are still available for this session.": "Não foi possível salvar o histórico de impressão. Novas entradas ainda estão disponíveis para esta sessão.",
         "Could not save the settings.": "Não foi possível salvar as configurações.",
-        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "Não foi possível iniciar a câmera Creator 5 Pro. Verifique o modo LAN e reconecte.",
         "Cream": "Creme",
         "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "Creator 5 and 5 Pro requer CheckCode e o número de série da impressora. Adventurer 5M lê seu número de série automaticamente.",
         "Creator repeat printing requires a .3mf.": "A impressão repetida do Creator requer um .3mf.",
@@ -14985,8 +14987,8 @@ TRANSLATIONS = {
         "Down": "Para baixo",
         "Edit as text": "Editar como texto",
         "Edit slot": "Editar slot",
-        "Edit slot A{slot}": "Editar slot A{slot}",
-        "Edit slot A{slot} · {material}": "Editar slot A{slot} · {material}",
+        "Edit slot {slot}": "Editar slot {slot}",
+        "Edit slot {slot} · {material}": "Editar slot {slot} · {material}",
         "Elapsed": "Decorrido",
         "Elapsed: {time}": "Decorrido: {time}",
         "Empty": "Vazio",
@@ -15090,6 +15092,7 @@ TRANSLATIONS = {
         "Manual controls require an idle printer": "Os controles manuais exigem uma impressora ociosa",
         "Material": "Materiais",
         "Materials · IFS": "Materiais · IFS",
+        "Materials": "Materiais",
         "Medium": "Médio",
         "Model": "Modelo",
         "Monitor": "Monitor",
@@ -15315,7 +15318,6 @@ TRANSLATIONS = {
         "The .3mf has invalid or unsupported filament assignments.": "O .3mf possui atribuições de filamento inválidas ou não suportadas.",
         "The .3mf transfer was interrupted.": "A transferência .3mf foi interrompida.",
         "The CheckCode must be printable ASCII, up to 32 characters.": "O CheckCode deve ser ASCII imprimível, com até 32 caracteres.",
-        "The Creator 5 Pro camera is unavailable.": "A câmera Creator 5 Pro não está disponível.",
         "The active printer profile changed. Try again.": "O perfil da impressora ativa foi alterado. Tente novamente.",
         "The current job changed before {command} could be confirmed.": "O trabalho atual foi alterado antes que {command} pudesse ser confirmado.",
         "The end of this job was not observed.": "O término deste trabalho não foi observado.",
@@ -15413,6 +15415,7 @@ TRANSLATIONS = {
         "{time} left": "Tempo restante: {time}",
     },
     "ro": {
+        "Remove the print and close the completion dialog on the printer, if shown.": "Îndepărtează piesa și închide fereastra de finalizare de pe imprimantă, dacă apare.",
         "While this tab is open": "Cât timp această filă este deschisă",
         "Only during an active print": "Doar în timpul unei imprimări active",
         "Waiting for part removal": "Așteaptă îndepărtarea piesei",
@@ -15560,7 +15563,6 @@ TRANSLATIONS = {
         "Could not save notification settings.": "Nu s-au putut salva setările de notificare.",
         "Could not save print history. New entries are still available for this session.": "Nu s-a putut salva istoricul de imprimare. Înregistrări noi sunt încă disponibile pentru această sesiune.",
         "Could not save the settings.": "Nu s-au putut salva setările.",
-        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "Nu s-a putut porni camera Creator 5 Pro. Verificați modul LAN și reconectați.",
         "Cream": "Cremă",
         "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "Creator 5 and 5 Pro necesită atât CheckCode, cât și numărul de serie al imprimantei. Adventurer 5M citește automat numărul de serie.",
         "Creator repeat printing requires a .3mf.": "Imprimarea repetată Creator necesită un .3mf.",
@@ -15577,8 +15579,8 @@ TRANSLATIONS = {
         "Down": "Jos",
         "Edit as text": "Editați ca text",
         "Edit slot": "Editați slotul",
-        "Edit slot A{slot}": "Editați slotul A{slot}",
-        "Edit slot A{slot} · {material}": "Editare slot A{slot} · {material}",
+        "Edit slot {slot}": "Editați slotul {slot}",
+        "Edit slot {slot} · {material}": "Editare slot {slot} · {material}",
         "Elapsed": "S-a scurs",
         "Elapsed: {time}": "S-a scurs: {time}",
         "Empty": "Gol",
@@ -15682,6 +15684,7 @@ TRANSLATIONS = {
         "Manual controls require an idle printer": "Comenzile manuale necesită o imprimantă inactivă",
         "Material": "Material",
         "Materials · IFS": "Materiale · IFS",
+        "Materials": "Materiale",
         "Medium": "Medie",
         "Model": "Model",
         "Monitor": "Monitor",
@@ -15907,7 +15910,6 @@ TRANSLATIONS = {
         "The .3mf has invalid or unsupported filament assignments.": ".3mf are atribuiri de filament nevalide sau neacceptate.",
         "The .3mf transfer was interrupted.": "Transferul .3mf a fost întrerupt.",
         "The CheckCode must be printable ASCII, up to 32 characters.": "CheckCode trebuie să fie imprimabil ASCII, până la 32 de caractere.",
-        "The Creator 5 Pro camera is unavailable.": "Camera Creator 5 Pro nu este disponibilă.",
         "The active printer profile changed. Try again.": "Profilul de imprimantă activ sa schimbat. Încearcă din nou.",
         "The current job changed before {command} could be confirmed.": "Lucrarea curentă sa schimbat înainte ca {command} să poată fi confirmat.",
         "The end of this job was not observed.": "Sfârșitul acestei lucrări nu a fost respectat.",
@@ -16005,6 +16007,7 @@ TRANSLATIONS = {
         "{time} left": "Timp rămas: {time}",
     },
     "ru": {
+        "Remove the print and close the completion dialog on the printer, if shown.": "Снимите деталь со стола и закройте окно «Печать завершена» на экране принтера, если оно открыто.",
         "While this tab is open": "Пока открыта эта вкладка",
         "Only during an active print": "Только при активном задании",
         "Waiting for part removal": "Ждёт снятия детали",
@@ -16152,7 +16155,6 @@ TRANSLATIONS = {
         "Could not save notification settings.": "Не удалось сохранить настройки уведомлений.",
         "Could not save print history. New entries are still available for this session.": "Не удалось сохранить историю печати. Новые записи доступны до конца сеанса.",
         "Could not save the settings.": "Не удалось сохранить настройки.",
-        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "Не удалось запустить камеру Creator 5 Pro. Проверьте режим локальной сети и подключитесь снова.",
         "Cream": "Кремовый",
         "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "Для Creator 5 и 5 Pro нужны CheckCode и серийный номер. У Adventurer 5M серийный номер определяется автоматически.",
         "Creator repeat printing requires a .3mf.": "Для повторной печати на Creator нужен файл .3mf.",
@@ -16169,8 +16171,8 @@ TRANSLATIONS = {
         "Down": "Вниз",
         "Edit as text": "Редактировать как текст",
         "Edit slot": "Редактировать слот",
-        "Edit slot A{slot}": "Редактировать слот A{slot}",
-        "Edit slot A{slot} · {material}": "Редактировать слот A{slot} · {material}",
+        "Edit slot {slot}": "Редактировать слот {slot}",
+        "Edit slot {slot} · {material}": "Редактировать слот {slot} · {material}",
         "Elapsed": "Прошло",
         "Elapsed: {time}": "Прошло: {time}",
         "Empty": "Пусто",
@@ -16275,6 +16277,7 @@ TRANSLATIONS = {
         "Manual controls require an idle printer": "Ручное управление доступно, когда принтер свободен",
         "Material": "Материал",
         "Materials · IFS": "Материалы · IFS",
+        "Materials": "Материалы",
         "Medium": "Средний",
         "Model": "Модель",
         "Monitor": "Монитор",
@@ -16499,7 +16502,6 @@ TRANSLATIONS = {
         "The .3mf has invalid or unsupported filament assignments.": "В файле .3mf недопустимые или неподдерживаемые назначения материалов.",
         "The .3mf transfer was interrupted.": "Передача .3mf была прервана.",
         "The CheckCode must be printable ASCII, up to 32 characters.": "CheckCode должен содержать до 32 печатных символов ASCII.",
-        "The Creator 5 Pro camera is unavailable.": "Камера Creator 5 Pro недоступна.",
         "The active printer profile changed. Try again.": "Активный профиль принтера изменен. Попробуйте еще раз.",
         "The current job changed before {command} could be confirmed.": "Текущее задание сменилось до подтверждения команды «{command}».",
         "The end of this job was not observed.": "Плагин не зафиксировал завершение этого задания.",
@@ -16597,6 +16599,7 @@ TRANSLATIONS = {
         "{time} left": "Осталось {time}",
     },
     "sv": {
+        "Remove the print and close the completion dialog on the printer, if shown.": "Ta bort utskriften och stäng dialogrutan på skrivaren om den visas.",
         "While this tab is open": "Medan den här fliken är öppen",
         "Only during an active print": "Endast under en aktiv utskrift",
         "Waiting for part removal": "Väntar på att delen tas bort",
@@ -16744,7 +16747,6 @@ TRANSLATIONS = {
         "Could not save notification settings.": "Kunde inte spara aviseringsinställningar.",
         "Could not save print history. New entries are still available for this session.": "Det gick inte att spara utskriftshistoriken. Nya bidrag är fortfarande tillgängliga för denna session.",
         "Could not save the settings.": "Kunde inte spara inställningarna.",
-        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "Det gick inte att starta Creator 5 Pro-kameran. Kontrollera LAN-läget och återanslut.",
         "Cream": "Kräm",
         "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "Creator 5 and 5 Pro kräver både CheckCode och skrivarens serienummer. Adventurer 5M läser dess serienummer automatiskt.",
         "Creator repeat printing requires a .3mf.": "Creator upprepad utskrift kräver en .3mf.",
@@ -16761,8 +16763,8 @@ TRANSLATIONS = {
         "Down": "Ner",
         "Edit as text": "Redigera som text",
         "Edit slot": "Redigera plats",
-        "Edit slot A{slot}": "Redigera kortplats A{slot}",
-        "Edit slot A{slot} · {material}": "Redigera plats A{slot} · {material}",
+        "Edit slot {slot}": "Redigera kortplats {slot}",
+        "Edit slot {slot} · {material}": "Redigera plats {slot} · {material}",
         "Elapsed": "Förfluten",
         "Elapsed: {time}": "Förfluten: {time}",
         "Empty": "Tom",
@@ -16866,6 +16868,7 @@ TRANSLATIONS = {
         "Manual controls require an idle printer": "Manuella kontroller kräver en inaktiv skrivare",
         "Material": "Material",
         "Materials · IFS": "Material · IFS",
+        "Materials": "Material",
         "Medium": "Medium",
         "Model": "Modell",
         "Monitor": "Övervakning",
@@ -17091,7 +17094,6 @@ TRANSLATIONS = {
         "The .3mf has invalid or unsupported filament assignments.": ".3mf har ogiltiga eller ostödda filamenttilldelningar.",
         "The .3mf transfer was interrupted.": ".3mf-överföringen avbröts.",
         "The CheckCode must be printable ASCII, up to 32 characters.": "CheckCode måste vara utskrivbar ASCII, upp till 32 tecken.",
-        "The Creator 5 Pro camera is unavailable.": "Creator 5 Pro-kameran är inte tillgänglig.",
         "The active printer profile changed. Try again.": "Den aktiva skrivarprofilen har ändrats. Försök igen.",
         "The current job changed before {command} could be confirmed.": "Det aktuella jobbet ändrades innan {command} kunde bekräftas.",
         "The end of this job was not observed.": "Slutet på detta jobb observerades inte.",
@@ -17189,6 +17191,7 @@ TRANSLATIONS = {
         "{time} left": "{time} kvar",
     },
     "th": {
+        "Remove the print and close the completion dialog on the printer, if shown.": "นำชิ้นงานออกและปิดหน้าต่างแจ้งการพิมพ์เสร็จบนเครื่องพิมพ์หากปรากฏ",
         "While this tab is open": "ขณะที่เปิดแท็บนี้",
         "Only during an active print": "เฉพาะเมื่อมีงานพิมพ์ที่กำลังดำเนินการ",
         "Waiting for part removal": "รอนำชิ้นงานออก",
@@ -17336,7 +17339,6 @@ TRANSLATIONS = {
         "Could not save notification settings.": "ไม่สามารถบันทึกการตั้งค่าการแจ้งเตือนได้",
         "Could not save print history. New entries are still available for this session.": "ไม่สามารถบันทึกประวัติการพิมพ์ได้ รายการใหม่ยังคงมีอยู่สำหรับเซสชั่นนี้",
         "Could not save the settings.": "ไม่สามารถบันทึกการตั้งค่าได้",
-        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "ไม่สามารถสตาร์ทกล้อง Creator 5 Pro ได้ ตรวจสอบโหมด LAN และเชื่อมต่อใหม่",
         "Cream": "ครีม",
         "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "Creator 5 and 5 Pro ต้องใช้ทั้ง CheckCode และหมายเลขซีเรียลของเครื่องพิมพ์ Adventurer 5M อ่านหมายเลขซีเรียลโดยอัตโนมัติ",
         "Creator repeat printing requires a .3mf.": "การพิมพ์ซ้ำของผู้สร้างต้องใช้ .3mf",
@@ -17353,8 +17355,8 @@ TRANSLATIONS = {
         "Down": "ลง",
         "Edit as text": "แก้ไขเป็นข้อความ",
         "Edit slot": "แก้ไขช่อง",
-        "Edit slot A{slot}": "แก้ไขช่อง A{slot}",
-        "Edit slot A{slot} · {material}": "แก้ไขสล็อต A{slot} · {material}",
+        "Edit slot {slot}": "แก้ไขช่อง {slot}",
+        "Edit slot {slot} · {material}": "แก้ไขสล็อต {slot} · {material}",
         "Elapsed": "ผ่านไปแล้ว",
         "Elapsed: {time}": "ผ่านไป: {time}",
         "Empty": "ว่างเปล่า",
@@ -17458,6 +17460,7 @@ TRANSLATIONS = {
         "Manual controls require an idle printer": "การควบคุมแบบแมนนวลจำเป็นต้องใช้เครื่องพิมพ์ที่ไม่ได้ใช้งาน",
         "Material": "วัสดุ",
         "Materials · IFS": "วัสดุ · IFS",
+        "Materials": "วัสดุ",
         "Medium": "ปานกลาง",
         "Model": "รุ่น",
         "Monitor": "สถานะเครื่องพิมพ์",
@@ -17683,7 +17686,6 @@ TRANSLATIONS = {
         "The .3mf has invalid or unsupported filament assignments.": ".3mf มีการกำหนดฟิลาเมนต์ที่ไม่ถูกต้องหรือไม่ได้รับการสนับสนุน",
         "The .3mf transfer was interrupted.": "การถ่ายโอน .3mf ถูกขัดจังหวะ",
         "The CheckCode must be printable ASCII, up to 32 characters.": "CheckCode ต้องเป็น ASCII ที่สามารถพิมพ์ได้ สูงสุด 32 ตัวอักษร",
-        "The Creator 5 Pro camera is unavailable.": "กล้อง Creator 5 Pro ไม่พร้อมใช้งาน",
         "The active printer profile changed. Try again.": "โปรไฟล์เครื่องพิมพ์ที่ใช้งานอยู่มีการเปลี่ยนแปลง ลองอีกครั้ง",
         "The current job changed before {command} could be confirmed.": "งานปัจจุบันมีการเปลี่ยนแปลงก่อนที่ {command} จะได้รับการยืนยัน",
         "The end of this job was not observed.": "ไม่พบการสิ้นสุดของงานนี้",
@@ -17781,6 +17783,7 @@ TRANSLATIONS = {
         "{time} left": "เหลือ {time}",
     },
     "tr": {
+        "Remove the print and close the completion dialog on the printer, if shown.": "Baskıyı çıkarın ve görüntüleniyorsa yazıcıdaki tamamlanma penceresini kapatın.",
         "While this tab is open": "Bu sekme açıkken",
         "Only during an active print": "Yalnızca etkin bir baskı işi sırasında",
         "Waiting for part removal": "Parçanın çıkarılması bekleniyor",
@@ -17928,7 +17931,6 @@ TRANSLATIONS = {
         "Could not save notification settings.": "Bildirim ayarları kaydedilemedi.",
         "Could not save print history. New entries are still available for this session.": "Yazdırma geçmişi kaydedilemedi. Bu oturum için hâlâ yeni girişler mevcut.",
         "Could not save the settings.": "Ayarlar kaydedilemedi.",
-        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "Creator 5 Pro kamera başlatılamadı. LAN modunu kontrol edin ve yeniden bağlanın.",
         "Cream": "Krem",
         "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "Creator 5 and 5 Pro, hem CheckCode hem de yazıcı seri numarasını gerektirir. Adventurer 5M seri numarasını otomatik olarak okur.",
         "Creator repeat printing requires a .3mf.": "Oluşturucunun tekrarlı baskısı için .3mf gerekir.",
@@ -17945,8 +17947,8 @@ TRANSLATIONS = {
         "Down": "Aşağı",
         "Edit as text": "Metin olarak düzenle",
         "Edit slot": "Slotu düzenle",
-        "Edit slot A{slot}": "Slotu düzenle A{slot}",
-        "Edit slot A{slot} · {material}": "Yuvayı düzenle A{slot} · {material}",
+        "Edit slot {slot}": "Slotu düzenle {slot}",
+        "Edit slot {slot} · {material}": "Yuvayı düzenle {slot} · {material}",
         "Elapsed": "Geçen",
         "Elapsed: {time}": "Geçen: {time}",
         "Empty": "Boş",
@@ -18050,6 +18052,7 @@ TRANSLATIONS = {
         "Manual controls require an idle printer": "Manuel kontroller boşta bir yazıcı gerektirir",
         "Material": "Malzeme",
         "Materials · IFS": "Malzemeler · IFS",
+        "Materials": "Malzemeler",
         "Medium": "Orta",
         "Model": "Modeli",
         "Monitor": "İzleme",
@@ -18275,7 +18278,6 @@ TRANSLATIONS = {
         "The .3mf has invalid or unsupported filament assignments.": ".3mf'de geçersiz veya desteklenmeyen filaman atamaları var.",
         "The .3mf transfer was interrupted.": ".3mf aktarımı kesintiye uğradı.",
         "The CheckCode must be printable ASCII, up to 32 characters.": "CheckCode, 32 karaktere kadar yazdırılabilir ASCII olmalıdır.",
-        "The Creator 5 Pro camera is unavailable.": "Creator 5 Pro kamera kullanılamıyor.",
         "The active printer profile changed. Try again.": "Etkin yazıcı profili değişti. Tekrar deneyin.",
         "The current job changed before {command} could be confirmed.": "{command} onaylanamadan mevcut iş değiştirildi.",
         "The end of this job was not observed.": "Bu işin sonu görülmedi.",
@@ -18373,6 +18375,7 @@ TRANSLATIONS = {
         "{time} left": "Kalan süre: {time}",
     },
     "uk": {
+        "Remove the print and close the completion dialog on the printer, if shown.": "Зніміть деталь зі столу та закрийте вікно завершення друку на екрані принтера, якщо воно відкрите.",
         "While this tab is open": "Поки відкрита ця вкладка",
         "Only during an active print": "Лише під час активного завдання",
         "Waiting for part removal": "Чекає на зняття деталі",
@@ -18520,7 +18523,6 @@ TRANSLATIONS = {
         "Could not save notification settings.": "Не вдалося зберегти налаштування сповіщень.",
         "Could not save print history. New entries are still available for this session.": "Не вдалося зберегти історію друку. Нові записи все ще доступні для цього сеансу.",
         "Could not save the settings.": "Не вдалося зберегти налаштування.",
-        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "Не вдалося запустити камеру Creator 5 Pro. Перевірте режим LAN і повторно підключіться.",
         "Cream": "Крем",
         "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "Creator 5 and 5 Pro вимагає як CheckCode, так і серійний номер принтера. Adventurer 5M автоматично зчитує серійний номер.",
         "Creator repeat printing requires a .3mf.": "Повторний друк Creator вимагає .3mf.",
@@ -18537,8 +18539,8 @@ TRANSLATIONS = {
         "Down": "Вниз",
         "Edit as text": "Редагувати як текст",
         "Edit slot": "Слот редагування",
-        "Edit slot A{slot}": "Слот редагування A{slot}",
-        "Edit slot A{slot} · {material}": "Слот редагування A{slot} · {material}",
+        "Edit slot {slot}": "Слот редагування {slot}",
+        "Edit slot {slot} · {material}": "Слот редагування {slot} · {material}",
         "Elapsed": "Минуло",
         "Elapsed: {time}": "Минуло: {time}",
         "Empty": "Порожньо",
@@ -18642,6 +18644,7 @@ TRANSLATIONS = {
         "Manual controls require an idle printer": "Для ручного керування потрібен неактивний принтер",
         "Material": "Матеріал",
         "Materials · IFS": "Матеріали · IFS",
+        "Materials": "Матеріали",
         "Medium": "Середній",
         "Model": "Модель",
         "Monitor": "Монітор",
@@ -18867,7 +18870,6 @@ TRANSLATIONS = {
         "The .3mf has invalid or unsupported filament assignments.": ".3mf має недійсні або непідтримувані призначення ниток.",
         "The .3mf transfer was interrupted.": "Передачу .3mf було перервано.",
         "The CheckCode must be printable ASCII, up to 32 characters.": "CheckCode має бути ASCII для друку, до 32 символів.",
-        "The Creator 5 Pro camera is unavailable.": "Камера Creator 5 Pro недоступна.",
         "The active printer profile changed. Try again.": "Активний профіль принтера змінено. Спробуйте знову.",
         "The current job changed before {command} could be confirmed.": "Поточне завдання змінилося до того, як можна було підтвердити {command}.",
         "The end of this job was not observed.": "Кінець цієї роботи не спостерігався.",
@@ -18965,6 +18967,7 @@ TRANSLATIONS = {
         "{time} left": "Залишилося {time}",
     },
     "vi": {
+        "Remove the print and close the completion dialog on the printer, if shown.": "Lấy bản in ra và đóng hộp thoại hoàn tất trên máy in nếu hộp thoại đang hiển thị.",
         "While this tab is open": "Khi thẻ này đang mở",
         "Only during an active print": "Chỉ khi có tác vụ in đang chạy",
         "Waiting for part removal": "Đang chờ lấy chi tiết ra",
@@ -19112,7 +19115,6 @@ TRANSLATIONS = {
         "Could not save notification settings.": "Không thể lưu cài đặt thông báo.",
         "Could not save print history. New entries are still available for this session.": "Không thể lưu lịch sử in. Các mục mới vẫn có sẵn cho phiên này.",
         "Could not save the settings.": "Không thể lưu cài đặt.",
-        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "Không thể khởi động máy ảnh Creator 5 Pro. Kiểm tra chế độ LAN và kết nối lại.",
         "Cream": "Kem",
         "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "Creator 5 and 5 Pro yêu cầu cả CheckCode và số sê-ri máy in. Adventurer 5M tự động đọc số sê-ri của nó.",
         "Creator repeat printing requires a .3mf.": "Việc in lặp lại của người tạo yêu cầu .3mf.",
@@ -19129,8 +19131,8 @@ TRANSLATIONS = {
         "Down": "Xuống",
         "Edit as text": "Chỉnh sửa dưới dạng văn bản",
         "Edit slot": "Chỉnh sửa vị trí",
-        "Edit slot A{slot}": "Chỉnh sửa vị trí A{slot}",
-        "Edit slot A{slot} · {material}": "Chỉnh sửa vị trí A{slot} · {material}",
+        "Edit slot {slot}": "Chỉnh sửa vị trí {slot}",
+        "Edit slot {slot} · {material}": "Chỉnh sửa vị trí {slot} · {material}",
         "Elapsed": "Đã qua",
         "Elapsed: {time}": "Đã trôi qua: {time}",
         "Empty": "Trống",
@@ -19234,6 +19236,7 @@ TRANSLATIONS = {
         "Manual controls require an idle printer": "Điều khiển thủ công yêu cầu máy in không hoạt động",
         "Material": "Chất liệu",
         "Materials · IFS": "Vật liệu · IFS",
+        "Materials": "Vật liệu",
         "Medium": "Trung bình",
         "Model": "Mô hình",
         "Monitor": "Giám sát",
@@ -19459,7 +19462,6 @@ TRANSLATIONS = {
         "The .3mf has invalid or unsupported filament assignments.": ".3mf có các phép gán dây tóc không hợp lệ hoặc không được hỗ trợ.",
         "The .3mf transfer was interrupted.": "Quá trình truyền .3mf bị gián đoạn.",
         "The CheckCode must be printable ASCII, up to 32 characters.": "CheckCode phải là mã ASCII có thể in được, tối đa 32 ký tự.",
-        "The Creator 5 Pro camera is unavailable.": "Máy ảnh Creator 5 Pro không khả dụng.",
         "The active printer profile changed. Try again.": "Cấu hình máy in đang hoạt động đã thay đổi. Hãy thử lại.",
         "The current job changed before {command} could be confirmed.": "Công việc hiện tại đã thay đổi trước khi {command} được xác nhận.",
         "The end of this job was not observed.": "Sự kết thúc của công việc này không được quan sát thấy.",
@@ -19557,6 +19559,7 @@ TRANSLATIONS = {
         "{time} left": "Còn {time}",
     },
     "zh-CN": {
+        "Remove the print and close the completion dialog on the printer, if shown.": "取下打印件。如果打印机显示完成提示，请关闭提示。",
         "While this tab is open": "此选项卡打开时",
         "Only during an active print": "仅在有活动打印任务时",
         "Waiting for part removal": "等待取下打印件",
@@ -19704,7 +19707,6 @@ TRANSLATIONS = {
         "Could not save notification settings.": "无法保存通知设置。",
         "Could not save print history. New entries are still available for this session.": "无法保存打印历史记录。本次会议仍有新条目可供使用。",
         "Could not save the settings.": "无法保存设置。",
-        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "无法启动Creator 5 Pro 相机。检查LAN模式并重新连接。",
         "Cream": "霜",
         "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "Creator 5 and 5 Pro 需要CheckCode 和打印机序列号。 Adventurer 5M 自动读取其序列号。",
         "Creator repeat printing requires a .3mf.": "Creator重复打印需要.3mf。",
@@ -19721,8 +19723,8 @@ TRANSLATIONS = {
         "Down": "下",
         "Edit as text": "编辑为文本",
         "Edit slot": "编辑槽位",
-        "Edit slot A{slot}": "编辑槽 A{slot}",
-        "Edit slot A{slot} · {material}": "编辑槽 A{slot} · {material}",
+        "Edit slot {slot}": "编辑槽 {slot}",
+        "Edit slot {slot} · {material}": "编辑槽 {slot} · {material}",
         "Elapsed": "已过去",
         "Elapsed: {time}": "已过：{time}",
         "Empty": "空",
@@ -19826,6 +19828,7 @@ TRANSLATIONS = {
         "Manual controls require an idle printer": "手动控制需要一台空闲打印机",
         "Material": "材质",
         "Materials · IFS": "材料·IFS",
+        "Materials": "材料",
         "Medium": "中",
         "Model": "型号",
         "Monitor": "监控",
@@ -20051,7 +20054,6 @@ TRANSLATIONS = {
         "The .3mf has invalid or unsupported filament assignments.": ".3mf 的灯丝分配无效或不受支持。",
         "The .3mf transfer was interrupted.": ".3mf 传输被中断。",
         "The CheckCode must be printable ASCII, up to 32 characters.": "CheckCode 必须是可打印的ASCII，最多32 个字符。",
-        "The Creator 5 Pro camera is unavailable.": "Creator 5 Pro 相机不可用。",
         "The active printer profile changed. Try again.": "活动打印机配置文件已更改。再试一次。",
         "The current job changed before {command} could be confirmed.": "在确认{command} 之前，当前作业已更改。",
         "The end of this job was not observed.": "未观察到该作业的结束。",
@@ -20149,6 +20151,7 @@ TRANSLATIONS = {
         "{time} left": "剩余 {time}",
     },
     "zh-TW": {
+        "Remove the print and close the completion dialog on the printer, if shown.": "取下列印件。如果印表機顯示完成提示，請關閉提示。",
         "While this tab is open": "此分頁開啟時",
         "Only during an active print": "僅在有進行中的列印工作時",
         "Waiting for part removal": "等待取下列印件",
@@ -20296,7 +20299,6 @@ TRANSLATIONS = {
         "Could not save notification settings.": "無法儲存通知設定。",
         "Could not save print history. New entries are still available for this session.": "無法儲存列印歷史記錄。本次會議仍有新條目可供使用。",
         "Could not save the settings.": "無法儲存設定。",
-        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "無法啟動Creator 5 Pro 相機。檢查LAN模式並重新連線。",
         "Cream": "霜",
         "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "Creator 5 and 5 Pro 需要CheckCode 和印表機序號。 Adventurer 5M 自動讀取其序號。",
         "Creator repeat printing requires a .3mf.": "Creator重複列印需要.3mf。",
@@ -20313,8 +20315,8 @@ TRANSLATIONS = {
         "Down": "下",
         "Edit as text": "編輯為文字",
         "Edit slot": "編輯槽位",
-        "Edit slot A{slot}": "編輯槽 A{slot}",
-        "Edit slot A{slot} · {material}": "編輯槽 A{slot} · {material}",
+        "Edit slot {slot}": "編輯槽 {slot}",
+        "Edit slot {slot} · {material}": "編輯槽 {slot} · {material}",
         "Elapsed": "已過去",
         "Elapsed: {time}": "已過：{time}",
         "Empty": "空",
@@ -20418,6 +20420,7 @@ TRANSLATIONS = {
         "Manual controls require an idle printer": "手動控制需要一台空閒印表機",
         "Material": "材質",
         "Materials · IFS": "材料·IFS",
+        "Materials": "材料",
         "Medium": "中",
         "Model": "型號",
         "Monitor": "監控",
@@ -20643,7 +20646,6 @@ TRANSLATIONS = {
         "The .3mf has invalid or unsupported filament assignments.": ".3mf 的燈絲分配無效或不受支援。",
         "The .3mf transfer was interrupted.": ".3mf 傳輸被中斷。",
         "The CheckCode must be printable ASCII, up to 32 characters.": "CheckCode 必須是可列印的ASCII，最多32 個字元。",
-        "The Creator 5 Pro camera is unavailable.": "Creator 5 Pro 相機不可用。",
         "The active printer profile changed. Try again.": "活動印表機設定檔已變更。再試一次。",
         "The current job changed before {command} could be confirmed.": "在確認{command} 之前，目前作業已變更。",
         "The end of this job was not observed.": "未觀察到該作業的結束。",

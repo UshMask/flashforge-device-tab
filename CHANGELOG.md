@@ -1,5 +1,15 @@
 ﻿# Changelog
 
+## 1.14.1
+
+- Connect to the built-in camera on both Creator 5 models even when the printer
+  omits the stream URL. Identify the model by product ID and distinguish
+  toolheads from material slots.
+- Hide Home, jog, extrusion and error-clear controls on AD5X firmware older
+  than 1.1.6.
+- Show when a print has finished while the printer still reports it is busy.
+  Prompt the operator to remove the print and dismiss the completion dialog.
+
 ## 1.14.0
 
 - Mark completed jobs as waiting for part removal in All printers. Keep the

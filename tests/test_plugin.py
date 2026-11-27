@@ -932,6 +932,20 @@ class ManualTransportTests(unittest.TestCase):
         self.position = b"X:0 Y:0 A:0\r\nok\r\n"
         self.assertEqual(self.adapter.status(True)["manual"]["travelLimited"], [])
 
+    def test_5m_can_report_completed_job_while_machine_remains_busy(self):
+        self.printer.state = "BUSY"
+        self.printer.detail["status"] = "completed"
+        status = self.adapter.status(True)
+        self.assertEqual(status["state"], "BUSY")
+        self.assertTrue(status["complete"])
+        self.assertFalse(status["active"])
+        self.assertEqual(status["manual"]["allowed"], [])
+        self.printer.state = "READY"
+        self.printer.detail["status"] = "ready"
+        status = self.adapter.status(True)
+        self.assertEqual(status["state"], "READY")
+        self.assertFalse(status["complete"])
+
     def test_5m_canceled_job_retains_history_and_restores_confirmed_tcp_controls(self):
         monitor = self.server.monitors["127.0.0.1"]
         now = int(time.time())
@@ -1492,8 +1506,9 @@ class CreatorHTTPTests(unittest.TestCase):
                             fixture.detail["errorCode"] = ""
                         elif cmd == "delayClose_cmd":
                             fixture.detail.update(autoShutdown=args["automaticShutdown"], autoShutdownTime=args["shutdownAfterTime"])
-                    elif body["payload"]["cmd"] == "streamCtrl":
-                        fixture.camera_control(args["action"])
+                    elif cmd in ("streamCtrl", "streamCtrl_cmd"):
+                        self.send_error(400)
+                        return
                     elif fixture.control_readbacks is None:
                         fixture.detail["status"] = {"pause": "pause", "continue": "printing",
                                                     "cancel": "canceling"}[args["action"]]
@@ -1669,6 +1684,21 @@ class CreatorHTTPTests(unittest.TestCase):
             self.act_with_readbacks("manual/home", [])
         self.assertFalse(any(path == "/control" for path, _ in self.calls))
 
+    def test_early_ad5x_firmware_hides_and_rejects_unsupported_manual_commands(self):
+        self.detail.update(pid="0026", model="AD5X", status="ready", rightTemp=195,
+                           moveCtrl=1, extrudeCtrl=1, autoShutdown="close")
+        for firmware in ("1.0.8", "AD5X-1.1.5-1.1.1-3.0.7"):
+            for key, error in (("home", ""), ("x+1", ""), ("e+10", ""), ("clear", "E0048")):
+                with self.subTest(firmware=firmware, key=key):
+                    self.detail.update(firmwareVersion=firmware, errorCode=error)
+                    controls = self.adapter.status(True)["manual"]
+                    self.assertEqual(controls["groups"], ["calibration", "timer"])
+                    with self.assertRaisesRegex(ValueError, "Command unavailable"):
+                        self.act_with_readbacks("manual/" + key, [])
+        self.assertFalse(any(path == "/control" for path, _ in self.calls))
+        self.detail.update(firmwareVersion="AD5X-1.1.6-1.1.1-3.0.7", errorCode="")
+        self.assertIn("home", self.adapter.status(True)["manual"]["allowed"])
+
     def test_creator_calibration_and_timer(self):
         for pid in ("0028", "0029"):
             self.detail.update(pid=pid, status="ready", autoShutdown="close")
@@ -1711,6 +1741,20 @@ class CreatorHTTPTests(unittest.TestCase):
         self.assertEqual(data["cameraUrl"], self.detail["cameraStreamUrl"])
         self.assertEqual(paused["state"], "PAUSED")
         self.assertTrue(paused["active"])
+
+    def test_creator_identity_without_model_and_camera_url(self):
+        self.detail.pop("cameraStreamUrl")
+        for pid, model in (("0028", "Creator 5"), ("0x0029", "Creator 5 Pro"), (41, "Creator 5 Pro")):
+            with self.subTest(pid=pid):
+                self.detail.update(pid=pid, model="")
+                status = self.adapter.status(True)
+                self.assertEqual(status["info"]["model"], model)
+                self.assertEqual(status["materialFamily"], "creator")
+                self.assertEqual(len(status["tools"]), 4)
+                self.assertEqual(status["chamber"] is not None, model.endswith(" Pro"))
+                self.assertTrue(status["managedCamera"])
+                self.assertEqual(status["cameraUrl"], "")
+                self.assertIs(status["light"], True)
 
     def test_missing_invalid_credentials_and_lan_mode(self):
         self.adapter.configure("abc01234", "")
