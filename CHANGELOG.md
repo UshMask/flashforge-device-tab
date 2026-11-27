@@ -1,5 +1,41 @@
 ﻿# Changelog
 
+## 1.13.0
+
+- Add **Appearance** settings to the plugin panel. Choose the theme and layout
+  density, then customize the Monitor, All printers, Printer Files and Print
+  History blocks in their own subsections.
+- Localize the monitor, printer list, history, settings and notifications.
+  Follow OrcaSlicer's language by default or choose an interface language in Config.
+- Combine printers and jobs in a compact **All printers** list. Search by
+  printer or file and filter by state. Ready printers offer a shortcut to
+  stored files and can repeat their own last completed job.
+- Show the print file's preview beside the live camera when available. Camera
+  playback in **All printers** can be turned off for the whole list.
+- Add icons across the panel, show the chamber light state, keep Settings
+  actions visible while scrolling, and compare file and slot colors before a reprint.
+- Find modern FlashForge printers on the local network and test the connection
+  from the settings form before saving.
+- Switch the chamber light from the camera panel and edit reported materials
+  and colors on idle AD5X and Creator 5 material stations. Read back the change
+  from the printer before confirming it.
+- Repeat a stored Creator print with material requirements read from its original
+  sliced `.3mf`. Remember linked materials after the printer reports the start.
+- Open the monitor in its own FlashForge tab by default. The plugin settings
+  still offer the option to use the built-in Printer tab.
+- Open the current job from the Monitor header to jump to its row in
+  **All printers**. Print totals sit with the job history.
+- Group XY, Z and filament controls. Use a clear Home icon and show a Home
+  hint if the printer explicitly refuses an axis move because it needs homing.
+  Show the nozzle heating requirement beside the filament buttons when needed.
+- Show one nozzle for single-nozzle printers, including AD5X. On Creator 5
+  models, highlight heads with a heating target and keep the other readings
+  visible.
+- Keep file cards readable when a preview is missing. After a refresh, newly
+  detected files appear above previously seen ones.
+- Upload a sliced file to the Adventurer 5M file list without starting a print.
+  The plugin checks the file list and the printer's idle state after the transfer.
+
 ## 1.12.1
 
 - Arrow keys jog only while the XY pad has focus. Shift increases the step
