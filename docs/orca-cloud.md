@@ -2,27 +2,27 @@ Follow your FlashForge prints inside OrcaSlicer. The FlashForge tab shows progre
 
 ## Monitor
 
-See the current job, temperatures, files and available controls in one place. Pause, resume and cancel are available on supported printers.
+See the current job, temperatures, files and available controls in one place. Choose shared or separate chart scales and which readings and targets to show. Pause, resume and cancel are available on supported printers.
 
 ![Monitor showing a print in progress, temperature chart and files](orca-cloud/01-monitor.png)
 
 ## All printers
 
-See every configured printer in a vertical list. Search by printer or job, or filter by status. Active jobs show progress, a model preview and a live camera where available. You can turn off camera playback for the whole list. Open stored files or repeat the last completed job from a ready printer's row.
+See every configured printer in a vertical list. Search by printer or job, or filter by status. Active jobs show progress, a model preview and a live camera where available. Confirm that the bed is clear after a print, or turn off this reminder in settings. Open stored files or repeat the last completed job from a ready printer's row.
 
 ![All printers with printing, paused, idle and disconnected rows](orca-cloud/02-all-printers.png)
 
 ## History
 
-See print times and outcomes, search for a file, or filter for errors and cancellations. The history is stored locally.
+See locally recorded print times and outcomes across configured and archived printers. Filter by printer, search for a file, or show errors and cancellations.
 
 ![History showing print totals, durations and outcomes](orca-cloud/03-history.png)
 
-## Appearance
+## Settings
 
-Choose the theme and layout density, then show or hide blocks for each view in Settings.
+Choose the theme and layout density in Appearance. Monitor, All printers, Printer Files and Print History each have their own settings page.
 
-![Appearance settings showing theme, density and Monitor options](orca-cloud/06-appearance.png)
+![Monitor settings showing chart scales and temperature readings](orca-cloud/06-monitor-settings.png)
 
 ## Manual control
 

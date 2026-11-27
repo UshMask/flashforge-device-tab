@@ -4,7 +4,7 @@
 # name = "FlashForge Device Tab"
 # description = "Follow local FlashForge prints in OrcaSlicer's Device or FlashForge tab."
 # author = "Max"
-# version = "1.13.0"
+# version = "1.14.0"
 # ///
 import base64
 import hashlib
@@ -27,6 +27,7 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from socketserver import TCPServer, ThreadingMixIn
+from string import Template
 from urllib.parse import parse_qs, urlsplit
 from xml.etree import ElementTree
 
@@ -135,6 +136,74 @@ def render_page(page, language, **slots):
                   lambda match: escape(translate(language, match[2])) if match[1] else values[match[2]], page)
 
 
+CAMERA_EXPAND_ICON = '''<svg class="camera-expand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+  stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 4H4v4m12-4h4v4M4 16v4h4m12-4v4h-4"/></svg>'''
+
+JOB_CARD_CONTENT = Template('''
+        <div class="jobs-body">
+          <div class="jobs-printer-heading">$heading</div>
+          <div class="jobs-file-row">$filename<strong class="jobs-percent" hidden></strong></div>
+          <progress max="100" aria-label="{{t:Print progress}}" hidden></progress>
+          $metrics
+          <div class="jobs-last" hidden>{{t:Last completed}} <strong></strong></div>
+          <div class="jobs-actions">$actions</div>
+          $extra
+        </div>
+        <div class="jobs-media">
+          <figure class="jobs-model">
+            <div class="jobs-media-frame">
+              <div class="jobs-fallback"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true">
+                <path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Zm0 9 8-4.5M12 12 4 7.5m8 4.5v9"/>
+              </svg><span>{{t:No preview}}</span></div>
+              <img data-preview$preview_attrs alt="" hidden>
+            </div>
+          </figure>
+          <div class="jobs-actions jobs-model-actions"$print_attrs>$print_buttons</div>
+        </div>
+''')
+
+FLEET_JOB_CONTENT = JOB_CARD_CONTENT.substitute(
+    heading='''<div class="jobs-printer-identity"><h3 tabindex="-1"></h3><span class="jobs-state"></span></div>
+            <a data-monitor data-icon="arrow">{{t:Monitor}}</a>''',
+    filename='<span class="jobs-file"></span>',
+    preview_attrs="", print_attrs="",
+    metrics='<div class="row jobs-meta"><span data-layer></span><strong data-eta></strong></div>',
+    actions='''<button type="button" data-retry data-icon="refresh" hidden>{{t:Reconnect camera}}</button>
+            <button type="button" data-clear-bed data-icon="check" hidden>{{t:Bed is clear}}</button>
+            <a data-files data-icon="arrow" hidden>{{t:Browse files}}</a>
+            <a data-repeat data-icon="refresh" hidden>{{t:Print again}}</a>''',
+    extra='''<details><summary>{{t:Job details}}</summary><dl></dl><ol class="jobs-events"></ol></details>
+          <p class="jobs-meta" data-job-result role="status"></p>''',
+    print_buttons='''<button type="button" data-print-action data-icon="pause" hidden></button>
+            <button type="button" class="danger" data-print-cancel data-icon="stop" hidden>{{t:Cancel}}</button>''',
+)
+
+MONITOR_JOB_CONTENT = JOB_CARD_CONTENT.substitute(
+    heading='''<div class="jobs-printer-identity">
+              <h2 id="job-title"><svg class="section-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 3h7l4 4v14H7z M14 3v5h4 M10 12h5 M10 16h5"/></svg>{{t:Print job}}</h2>
+              <span id="status" class="connection" role="status">{{t:Connecting…}}</span>
+              <button class="jobs-link" id="diagnose" type="button" data-icon="find">{{t:Check connection}}</button>
+            </div>
+            <div class="monitor-job-tools">
+              <button class="jobs-link" id="cameraOpen" type="button" data-icon="camera" aria-haspopup="dialog">{{t:Camera}}</button>
+              <button class="jobs-link" id="monitorHistory" type="button" data-icon="history" aria-label="{{t:Print History}}" title="{{t:Print History}}" hidden></button>
+            </div>''',
+    filename='''<button class="jobs-file" id="openJob" type="button" hidden></button>
+            <span class="jobs-file" id="jobFile">—</span>''',
+    preview_attrs=' id="jobImage"', print_attrs=' id="jobActions"',
+    metrics='''<div class="row jobs-meta" id="jobMetrics">
+            <span id="jobMeta"><span id="layers"></span><span id="elapsed"></span><span id="filament"></span></span>
+            <span id="time"><strong id="remaining"></strong> <span id="finishTime" hidden></span></span>
+          </div>''',
+    actions='<button class="jobs-link" id="reprintJob" type="button" data-icon="refresh" hidden disabled>{{t:Print again}}</button>',
+    extra='''<p class="jobs-meta" id="timeHint" hidden></p>
+          <p class="jobs-meta" id="actionStatus" role="status" hidden></p>''',
+    print_buttons='''<button id="pausePrint" type="button" data-icon="pause" hidden>{{t:Pause}}</button>
+            <button id="resumePrint" type="button" data-icon="play" hidden>{{t:Resume}}</button>
+            <button id="cancelPrint" type="button" class="danger" data-icon="stop" hidden>{{t:Cancel}}</button>''',
+)
+
+
 PAGE = r'''<!doctype html>
 <html lang="{{language}}">
 <head>
@@ -180,8 +249,7 @@ h1, h2, p, dl, dd { margin: 0; }
 h1 { font-size: 17px; font-weight: 600; }
 h2 { font-size: 14px; font-weight: 600; }
 .muted { color: var(--muted); }
-.device { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; padding: 0 0 10px; margin-bottom: 12px; border-bottom: 2px solid var(--panel); }
-.identity, .connection, .device-actions, .row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.connection, .row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
 .row { justify-content: space-between; }
 .connection { gap: 6px; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .connection::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
@@ -194,7 +262,6 @@ h2 { font-size: 14px; font-weight: 600; }
 .monitor-main, .printer-sidebar { display: grid; gap: 16px; min-width: 0; align-content: start; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
 .panel > .panel-title:first-child { border-radius: 7px 7px 0 0; }
-.identity::before { content: ""; width: 24px; height: 24px; background: center / contain no-repeat url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAF7klEQVR4nK2XbYydRRXHf2dmnpd77/buu+lWtEJSsYsEP/mSiLEpVBpQGuFqjBE/GLUiRCWmxKSJRkOESBRsgn7R2KgQWdrFmLQFQ2hLjFUS24Dd1i3WUNB2F2F3u3f33vu8zPHD031pd7t2dznJ8+GZzMz5zX/OnJwjzJkAumbbtm4XB5u95zpBI1SF1ZiIKiYxRk8krey5qcHB0Qu+AFQu/Ajg22u1+8TIt8TIVYhZld8Fpop6fxb1u8affOqHMxBCrWYZGMjba3fstnHpLp8kkOceQeVtglD1oAjWGhOG+GbrqfH+/s8yNCQC0FH79DckLj+izUaCEogxYkRIswyvuirnRoTAOXyhgCKkplQKfaO1c3xg4AGp1mpdBn8SY7vJc8QYk+eeqWaDrmqVKAhYKYIASZbx5sQE5TjGWYuqKiKq3tedSzc64GaxrlezzBfOc5xzPHT3dj7z8U3E5WhVAK1GwtMvvMAPfrWbRpLgrBX1Xk0QVLOMW52F6zFGEdSIMNlq8ZOvfZV7Nm/h6ZeP8trICIFz6DKvQkRIs5y+nm7u2XILlbYy2x/8EUG5jAqKiOK53ik+FBARQzNNuaq3l89vvonfHPkTX/je93EuQFeogREhbSX87Ds7uGvTTTy07re8NjJCFIYzAoUG5nb33lMplShhOPbKK9BsEkchztrZL7COwF3ms+6iuVEYQpJwdPgUoUJbuUQRh7MyqbuUWoFEPe9b/24++pEP016pkHu/IgWsMUxMTfH+a64mlcVVXABgjaGuKXfeuInP3bhpwQKdL9klNpPRLh1LgDoZ1izMKwsA8jynakJ+8ex+HtszSGd1DXmeY61lfLLOl2//JNs/sZVxn2CtnV3TYUJ2H3yOnz65h441bXNrzk/yxVu3ct+ntpHn+f8HKAaF0bExhk+doq2jkzTPCJyjPjZGfXqayFjUF0EGkAGRsUy3WvxjeJi2zk7SLCOwjvr4OGf/+yYWWVS5RQEUCJzDlEqU44gsdxhjyKpVXjxxkrrPiG1ApkVsRMbRRDny9+PE1SqlMCR0RUBOl0qESySzyyZ7VcV7j1fFq5LlOZU4Zt+fj/Clhx/GqWARRCE2ju2PPsLe5w9TiWPSPJ9d571fMocsqsDlLPee7mqVvc8fRFF+ueN+AjF85dEf8/iBZ+np6CBb5J6XsmUBAOSqvKO7i8GDh2krl4mCgMef+SO9XV3Ldr48AAHNPa16gwZKxQT8evAPoFApl6mPnQeUoBRjnLn8W10pgOZKqb2N/i0foqgTFGMMAhclqn+9OMT0W+cRe2W1xBUBiBHSRgufxfRd+56F2WZ2nuH0X46TNhOitvLbBCDgk5yu9WtZ+971/PPIy4gsTqCqvOuGDYyWY8b+/QY2ClYPIGJoTTeJKiU2fOwDZK1kSYAgjpgcHePc8BmiOFo5gIggIuRJytpr11PprHLs94cRs3SRrF4JKzHr+q9m4vVRuLDPFQOICCikWYaxFryy/oYNbLz5gyRTzSsDKMecOnyUo2dGcNaQZhmoLgrimBdSRoRWkpAJrOvpIZ+sM9GmHHpiP4ee2A9LnORiiuIN2jAgn6zT19uDF6GZFNenc/PEiUgKqKonCgLOjIyy729/5e7NW2gmCa+eO1fkcr/MkswUVXVfTzffvu12Dgy9xOnX/0Mchah6pHjHqVPPkGhRpalA6Bw7dj1GcK/w9a23YWc2XJb7uTzkgQMvHeObu3YhRor2SxFUxeCPS1ut1uvwJxHTgfcixkiSpuTec03fOkpxtOKaUIBmK+H02bOICHEQ4OfK8oax2UYBaK/dcb8tlR70jbnGRIBGkuC9R5Z9/hkVimwZh2HR+81rTPJG44GJgT07i9asv187hoZ+Z+LoTt9qccGripgVup4PMa81M8aYKCJvNvdNdHZtY2zMX1TGddRqO7HmXhHpLSJeWf7tL4YgM83pW6r+5xMjb3yXQ4dy5u0+2y531WrvzI25RVSvU9W4GF1hiy5FKSyGlmBOaJo+M75376vzfOr/AJq6riJACkPeAAAAAElFTkSuQmCC); }
 .panel-title { padding: 9px 13px; background: var(--header); }
 .caption { display: block; color: var(--muted); font-size: 12px; margin-top: 3px; }
 progress { display: block; appearance: none; width: 100%; height: 8px; border: 0; border-radius: 5px; background: var(--track); overflow: hidden; }
@@ -213,6 +280,7 @@ progress::-moz-progress-bar { background: var(--blue); border-radius: 5px; }
 .monitor-tools { margin-top: 12px; }
 .tool-body { padding: 12px 13px; }
 .chart { display: block; width: 100%; height: 168px; }
+#chartPlots {display:grid;gap:8px}
 .chart-legend { display: flex; flex-wrap: wrap; gap: 5px 12px; margin: 4px 0 1px; font-size: 12px; }
 .chart-legend span::before { content: ""; display: inline-block; width: 15px; border-top: 2px solid var(--series); margin-right: 5px; vertical-align: 3px; }
 .chart-legend .target::before { border-top-style: dashed; }
@@ -221,12 +289,10 @@ progress::-moz-progress-bar { background: var(--blue); border-radius: 5px; }
 summary.panel-title { cursor: pointer; font-weight: 600; }
 details .tool-body { border-top: 1px solid var(--line); }
 .camera-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
-.camera-form input { flex: 1 1 100%; width: auto; }
+.camera-form input { flex: 1 1 100%; width: auto; min-width: 0; }
 .camera-form:has(#cameraStop:not([hidden])) #cameraStart {display:none}
-#cameraSnapshot {margin-inline-start:auto}
 #cameraLight[aria-pressed=true] {border-color:var(--blue);color:var(--text);background:var(--track);font-weight:600}
 #cameraLight[aria-pressed=true]::before {background:var(--blue)}
-.camera-image { display: block; width: 100%; max-height: 360px; object-fit: contain; background: var(--header); margin-top: 8px; }
 .history-summary, .history-table { margin-top: 8px; }
 .history-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 13px; }
 .history-table th, .history-table td { padding: 7px 9px; text-align: left; border-bottom: 1px solid var(--line); }
@@ -239,6 +305,7 @@ details .tool-body { border-top: 1px solid var(--line); }
 }
 .history-filename:hover { text-decoration: underline; }
 .history-filename:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.history-printer-name {display:block;margin-top:3px;font-size:12px;color:var(--muted);overflow-wrap:anywhere}
 .table-wrap { overflow: auto; max-height: 350px; }
 @media (max-width: 620px) {
   .history-table, .history-table tbody { display: block; }
@@ -326,7 +393,7 @@ dialog.settings .caption { margin-top: 2px; }
 .settings-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .settings-actions button[type="submit"] { background: var(--blue); border-color: var(--blue); color: #fff; }
 /* Device panel */
-main {padding-top:0}
+main {padding-top:6px}
 /* The active tab shares its surface and baseline with the page. */
 .tabs {display:flex;align-items:end;justify-content:space-between;gap:8px 16px;margin-bottom:14px;border-bottom:1px solid var(--line);flex-wrap:wrap}
 .view-tabs,.view-actions {display:flex;align-items:center;gap:3px}
@@ -334,11 +401,11 @@ main {padding-top:0}
 .view-tabs button {position:relative;margin-bottom:-1px;border:1px solid transparent;border-bottom-color:var(--line);border-radius:9px 9px 0 0;padding:9px 16px;background:transparent}
 .view-tabs button:hover {background:var(--panel)}
 .view-tabs button[aria-current="page"] {background:var(--panel);border-color:var(--line);border-bottom-color:var(--panel);color:var(--text);font-weight:600}
-.view-actions {margin-left:auto;padding-bottom:4px}
+.view-actions {margin-left:auto;padding-bottom:4px;max-width:100%;flex-wrap:wrap;justify-content:flex-end}
 .view-actions button {background:transparent;border-color:transparent;padding:5px 8px}
+#devicePicker {min-width:0;max-width:min(170px,100%);padding:4px 6px;border:1px solid var(--line);
+  border-radius:5px;background:var(--panel);color:var(--text);font:inherit;font-size:12px}
 #nativePage {justify-self:start;color:var(--blue)}
-.device{border:0}
-.device h1{font-size:clamp(24px,3vw,40px);letter-spacing:-.04em}
 .panel{border-radius:12px}
 .panel-title{padding:13px 16px}
 .readings .panel-title {gap:4px 12px}
@@ -360,13 +427,14 @@ main {padding-top:0}
 #manualPanel button:disabled {opacity:.5;cursor:default}
 #manualPanel button:enabled:hover {background:var(--bg);border-color:var(--muted)}
 #manualPanel :focus-visible,.step-switch input:focus-visible + span {outline:2px solid var(--blue);outline-offset:2px}
-.manual-group,.panel-inset {display:grid;gap:8px;padding:10px;border:1px solid var(--line);border-radius:7px;
+.manual-group {display:grid;gap:8px;padding-block:9px 0;border-top:1px solid var(--line)}
+.manual-body > .manual-group:first-of-type {border-top:0;padding-top:0}
+.panel-inset {display:grid;gap:8px;padding:10px;border:1px solid var(--line);border-radius:7px;
   background:color-mix(in srgb,var(--panel) 72%,var(--bg))}
 .manual-heading,.inset-heading {margin:0;font-size:13px;font-weight:650}
-.manual-surface {display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:10px 14px}
+.manual-surface {display:grid;grid-template-columns:minmax(0,1fr) clamp(88px,24%,112px);gap:10px 14px}
 .manual-xy {min-width:0;display:grid;justify-items:center;align-content:start;gap:6px}
-.axis-toolbar {display:flex;align-items:center;gap:5px;flex-wrap:wrap}
-.axis-toolbar .manual-heading {margin-right:4px}
+.axis-toolbar {display:flex;align-items:center;gap:5px;min-width:0}
 .axis-toolbar .step-switch {margin-left:auto}
 .axis-heading {display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 6px;width:100%}
 .axis-heading small {color:var(--muted);font-variant-numeric:tabular-nums;white-space:pre}
@@ -378,8 +446,10 @@ main {padding-top:0}
 .step-switch label:first-child span {border-radius:5px 0 0 5px}
 .step-switch label:last-child span {border-radius:0 5px 5px 0;border-left:0}
 .step-switch input:checked + span {background:var(--blue);border-color:var(--blue);color:var(--panel);font-weight:600}
-.jog-pad {position:relative;isolation:isolate;width:min(100%,136px);aspect-ratio:1;background:#c1cdc1;border-radius:50%}
-#manualPanel .jog-pad button[data-jog] {position:absolute;inset:0;width:100%;height:100%;padding:0;border:0;border-radius:50%;background:#30453a;color:#f1f5ed;transform:rotate(var(--angle));clip-path:polygon(1px 0,calc(100% - 1px) 0,50% calc(50% - 1px))}
+.jog-pad {position:relative;isolation:isolate;width:min(100%,196px);aspect-ratio:1;border-radius:50%}
+#manualPanel .jog-pad button[data-jog] {position:absolute;inset:0;width:100%;height:100%;padding:0;border:0;border-radius:50%;background:#30453a;color:#f1f5ed;transform:rotate(var(--angle));clip-path:polygon(1px 0,calc(100% - 1px) 0,50% calc(50% - 1px));mask-image:radial-gradient(circle,transparent 24px,#000 25px)}
+.jog-pad::after {content:"";position:absolute;inset:50% auto auto 50%;width:50px;height:50px;transform:translate(-50%,-50%);clip-path:circle(50%);z-index:1}
+.jog-nozzle {position:absolute;inset:50% auto auto 50%;transform:translate(-50%,-50%);width:29px;height:29px;color:var(--muted);pointer-events:none}
 .jog-pad [data-jog="y+"] {--angle:0deg}
 .jog-pad [data-jog="x+"] {--angle:90deg}
 .jog-pad [data-jog="y-"] {--angle:180deg}
@@ -392,15 +462,16 @@ main {padding-top:0}
 #manualPanel .jog-pad button[data-jog]:disabled {opacity:1;background:#48564e;color:#c6d0c9}
 #manualPanel .axis-toolbar button[data-manual="home"]:disabled {opacity:1;background:#505c54;color:#c6d0c9;border-color:#9faea3}
 #manualPanel button[data-travel-limited="true"]:enabled {filter:grayscale(1);opacity:.55}
-.axis-toolbar button {display:flex;align-items:center;justify-content:center;gap:4px;min-height:28px}
-.axis-toolbar button svg {display:block;width:15px;height:15px;pointer-events:none}
+.axis-toolbar button {display:flex;align-items:center;justify-content:center;gap:4px;min-height:28px;white-space:nowrap}
+.axis-toolbar button svg {display:block;flex:none;width:15px;height:15px;pointer-events:none}
 [data-released="false"] [data-lock-open],[data-released="true"] [data-lock-closed] {display:none}
-.z-row {display:grid;align-content:start;border-left:1px solid var(--line);padding-left:14px;gap:6px}
+.z-row {min-width:0;display:grid;grid-template-rows:auto 1fr;border-left:1px solid var(--line);padding-left:14px;gap:6px}
 .z-row strong {align-self:center}
 .motion-buttons {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
-.z-row .motion-buttons {grid-template-columns:1fr;grid-template-rows:repeat(2,1fr);gap:5px}
+.z-row .motion-buttons {grid-template-columns:1fr;grid-template-rows:1fr 46px 1fr;gap:5px}
 #manualPanel .z-row button,.manual-services button {display:flex;align-items:center;justify-content:center;gap:6px;min-height:32px}
-#manualPanel .z-row button {min-height:42px}
+#manualPanel .z-row button {min-height:36px;padding-inline:4px}
+.z-plate {place-self:center;width:min(100%,68px);height:42px;color:var(--muted)}
 .z-row .mc-up {width:13px;height:15px}
 .z-row [data-z-step^="-"] .mc-up {transform:rotate(180deg)}
 .timer-row select,.timer-row button {min-height:32px}
@@ -409,8 +480,11 @@ main {padding-top:0}
 .nozzle-controls label {display:flex;align-items:center;flex-wrap:wrap;gap:3px 5px}
 .filament-actions .motion-buttons {grid-column:2/-1;gap:5px}
 .nozzle-controls button,.filament-actions button {min-height:32px}
-.manual-services {display:flex;gap:6px}
-#manualPanel .manual-services button {flex:1;min-width:0;font-size:12px;padding:4px}
+.calibration-row {display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.85fr);align-items:center;gap:8px}
+.calibration-row h3 {overflow-wrap:anywhere}
+.manual-services {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+#manualPanel .manual-services button .mc-icon {width:1em;height:1em}
+#manualPanel .manual-services button {min-width:0;font-size:12px;padding:4px}
 #calibrationStatus {color:var(--muted);font-size:12px}
 #calibrationProgress {margin-top:6px;background:linear-gradient(var(--blue),var(--blue)) left/30% 100% no-repeat var(--track);
   animation:calibration-progress 1.5s ease-in-out infinite alternate}
@@ -418,8 +492,8 @@ main {padding-top:0}
 #calibrationProgress::-moz-progress-bar {background:transparent}
 @keyframes calibration-progress {to {background-position:right}}
 @media (prefers-reduced-motion:reduce) {#calibrationProgress {animation:none}}
-.timer-row {display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px;align-items:stretch}
-.timer-row label {display:grid;grid-template-columns:1fr minmax(80px,42%);align-items:center;gap:6px;font-size:13px;font-weight:600}
+.timer-row {display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:stretch}
+.timer-row label {display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);align-items:center;gap:6px;font-size:13px;font-weight:600;overflow-wrap:anywhere}
 #manualPanel .timer-row select {min-width:0;width:100%}
 .manual-summary {margin-left:auto;min-width:0;display:flex;align-items:center;justify-content:flex-end;color:var(--muted);font-size:12px;font-weight:400;text-align:right;line-height:1.25}
 .manual-summary span {min-width:0;overflow-wrap:anywhere}
@@ -429,13 +503,27 @@ main {padding-top:0}
 .manual-notices {display:grid;gap:4px}
 .manual-notices:not(:has(p:not(:empty),button:not([hidden]))) {display:none}
 .manual-notices button {display:inline-flex;align-items:center;justify-self:start;gap:6px}
+.nozzle-controls .heat-short {display:none}
 @container (max-width:360px) {
   #manualPanel .manual-body {padding-inline:8px}
   .manual-surface {gap:10px}
   .z-row {padding-left:8px}
-  .axis-toolbar .manual-heading {flex-basis:100%}
+  #manualPanel .axis-toolbar button {font-size:12px;padding-inline:5px}
+  .axis-toolbar button svg {width:12px;height:12px}
   .axis-toolbar .step-switch span {padding-inline:5px}
   #manualPanel .nozzle-controls button,#manualPanel .nozzle-controls select {font-size:12px;padding-inline:5px}
+  :is(:lang(ru),:lang(en)) .nozzle-controls .heat-long {display:none}
+  :is(:lang(ru),:lang(en)) .nozzle-controls .heat-short {display:inline}
+  .timer-row label {font-size:12px}
+  :is(:lang(ru),:lang(en)) .timer-row label {grid-template-columns:max-content minmax(0,1fr)}
+  #manualPanel .timer-row select {font-size:12px;padding-inline:4px}
+}
+@container (max-width:300px) {
+  .axis-toolbar {gap:3px}
+  #manualPanel .axis-toolbar button {font-size:11px;padding-inline:3px;gap:3px}
+  .axis-toolbar button svg {width:11px;height:11px}
+  .axis-toolbar .step-switch {font-size:11px}
+  .axis-toolbar .step-switch span {padding-inline:3px}
 }
 .mc-level {--image:url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAE8AAAA/CAQAAAALH13MAAAFD0lEQVR42u2ZP2hkRRzHP795b/9EjdEQE5RDU8gJFlqIXKNcpY2CjVgI1nZ2WltaWMohihzHFep1J7HQgIocKEQQvUo4FBs9m+QM4bJJ9s3P4v3e7Mzu22Qvvk0W8Q3LsvNmZ77z/f2d38D/z3/2kQbneoAV9skQfmN39jb5Lsouyh4vAVkTE7sG4eVAC+ghTc3cNLxeU7w1A09qZpFZgScJGAEKMP5kVoQrBiWzjxuCfeq6R8LZzMDTRMguYXMm2NMIojPArjmZ5A3MoYdqpJ6+7ulUgmSjpqFjuJLTh1cAShHA6IhPnAHh+oQ9Db9kFoRbgvGHmsmpsqdB1D5yOXLyjqXeZfjEF5YfQQNAPUn2dIQXDd8+YlRDzwkJV8KikrA5SEJ9EvC8sXgMQd85vAwF3uISiyjtscmBhq3Ai2zwPNBu2m3Xb+dNFOUaZ4C2pfBwAWUbZZeXQx/AebZRNjlvo6f2lGn6O6i1n1gFOgblfZSdEXjPsmujt3gugd24cB1wP0+F309wlVX2bElJjCYnA86xRtf67+ONxn3tkFG0gce5HvhTfuQhe/uBCfc2rwB3A09yMxp5jUWgc3wnPYl4u8BZfo6W/Z6HgQ4XUW4HePA0f0aj1ukAHZxl01Piz9EFzvBdtPQvnAU+MXh7vAY8kzC3BkAXN314jruAB/k2AXiOCyj7KPu8wCqb0dsrYMxlBk+mBy8zgCt8FUH4Iwh8i/f4IXpzGcznucDe1OBl1uaAZdYjGPXt0+gUJwHc1OG1mAOW+PJQcFcSVyJRmyq8Fi0cc8ACa2PBXapNqWS6uudwZKbkXWCJL2rBfXhkXWEqAFMd6gDLfD0C7qMJMsZGmDxMY8TC/DLfTCDW+m0e05JlpI0b1wEW+TyAuzjh7LGayJ0KL22H7VDoAvNcjvxcNpEHHbQJAQ72NPjjUbtzZsXzfMw6C0D3yMUG8Fq0xsGTEWB1YizPCr72zFAuU860zz102aRNYcdKjYpE49YRO5MoSlEzfnafiqdHWWIvUtJUXQesiblmsb7MOPAUFo09HuhbScOFI6WiQa/Lf+WRRpdzePoUCB1+53oM8+qRsfNk20aczGcszJhUixJbKcBW6JolpVPIrcwgQJ8MuMk2rXCkFtM8pTCtSt1q5RAUb2U0HalO+WDBmlSjS7fSRkxnHV0W7X2rHJNHdbgCuMGrbLBgUOOShNoiqXOo1KMCX44qj99ZFG0qwP2wBQkQnX3vsMo6jwSlEyQfqqU7doEee/+qGBSXhCSyfx2pyBRhnhYHbIV1beP5UAHMI0CHfogH/THLu8CvUBhno2MkiQZFjWMfOBtoJ1UEQXMcRcTBAQfJ3v1YcII3IRRj/bwPBTQXYkjd1YMLoF3EraB5CCnx5Ykjx9vONBRy0kuWOPRVxhObhJj7liBgDYGOBE7JXpseraSCoJVwvYGBHTaBWw3US3UiVzUYsQvcohfJTtAKnlql9DHe5le69CMxFMHSsqH7Mg2ORE3UYoEqGyqJE42s6jASeQTBsccyK6lq5QagMF8zz+szEzX8wHL3AW8KHNeZZNoFw5Hyb7ler2KvVNRWsBp3yqGsfO4tVS435fyMv/kraESVihdRKpQm+nEc0ST7zS0OVBY9sOkqFXPBP3hLxfrWPB6PMM+NWcgBjlSdSe41XI3LaEqUcvh9h0ywv2wojvraa5T0/laPWFGi23M/NjZNYJfjLlea5W7MrP8Agc1mo7gc9oEAAAAASUVORK5CYII=)}
 .mc-shaper {--image:url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAE0AAAA2CAQAAAAo5dw5AAAFp0lEQVR42u3ZX4xUdxUH8M+9l53dZYNVUlts2rU0BOvGAlqgIKVgIJI0wfpUExOiqVGjNRqjPojRFyXxwRetmuJbqYk2vGh4EF9KXGslsBKogGlIIaWmgE23QCqysDM/H+bs3dmdGXYWhgUTf/dh9zf33jPf3/n7PWcyN76y+Jt0deVdk9RlYMzrksZuwsq7pqubCNLtpr/ihiX0uEPF2O2mqWV2es1557zkC/puB8PWPXS7NOUasQy57NbAy2Qq4JlpwJLkDSvDSeYcXiZT6MM3WgBLkv0WdcWDrwNabj4+4nQJ5k2/9Fvj5X7HrTNmBc+VQIbdCz7lXcm45KyVXa0yHWosN4BHnAtgrxjEAn34kiSpSX58K4xZGMBPS51tRZ9MD9gjGZMc9cDcm7MPdzoawP7gvQSsDNtKyJ+fe2gLsE0tAHw5dDkB7R5HJJclz89teU9yY9gik3Day5inVpb5N+0Pias9eON1YTaRNM8V91mFy9jnVYxPKe9/CQMv9fDcQoOPW4I+7HOliUAedAJXsRq10tjXVRtmA+0K1suROefQNL0k/MOxkLnOYGgwu17SlM/iyWTAI7H7sxMtGdvBKFMfNRRBMqmz7GZBy7DO0ti96HKTOSsY8e+Q+zCqihJWmm330Dm0Kh7zHvCWv7Yh4yOOx26FPlfD/HMQBqsD4iGnWmS9qsKowyXNfKCUn6Sb52sZHvKhSBfDLjTdzaQwaX0tNRSarAW4qQfpqtY2GkRvOPt0nWUh7bAz8elKjDXBqvPgLvahCevj/yOOtemlqjjqqA+4qsfHvM87CtW2dkjIbbbBImOO2eP09XjlIq9G7fx5S7pUKPToww5JVXLGqrL8N+u4zoQ/7dQUlvycu2cXOD34TMlkt7UAVodW58BbXYonn2r7NXXA329B4c/Y2PJA1/DIX8Wrb1s+TQN5eWX6sdjfg/E+cw0Ww1eaYFUlyVudg+tBjwPx+u/Mn1J+pl51gS9IrkiGLWzbmK9o6C+SU15v2B33wc501o/HvB2vfbshsrMWpbvAd+LZCza0lfqTEshpW8AXG5qfFzrLaP34YbxSsx6VKZpq1vEmo/H8N9vE5oNOlr71KFHQthqLT7/V6VQkMxyesM9d6GvwrqyFXy70cpj0N22kfrXUz3dRkStU8KTkXzZ31sv2Yk1pzu0oVBQltNbr2TjKCR9ukdhzu+P+YfcGMaj7acUy96FQdFYNtpbufACVMruntno+GICWNPHdDKtsjPt7/VOmKkNVj6pXvKGQ1PIZJmT1fmBT7PY7jtTQD7QjOgecjDK1lvjqyeNsdKereMcfUQl5VCW5Qq0TAtWLR50Pc/4AWWnOdkW67p17wtsOuz/kTNybb6/kkmSvomF8MxlWmazRCyqebpFNEp5wR0kg6TU+g0FrcsmhiNbl1jQU9RxrbQiwL6pG5W1MvNMIwf2GJbumUb8KFjkeXfnvLUBvnK1VCEycuh+Pl+VqV+g/j4T8s9DnWeuuHYkZNpS5+OkG/lWfpE2mxs9SGrK1MSfKVi8G/CneO2sNBqL7X2c0jrq7E5K4xsUSwOYI5MJ8bHIxhiwjHU7OcnkwkO3lgGYnBHnfFR3+RPc/4/pFCe28teWnD5U5e0KfnQArYjw45LXQT/K1uF8vYZclI+7pLLHmjpQgxuyw3GJfj0Q7LnmpTaFuxcMmmduPGpx7t6c837D/Xmc6yzHkQssR6Lik6hMzQJpKjwqFfrzfwbaD1YWzIT6fbKj8U6/PdfRjRtYAbwLc5qYD1yQXbYn474hf1BlDs+bGPNnx7yyTabMOrwePN4RY/XrXE8g7HUbXhTFop/+UQi55tlNS16bDyrCkYfab/NqSMgVfs+nLYlo20fzD3YYsVnXSMaNdGhwOWuEuo/7m9SmaTmZ04luzrvndxe38Y6G2Jef/639w/Rf9bF4XxxmWAQAAAABJRU5ErkJggg==)}
@@ -471,41 +559,47 @@ button.slot:hover {border-color:var(--blue);background:var(--panel)}
 .printer-check-status:empty,#settingsSaveStatus:empty {display:none}
 .printer-check-status[data-result=success] {color:var(--ok)}
 .printer-check-status[data-result=error] {color:var(--warn)}
-#settingsDialog {width:min(540px,calc(100% - 24px));max-height:90vh;overflow:hidden}
+#settingsDialog {width:min(680px,calc(100% - 24px));max-height:90vh;overflow:hidden}
 dialog.settings #settingsForm {display:flex;max-height:calc(90vh - 2px);padding:0;gap:0}
-#settingsTitle {flex:none;margin:0;padding:16px 20px 8px;font-size:17px}
-#settingsSections {display:flex;flex-wrap:wrap;gap:6px;padding:0 20px 10px}
-#settingsSections button {background:transparent;color:var(--muted)}
+#settingsTitle {flex:none;margin:0;padding:16px 20px 12px;font-size:17px}
+#settingsLayout {display:grid;grid-template-columns:minmax(160px,192px) minmax(0,1fr);grid-template-rows:minmax(0,1fr);
+  min-height:min(245px,50vh);overflow:hidden;border-top:1px solid var(--line)}
+#settingsSections {display:flex;flex-direction:column;gap:3px;padding:10px 10px 10px 16px;
+  border-inline-end:1px solid var(--line);overflow:auto}
+#settingsSections button {display:flex;align-items:center;gap:7px;text-align:start;min-width:0;
+  background:transparent;color:var(--muted);border-color:transparent;overflow-wrap:anywhere}
+#settingsSections button::before {flex:none;margin:0}
+#settingsSections button:hover {background:var(--bg);color:var(--text)}
+#settingsSections button:focus-visible {outline:2px solid var(--blue);outline-offset:-2px}
 #settingsSections button[aria-pressed="true"] {border-color:var(--blue);color:var(--text);background:var(--bg)}
-#settingsContent {min-height:0;overflow:auto;padding:0 20px 10px;scrollbar-gutter:stable}
-.display-settings {display:grid;gap:2px;padding-block:3px}
-.display-settings label {display:flex;align-items:center;justify-content:space-between;gap:8px 14px;flex-wrap:wrap;
+#settingsContent {min-width:0;min-height:0;overflow:auto;padding:10px 20px 14px;scrollbar-gutter:stable}
+.settings-fields {display:grid;gap:2px;padding-block:3px}
+.settings-fields label {display:flex;align-items:center;justify-content:space-between;gap:8px 14px;flex-wrap:wrap;
   margin:0;padding:9px 0;font-size:13px;color:var(--text);border-bottom:1px solid var(--line)}
-.display-settings label:last-child {border-bottom:0}
-.display-settings select {min-width:min(100%,150px);max-width:100%;font:inherit;color:inherit;background:var(--bg);
+.settings-fields label:last-child {border-bottom:0}
+.settings-fields select {min-width:min(100%,150px);max-width:100%;font:inherit;color:inherit;background:var(--bg);
   border:1px solid var(--line);border-radius:4px;padding:6px 8px}
-.display-settings input[type="checkbox"] {margin:2px 0;accent-color:var(--blue)}
-.display-blocks {display:grid;gap:6px;margin-top:8px}
-.display-block {border:1px solid var(--line);border-radius:6px}
-.display-block > summary {cursor:pointer;padding:8px 11px;font-size:13px;font-weight:600}
-.display-block > summary:focus-visible {outline:2px solid var(--blue);outline-offset:-2px}
-.display-block[open] > summary {border-bottom:1px solid var(--line)}
-.display-block > .display-settings {padding-inline:11px}
+.settings-fields input[type="checkbox"] {margin:2px 0;accent-color:var(--blue)}
 #settingsFooter {flex:none;background:var(--panel);border-top:1px solid var(--line);padding:10px 20px}
 #settingsFooter .settings-actions {margin:0}
 #settingsSave {color:var(--panel)}
 #settingsSaveStatus {margin:0 0 8px;overflow-wrap:anywhere}
+@media(max-width:520px) {
+  #settingsLayout {grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);min-height:0}
+  #settingsSections {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;
+    padding:8px 12px;border-inline-end:0;border-bottom:1px solid var(--line);max-height:38vh}
+  #settingsSections button {padding-inline:5px;gap:5px;font-size:12px}
+  .settings-fields label {gap:6px 8px}
+  .settings-fields select {min-width:min(100%,116px)}
+  #settingsTitle,#settingsContent,#settingsFooter {padding-inline:12px}
+}
 @media(max-width:640px){.tabs{gap:4px}.view-tabs button{padding-inline:10px}
-.identity{min-width:0}
 .tabs button{font-size:12px}
-
-.device{margin:14px 0}
 }
 @media(max-width:420px){
   .view-tabs {flex-wrap:wrap;max-width:100%;gap:2px}
   .view-tabs button {padding-inline:7px}
   .view-tabs [data-icon]::before {margin-inline-end:.25em}
-  #settingsContent,#settingsTitle,#settingsFooter,#settingsSections {padding-inline:12px}
 }
 
 .section-icon {width:17px;height:17px;vertical-align:-3px;margin-right:8px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;color:var(--blue)}
@@ -550,30 +644,24 @@ details.panel:not([open]) > summary.panel-title {border-radius:11px}
 
 
 @media (max-width:820px) {
+  .dashboard #jobPanel {order:-3}
   .dashboard #manualPanel {order:-1}
 
   .dashboard .readings {order:-2}
 }
 
-.device {display:flex;align-items:center;gap:12px 24px;padding:0;margin:20px 0}
-.device .identity {min-width:0;max-width:100%}
-.device h1 {overflow-wrap:anywhere}
+#jobPanel {grid-column:1 / -1}
+#cameraSettings .tool-body {padding:14px 16px;overflow-wrap:anywhere}
+#cameraSettings .camera-form {padding:0;flex-direction:row}
+#cameraSettings .caption:empty {display:none}
+#cameraSettings .row {margin-top:10px;justify-content:flex-end}
+
 #status:not(.disconnected) + #diagnose,#status[hidden] + #diagnose {display:none}
-#headerJob {flex:1 1 330px;min-width:0;max-width:740px;margin-left:auto}
-#job {display:grid;grid-template-columns:clamp(72px,10vw,120px) minmax(0,1fr);
-  background:var(--panel);border:1px solid var(--line);border-radius:8px}
-.job-visual {position:relative;display:grid;place-items:center;min-height:64px;overflow:hidden;
-  border-radius:7px 0 0 7px;color:var(--muted)}
-.job-visual svg {width:24px;height:24px}
-.job-image {position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
-#job[data-preview="available"] .job-visual svg {visibility:hidden}
-.job-content {min-width:0;padding:12px 12px 12px 8px}
-.job-heading {display:flex;align-items:center;justify-content:space-between;gap:12px}
-.filename {min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;font-weight:600}
+#job {display:contents}
 #openJob {display:block;width:fit-content;max-width:100%;padding:0;border:0;background:none;
-  color:var(--text);text-align:left;font:inherit;font-weight:600}
+  color:var(--text);text-align:left;font-size:inherit}
 #openJob:hover {color:var(--blue);text-decoration:underline}
-#headerJob #job[data-active="true"] .job-visual {cursor:pointer}
+#job[data-active="true"] .jobs-model {cursor:pointer}
 #jobs {display:grid;gap:12px;padding-top:8px}
 .fleet-toolbar,.fleet-tools,.fleet-filters {display:flex;align-items:center;flex-wrap:wrap;gap:6px}
 .fleet-toolbar {justify-content:space-between;gap:10px 16px}
@@ -585,38 +673,44 @@ details.panel:not([open]) > summary.panel-title {border-radius:11px}
 #fleetCameras[aria-pressed="true"] {border-color:var(--blue);color:var(--blue)}
 #fleetCameras[aria-pressed="false"] {background:transparent;color:var(--muted)}
 #jobsList {display:grid;gap:8px;margin:0;padding:0;list-style:none;grid-template-columns:minmax(0,1fr)}
-.jobs-card {display:grid;grid-template-columns:minmax(0,1fr);grid-template-areas:"job";
+.jobs-card {display:grid;grid-template-columns:minmax(138px,16%) minmax(0,1fr);grid-template-areas:"media job";
   background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
-.jobs-card[data-active="true"] {grid-template-columns:minmax(138px,16%) minmax(0,1fr);
-  grid-template-areas:"media job"}
-.jobs-card:has(.jobs-camera:not([hidden])) {grid-template-columns:minmax(0,1fr) clamp(140px,20vw,220px);
-  grid-template-areas:"job camera"}
-.jobs-card[data-active="true"]:has(.jobs-camera:not([hidden])) {
+.jobs-card:has(.jobs-camera:not([hidden])) {
   grid-template-columns:minmax(138px,16%) minmax(0,1fr) clamp(140px,20vw,220px);
   grid-template-areas:"media job camera"}
-.jobs-card:has(.jobs-camera:not([hidden])) .jobs-body {align-content:start}
-.jobs-printer-heading {display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 10px;margin-bottom:3px}
-.jobs-printer-heading h3 {margin:0;font-size:15px;line-height:1.25;overflow-wrap:anywhere}
-.jobs-printer-heading a {margin-inline-start:auto}
+.jobs-printer-heading {display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:3px}
+.jobs-printer-identity {display:flex;align-items:baseline;flex-wrap:wrap;min-width:0;gap:4px 10px}
+.jobs-printer-heading :is(h2,h3) {margin:0;font-size:15px;line-height:1.25;overflow-wrap:anywhere}
+#job .jobs-printer-heading {flex-wrap:wrap}
+.monitor-job-tools {display:flex;align-items:center;gap:6px;margin-inline-start:auto}
+#job .monitor-job-tools .jobs-link {padding:2px 4px}
+#monitorHistory::before {margin-inline-end:0}
+.jobs-printer-heading a {flex:none}
 .jobs-state {display:flex;align-items:baseline;gap:6px;margin:0;font-size:12px;color:var(--muted)}
 .jobs-state::before {content:"";display:inline-block;flex:0 0 6px;height:6px;align-self:center;border-radius:50%;background:currentColor}
 .jobs-card[data-group="active"] .jobs-state,.jobs-card[data-ready="true"] .jobs-state {color:var(--ok)}
 .jobs-card[data-group="attention"] .jobs-state {color:var(--warn)}
-.jobs-printer-heading a,.jobs-actions a {color:var(--blue);font-size:12px;font-weight:600;text-decoration:none}
+.jobs-printer-heading :is(a,.jobs-link),.jobs-actions :is(a,.jobs-link) {color:var(--blue);font-size:12px;font-weight:600;text-decoration:none}
 .jobs-card a:hover {text-decoration:underline}
-.jobs-body {grid-area:job;min-width:0;display:grid;align-content:center;gap:5px;padding:8px 10px}
+.jobs-body {grid-area:job;min-width:0;display:grid;align-content:start;gap:5px;padding:8px 10px}
 .jobs-file-row {display:flex;align-items:baseline;justify-content:space-between;gap:10px}
 .jobs-file {font-weight:600;overflow-wrap:anywhere;min-width:0}
 .jobs-file-row strong {flex:none;color:var(--blue)}
-.jobs-card[data-active="false"] .jobs-file {color:var(--muted);font-weight:400}
+:is(.jobs-card,#job)[data-active="false"] .jobs-file {color:var(--muted);font-weight:400}
 .jobs-card progress {height:6px}
 .jobs-meta,.jobs-events,.jobs-last {font-size:12px;color:var(--muted)}
-.jobs-meta:has(span:empty):has(strong:empty) {display:none}
+.jobs-meta:has(>span:empty):has(>strong:empty) {display:none}
 .jobs-last {display:flex;flex-wrap:wrap;gap:2px 6px}
 .jobs-last strong {font-weight:600;color:var(--text);overflow-wrap:anywhere;min-width:0}
 .jobs-actions {display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px}
 .jobs-actions:not(:has(:is(button,a):not([hidden]))) {display:none}
-.jobs-actions a {padding-block:4px}
+.jobs-actions :is(a,.jobs-link) {padding-block:4px}
+.jobs-card .jobs-link {border:0;background:none;padding-inline:0}
+.jobs-card .jobs-link:enabled:hover {text-decoration:underline}
+#cameraOpen {padding-block:0;flex:none}
+#jobMeta,#jobMetrics #time {display:inline-flex;flex-wrap:wrap;gap:4px 10px}
+#jobMeta span:empty {display:none}
+#jobMetrics:not(:has(>span:not([hidden]))) {display:none}
 .jobs-body details {font-size:12px;color:var(--muted)}
 :root[data-fleet-details="off"] .jobs-body details {display:none}
 .jobs-body summary {cursor:pointer;width:fit-content}
@@ -626,28 +720,29 @@ details.panel:not([open]) > summary.panel-title {border-radius:11px}
 .jobs-events {list-style:none;margin:0;padding:0}
 .jobs-events li + li {margin-top:3px}
 [data-job-result]:empty {display:none}
-.jobs-media {grid-area:media;display:grid;justify-items:center;align-content:center;gap:4px;min-width:0;padding:5px 4px}
+.jobs-media {grid-area:media;display:grid;grid-template-rows:minmax(86px,1fr) auto;min-width:0}
 .jobs-media figure,.jobs-camera {min-width:0;margin:0}
-.jobs-model {width:min(100%,116px)}
-.jobs-model-actions {justify-content:center;gap:4px}
+.jobs-model {display:grid}
+.jobs-model-actions {justify-content:center;gap:4px;padding:0 4px 4px}
 .jobs-model-actions button {padding:4px 6px;font-size:12px}
-.jobs-camera {grid-area:camera;position:relative;align-self:stretch;width:100%;min-height:0;aspect-ratio:16/10}
+.jobs-camera {grid-area:camera;position:relative;
+  align-self:stretch;width:100%;min-height:0;aspect-ratio:16/10}
 .jobs-camera figcaption {position:absolute;bottom:6px;left:6px;padding:2px 5px;border-radius:4px;
   background:#151a18d9;color:#fff;font-size:11px;pointer-events:none}
 .jobs-camera:not(:has([data-stream]:not([hidden]))) figcaption {visibility:hidden}
-.jobs-camera .jobs-media-frame {position:absolute;inset:0;height:auto;border-radius:0}
+.jobs-camera .jobs-media-frame {position:absolute;inset:0;border-radius:0}
 .jobs-media-frame,#jobsCameraFrame {position:relative;display:grid;place-items:center;overflow:hidden;
   background:var(--bg);border-radius:6px}
-.jobs-media-frame {height:86px}
 .jobs-media-frame img,#jobsCameraFrame img {position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
-.jobs-model .jobs-media-frame {height:72px;background:transparent}
+.jobs-model .jobs-media-frame {background:transparent;border-radius:0}
 .jobs-camera .muted,.jobs-fallback {padding:3px 4px;text-align:center;font-size:11px}
 .jobs-fallback {display:grid;justify-items:center;gap:3px;color:var(--muted)}
 .jobs-fallback svg {width:22px;height:22px}
 .jobs-model:has([data-preview]:not([hidden])) .jobs-fallback {visibility:hidden}
 .jobs-camera-tools {position:absolute;top:4px;right:4px;display:flex;gap:4px}
 .jobs-camera-tools button {display:grid;place-items:center;width:28px;height:28px;padding:0;background:var(--panel)}
-.jobs-camera-tools svg {width:14px;height:14px}
+.jobs-camera-tools svg,.camera-expand-icon {width:14px;height:14px}
+.jobs-camera-tools button[data-icon]::before {margin:0}
 #jobsNotice {padding:16px}
 #jobsNotice button {margin-top:8px}
 #jobsCameraDialog {width:min(680px,calc(100% - 24px));padding:12px}
@@ -658,35 +753,14 @@ details.panel:not([open]) > summary.panel-title {border-radius:11px}
   #fleetSearch {max-width:none;min-width:118px}
 }
 @media(max-width:540px){
-  .jobs-card[data-active="true"] {grid-template-columns:minmax(0,1fr);grid-template-areas:"job" "media"}
-  .jobs-card:has(.jobs-camera:not([hidden])) {grid-template-columns:minmax(0,1fr) minmax(0,59%)}
-  .jobs-card[data-active="true"]:has(.jobs-camera:not([hidden])) {
+  .jobs-card {grid-template-columns:minmax(0,1fr);grid-template-areas:"job" "media"}
+  .jobs-card:has(.jobs-camera:not([hidden])) {
     grid-template-columns:minmax(142px,41%) minmax(0,1fr);grid-template-areas:"job job" "media camera"}
-  .jobs-media {justify-items:start;padding-inline-start:10px}
-  .jobs-card:has(.jobs-camera:not([hidden])) .jobs-media {justify-items:center;padding-inline-start:4px}
+  .jobs-card:not(:has(.jobs-camera:not([hidden]))) .jobs-media {width:min(100%,160px)}
   .fleet-tools {flex-basis:100%}
 }
 @media(max-width:345px){#fleetSearch {flex-basis:100%}}
-.percent {flex:none;color:var(--blue);font-size:16px;font-weight:650;line-height:1.15}
-#progressLine {margin-top:7px}
-#bar {height:5px}
-.job-timing, .job-meta {display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;color:var(--muted);font-size:12px}
-.job-timing strong {font-size:13px;color:var(--text);font-weight:600}
-.job-footer {display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px 16px;margin-top:8px}
-.job-footer:not(:has(#time:not([hidden]), #jobMeta:not([hidden]), #jobActions:not([hidden]) button:not([hidden]))) {display:none}
-.job-stats:not(:has(#time:not([hidden]), #jobMeta:not([hidden]))) {display:none}
-.job-meta span:empty {display:none}
-.job-timing:not([hidden]) + .job-meta {margin-top:4px}
-#timeHint {margin-top:6px;font-size:12px;color:var(--muted)}
-#jobActions {margin-left:auto;gap:6px}
-#jobActions button {min-height:28px;padding:4px 9px}
-#jobActions:not(:has(button:not([hidden]))) {display:none}
-#actionStatus {padding:7px 0 0;font-size:12px}
-#job[data-phase="idle"] {display:block;padding:0;background:none;border:0}
-#job[data-phase="idle"] :is(.job-visual,.job-footer,#progressLine,.percent) {display:none}
-#job[data-phase="idle"] .job-content {padding:0}
-#job[data-phase="idle"] .filename {color:var(--muted);font-weight:400}
-main:has(.dashboard.stale) #job {opacity:.65}
+main:has(.dashboard.stale) #job > * {opacity:.65}
 #otherTools {display:flex;align-items:baseline;gap:6px 14px;flex-wrap:wrap;padding:0 16px 12px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
 #otherTools span {white-space:nowrap}
 .detail-groups {display:grid;gap:8px}
@@ -696,13 +770,13 @@ main:has(.dashboard.stale) #job {opacity:.65}
 #printerSensors:empty {display:none}
 #history .totals {margin-bottom:12px}
 #history .totals dd {font-size:16px;font-weight:600;font-variant-numeric:tabular-nums}
-#historyStatus {margin-bottom:6px}
+#historyStatus {margin-bottom:6px;white-space:pre-line;overflow-wrap:anywhere}
 .history-controls {display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px}
 .history-controls label {display:inline-flex;align-items:center;gap:6px;cursor:pointer}
 .history-controls input[type="checkbox"] {width:auto;margin:0;accent-color:var(--blue)}
+#historyPrinter {max-width:100%;min-width:0;font:inherit;color:inherit;background:var(--panel);
+  border:1px solid var(--line);border-radius:4px;padding:6px 8px}
 .preview {background:var(--bg);color:var(--muted)}
-:root[data-density="compact"] .device {margin-block:10px;gap:8px 16px}
-:root[data-density="compact"] .device h1 {font-size:clamp(22px,2.5vw,30px)}
 :root[data-density="compact"] .tabs {margin-bottom:9px}
 :root[data-density="compact"] .dashboard,
 :root[data-density="compact"] .monitor-main,
@@ -711,63 +785,14 @@ main:has(.dashboard.stale) #job {opacity:.65}
 :root[data-density="compact"] .panel-title {padding-block:7px}
 :root[data-density="compact"] .jobs-body,
 :root[data-density="compact"] .file-name {padding-block:6px}
-:root[data-density="compact"] .jobs-model .jobs-media-frame {height:65px}
-:root[data-density="compact"] .jobs-media {padding-block:4px}
 :root[data-density="compact"] .chart {height:126px}
-@media(max-width:760px){#headerJob {flex-basis:100%;max-width:none;margin-left:0}}
-@media(max-width:440px){#job .job-content {padding:9px 9px 9px 6px}
-  #job[data-phase="idle"] .job-content {padding:0}
-  #jobActions {margin-left:0}}
 </style>
 </head>
 <body>
 <main>
-  <header class="device"><div class="identity"><h1 id="deviceName">{{printer}}</h1><span id="status" class="connection" role="status">{{t:Connecting…}}</span><button id="diagnose" type="button" data-icon="find">{{t:Check connection}}</button></div>
-    <select id="devicePicker" aria-label="{{t:Open printer}}" hidden></select>
-    <section id="headerJob" aria-label="{{t:Print job}}" hidden>
-      <div id="jobCard">
-        <div id="job" data-phase="idle" data-preview="none">
-          <div class="job-visual" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round">
-              <path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Zm0 9 8-4.5M12 12 4 7.5m8 4.5v9"/>
-            </svg>
-            <img class="job-image" id="jobImage" alt="" hidden>
-          </div>
-          <div class="job-content">
-            <div class="job-heading">
-              <button class="filename" id="openJob" type="button" hidden></button>
-              <p class="filename" id="jobFile">—</p>
-              <strong class="percent" id="percent" hidden></strong>
-            </div>
-            <div id="progressLine" hidden>
-              <progress id="bar" max="100" aria-label="{{t:Print progress}}"></progress>
-            </div>
-            <div class="job-footer">
-              <div class="job-stats">
-                <div class="job-timing" id="time" hidden>
-                  <span><strong id="remaining"></strong></span>
-                  <span id="finishTime" hidden></span>
-                </div>
-                <div class="job-meta" id="jobMeta" hidden>
-                  <span id="layers"></span><span id="elapsed"></span><span id="filament"></span>
-                </div>
-              </div>
-              <div class="device-actions" id="jobActions">
-                <button id="pausePrint" type="button" data-icon="pause" hidden>{{t:Pause}}</button>
-                <button id="resumePrint" type="button" data-icon="play" hidden>{{t:Resume}}</button>
-                <button id="cancelPrint" type="button" class="danger" data-icon="stop" hidden>{{t:Cancel}}</button>
-              </div>
-            </div>
-            <p id="timeHint" hidden></p>
-          </div>
-        </div>
-        <p id="actionStatus" role="status" class="tool-body" hidden></p>
-      </div>
-    </section>
-  </header>
   <nav class="tabs" aria-label="{{t:Device navigation}}">
     <div class="view-tabs"><button id="monitorTab" data-icon="monitor">{{t:Monitor}}</button><button id="fleetToggle" data-icon="fleet">{{t:All printers}}</button><button id="historyTab" data-icon="history">{{t:History}}</button>
-    </div><div class="view-actions"><button id="notificationsButton" data-icon="bell">{{t:Notifications}}</button><button id="settingsButton" data-icon="settings" aria-haspopup="dialog">{{t:Settings}}</button>
+    </div><div class="view-actions"><select id="devicePicker" aria-label="{{t:Open printer}}" hidden></select><button id="notificationsButton" data-icon="bell">{{t:Notifications}}</button><button id="settingsButton" data-icon="settings" aria-haspopup="dialog">{{t:Settings}}</button>
   </div></nav>
 
   <section class="panel" id="setup" hidden>
@@ -787,7 +812,7 @@ main:has(.dashboard.stale) #job {opacity:.65}
         <button type="button" data-fleet-filter="all" aria-controls="jobsList" aria-pressed="true">{{t:All}} <span data-count></span></button>
         <button type="button" data-fleet-filter="active" aria-controls="jobsList" aria-pressed="false">{{t:Printing}} <span data-count></span></button>
         <button type="button" data-fleet-filter="idle" aria-controls="jobsList" aria-pressed="false">{{t:Idle}} <span data-count></span></button>
-        <button type="button" data-fleet-filter="attention" aria-controls="jobsList" aria-pressed="false" title="{{t:Paused, disconnected or reporting a problem}}">{{t:Attention}} <span data-count></span></button>
+        <button type="button" data-fleet-filter="attention" aria-controls="jobsList" aria-pressed="false">{{t:Attention}} <span data-count></span></button>
       </div>
       <div class="fleet-tools">
         <input type="search" id="fleetSearch" aria-label="{{t:Search printers and jobs}}" placeholder="{{t:Search…}}">
@@ -800,49 +825,14 @@ main:has(.dashboard.stale) #job {opacity:.65}
       <p class="muted" role="status"></p>
       <button type="button" id="fleetClear" data-icon="close">{{t:Clear filters}}</button>
     </div>
-    <dialog id="jobsCameraDialog" aria-labelledby="jobsCameraName">
-      <div class="row"><h2 id="jobsCameraName"></h2><form method="dialog"><button type="submit" data-icon="close">{{t:Close}}</button></form></div>
-      <div id="jobsCameraFrame"></div>
-    </dialog>
     <template id="jobTile">
       <li class="jobs-card">
-        <div class="jobs-body">
-          <div class="jobs-printer-heading">
-            <h3 tabindex="-1"></h3><span class="jobs-state"></span>
-            <a data-monitor data-icon="arrow">{{t:Monitor}}</a>
-          </div>
-          <div class="jobs-file-row"><span class="jobs-file"></span><strong class="jobs-percent"></strong></div>
-          <progress max="100" aria-label="{{t:Print progress}}"></progress>
-          <div class="row jobs-meta"><span data-layer></span><strong data-eta></strong></div>
-          <div class="jobs-last" hidden>{{t:Last completed}} <strong></strong></div>
-          <div class="jobs-actions">
-            <button type="button" data-retry data-icon="refresh" hidden>{{t:Reconnect camera}}</button>
-            <a data-files data-icon="arrow" hidden>{{t:Browse files}}</a>
-            <a data-repeat data-icon="refresh" hidden>{{t:Print again}}</a>
-          </div>
-          <details><summary>{{t:Job details}}</summary><dl></dl><ol class="jobs-events"></ol></details>
-          <p class="jobs-meta" data-job-result role="status"></p>
-        </div>
-        <div class="jobs-media">
-          <figure class="jobs-model">
-            <div class="jobs-media-frame">
-              <div class="jobs-fallback"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true">
-                <path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Zm0 9 8-4.5M12 12 4 7.5m8 4.5v9"/>
-              </svg><span>{{t:No preview}}</span></div>
-              <img data-preview alt="" hidden>
-            </div>
-          </figure>
-          <div class="jobs-actions jobs-model-actions">
-            <button type="button" data-print-action data-icon="pause" hidden></button>
-            <button type="button" class="danger" data-print-cancel data-icon="stop" hidden>{{t:Cancel}}</button>
-          </div>
-        </div>
-        <figure class="jobs-camera" hidden>
+''' + FLEET_JOB_CONTENT + r'''        <figure class="jobs-camera" hidden>
           <div class="jobs-media-frame">
             <img data-stream alt="" hidden><span class="muted" role="status" hidden></span>
             <div class="jobs-camera-tools">
               <button type="button" data-camera aria-label="{{t:Enlarge camera}}" title="{{t:Enlarge camera}}" hidden>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 4H4v4m12-4h4v4M4 16v4h4m12-4v4h-4"/></svg>
+''' + CAMERA_EXPAND_ICON + r'''
               </button>
               <button type="button" data-snapshot aria-label="{{t:Save snapshot}}" title="{{t:Save snapshot}}" hidden>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M3 7h4l2-3h6l2 3h4v13H3z"/><circle cx="12" cy="13" r="3.5"/></svg>
@@ -854,9 +844,41 @@ main:has(.dashboard.stale) #job {opacity:.65}
       </li>
     </template>
   </section>
+  <dialog id="jobsCameraDialog" aria-labelledby="jobsCameraName">
+    <div class="row"><h2 id="jobsCameraName"></h2><form method="dialog"><button type="submit" data-icon="close">{{t:Close}}</button></form></div>
+    <div id="jobsCameraFrame"></div>
+  </dialog>
+  <dialog class="settings" id="cameraSettings" aria-labelledby="cameraSettingsTitle">
+    <div class="tool-body">
+      <h2 id="cameraSettingsTitle">{{t:Camera}}</h2>
+      <form class="camera-form" id="cameraForm">
+        <label for="cameraUrl">{{t:MJPEG stream URL (HTTP or HTTPS)}}</label>
+        <input id="cameraUrl" type="url" maxlength="2048" placeholder="http://…" autocomplete="off">
+        <button id="cameraStart" type="submit" data-icon="play">{{t:Connect}}</button>
+        <button id="cameraStop" type="button" data-icon="unplug" hidden>{{t:Disconnect}}</button>
+        <button id="cameraLight" type="button" data-icon="light" aria-label="{{t:Chamber light}}" aria-pressed="false" hidden>{{t:Light off}}</button>
+      </form>
+      <p class="caption" id="cameraStatus" role="status"></p>
+      <p class="caption" id="lightStatus" role="status"></p>
+      <div class="row"><button id="cameraSettingsClose" type="button">{{t:Close}}</button></div>
+    </div>
+  </dialog>
   <div class="dashboard" id="monitor">
+    <section class="jobs-card" id="jobPanel" aria-labelledby="job-title">
+      <div id="job" data-active="false">
+''' + MONITOR_JOB_CONTENT + r'''      </div>
+      <figure class="jobs-camera" id="camera" hidden>
+        <div class="jobs-media-frame">
+          <img id="cameraImage" data-stream alt="{{t:Printer camera feed}}" referrerpolicy="no-referrer" hidden>
+          <div class="jobs-camera-tools">
+            <button id="cameraExpand" type="button" aria-label="{{t:Enlarge camera}}" title="{{t:Enlarge camera}}">''' + CAMERA_EXPAND_ICON + r'''</button>
+            <button id="cameraSnapshot" type="button" data-icon="camera" aria-label="{{t:Save snapshot}}" title="{{t:Save snapshot}}"></button>
+          </div>
+        </div>
+        <figcaption>{{t:Live camera}}</figcaption>
+      </figure>
+    </section>
     <div class="monitor-main">
-
       <details class="panel readings foldable-panel" id="readingsPanel" aria-labelledby="readouts-title" open>
         <summary class="panel-title">
           <span class="foldable-title" id="readouts-title"><svg class="section-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 13h4l3-8 4 14 3-7h4"/></svg>{{t:Printer Readings}}</span>
@@ -888,10 +910,13 @@ main:has(.dashboard.stale) #job {opacity:.65}
           <select id="chartTool" aria-label="{{t:Chart nozzle}}" hidden></select>
           <label>{{t:Range}} <select id="chartRange"><option value="5">{{t:5 min}}</option><option value="15">{{t:15 min}}</option><option value="30" selected>{{t:30 min}}</option></select></label>
         </div>
-        <canvas class="chart" id="chart" role="img" aria-label="{{t:Chart of actual and target temperatures for the nozzle and bed}}"></canvas>
+        <div id="chartPlots">
+          <canvas class="chart" id="chart" role="img" aria-label="{{t:Chart of actual and target temperatures for the nozzle and bed}}"></canvas>
+          <canvas class="chart" id="chartBed" role="img" aria-label="{{t:Bed}}" hidden></canvas>
+        </div>
         <p class="caption" id="chartSample"></p><div class="chart-legend muted">
-          <span class="nozzle-series" id="chartNozzle">{{t:Nozzle}}</span><span class="nozzle-series target" id="chartNozzleTarget">{{t:Nozzle Target}}</span>
-          <span class="bed-series">{{t:Bed}}</span><span class="bed-series target">{{t:Bed Target}}</span>
+          <span class="nozzle-series" id="chartNozzle" data-chart-line="nozzle">{{t:Nozzle}}</span><span class="nozzle-series target" id="chartNozzleTarget" data-chart-line="nozzleTarget">{{t:Nozzle Target}}</span>
+          <span class="bed-series" data-chart-line="bed">{{t:Bed}}</span><span class="bed-series target" data-chart-line="bedTarget">{{t:Bed Target}}</span>
         </div>
       </div>
     </details>
@@ -928,9 +953,8 @@ main:has(.dashboard.stale) #job {opacity:.65}
           <div class="manual-notices">
             <button data-group="clear" data-manual="clear" hidden><span class="mc-icon mc-clear" aria-hidden="true"></span>{{t:Clear error}}</button>
           </div>
-          <section class="manual-group" data-group="motion" aria-labelledby="axesTitle" hidden>
+          <section class="manual-group" data-group="motion" aria-label="{{t:Axes}}" hidden>
             <div class="axis-toolbar">
-              <h3 class="manual-heading" id="axesTitle">{{t:Axes}}</h3>
               <button data-manual="home" aria-label="{{t:Home all axes}}" title="{{t:Home all axes}}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="m2.5 11 9.5-8 9.5 8M5 9.5V21h5v-6h4v6h5V9.5"/></svg>{{t:Home}}</button>
               <button type="button" data-manual="release" data-group="release" data-released="false" aria-label="{{t:Release motors}}" title="{{t:Release motors}}" hidden>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false">
@@ -952,12 +976,14 @@ main:has(.dashboard.stale) #job {opacity:.65}
                   <button data-jog="x-" aria-label="{{t:Move X negative}}"><span>X−</span></button>
                   <button data-jog="x+" aria-label="{{t:Move X positive}}"><span>X+</span></button>
                   <button data-jog="y-" aria-label="{{t:Move Y negative}}"><span>Y−</span></button>
+                  <svg class="jog-nozzle" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 3h8v6h-8zM9 9h14v9H9zM11 18l3 6h4l3-6m-5 6v4M6 11v5m20-5v5"/></svg>
                 </div>
               </div>
               <div class="z-row" role="group" aria-labelledby="zPart">
                 <div class="axis-heading"><strong id="zPart">Z</strong><small id="zPosition"></small></div>
                 <div class="motion-buttons">
                   <button data-z-step="1" aria-label="{{t:Move up}}"><span class="mc-icon mc-up" aria-hidden="true"></span>{{t:Up}}</button>
+                  <svg class="z-plate" viewBox="0 0 64 40" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14 11h36l10 14H4zM4 25v4h56v-4M19 16h26m-31 5h36M24 11l-4 14m20-14 4 14"/></svg>
                   <button data-z-step="-1" aria-label="{{t:Move down}}"><span class="mc-icon mc-up" aria-hidden="true"></span>{{t:Down}}</button>
                 </div>
               </div>
@@ -968,7 +994,8 @@ main:has(.dashboard.stale) #job {opacity:.65}
             <div class="nozzle-controls" data-group="nozzleHeat" hidden>
               <label>{{t:Nozzle}} <select id="heatTarget"><option value="180">180 °C</option><option value="200" selected>200 °C</option>
                 <option value="220">220 °C</option><option value="240">240 °C</option><option value="260">260 °C</option><option value="280">280 °C</option></select></label>
-              <button data-heat>{{t:Set target}}</button><button data-manual="heat0">{{t:Heat off}}</button>
+              <button data-heat aria-label="{{t:Set temperature}}"><span class="heat-long">{{t:Set temperature}}</span><span class="heat-short">{{t:Heat}}</span></button>
+              <button data-manual="heat0" aria-label="{{t:Heat off}}"><span class="heat-long">{{t:Heat off}}</span><span class="heat-short">{{t:Off}}</span></button>
             </div>
             <div class="filament-actions" role="group" aria-label="{{t:Filament movement}}" aria-describedby="feedDistance">
               <small id="feedDistance">{{t:10 mm per move}}</small>
@@ -976,10 +1003,12 @@ main:has(.dashboard.stale) #job {opacity:.65}
             </div>
           </section>
           <section class="manual-group" data-group="calibration" aria-labelledby="calibrationTitle" hidden>
-            <h3 class="manual-heading" id="calibrationTitle">{{t:Calibration}}</h3>
-            <div class="manual-services">
-              <button data-manual="level"><span class="mc-icon mc-level" aria-hidden="true"></span>{{t:Level bed}}</button>
-              <button data-manual="shaper"><span class="mc-icon mc-shaper" aria-hidden="true"></span>{{t:Input shaper}}</button>
+            <div class="calibration-row">
+              <h3 class="manual-heading" id="calibrationTitle">{{t:Calibration}}</h3>
+              <div class="manual-services">
+                <button data-manual="level"><span class="mc-icon mc-level" aria-hidden="true"></span>{{t:Level bed}}</button>
+                <button data-manual="shaper"><span class="mc-icon mc-shaper" aria-hidden="true"></span>{{t:Input shaper}}</button>
+              </div>
             </div>
             <div id="calibrationStatus" hidden><span id="calibrationMessage" role="status"></span>
               <progress id="calibrationProgress" aria-label="{{t:Calibration in progress}}" hidden></progress></div>
@@ -992,24 +1021,6 @@ main:has(.dashboard.stale) #job {opacity:.65}
         </div>
       </details>
       <section id="materials" class="panel" hidden><h2 class="panel-title"><svg class="section-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 6c0-4 14-4 14 0s-14 4-14 0z M5 6v12c0 4 14 4 14 0V6 M5 12c0 4 14 4 14 0"/></svg>{{t:Materials · IFS}}</h2><div id="slots"></div></section>
-      <div id="monitorCamera">
-        <details class="panel" id="camera">
-          <summary class="panel-title"><svg class="section-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 7h4l2-3h6l2 3h4v13H3z M15.5 13a3.5 3.5 0 1 1-7 0 3.5 3.5 0 1 1 7 0"/></svg>{{t:Camera}}</summary>
-          <div class="tool-body">
-            <label for="cameraUrl">{{t:MJPEG stream URL (HTTP or HTTPS)}}</label>
-            <form class="camera-form" id="cameraForm">
-              <input id="cameraUrl" type="url" maxlength="2048" placeholder="http://…" autocomplete="off">
-              <button id="cameraStart" type="submit" data-icon="play">{{t:Connect}}</button>
-              <button id="cameraStop" type="button" data-icon="unplug" hidden>{{t:Disconnect}}</button>
-              <button id="cameraLight" type="button" data-icon="light" aria-label="{{t:Chamber light}}" aria-pressed="false" hidden>{{t:Light off}}</button>
-              <button id="cameraSnapshot" type="button" data-icon="camera" hidden>{{t:Save snapshot}}</button>
-            </form>
-            <p class="caption" id="cameraStatus" role="status"></p>
-            <p class="caption" id="lightStatus" role="status"></p>
-            <img class="camera-image" id="cameraImage" alt="{{t:Printer camera feed}}" referrerpolicy="no-referrer" hidden>
-          </div>
-        </details>
-      </div>
       <details class="panel" id="printerDetails">
         <summary class="panel-title"><svg class="section-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M21 12a9 9 0 1 1-18 0 9 9 0 1 1 18 0 M12 11v6 M12 7v1"/></svg>{{t:Printer details}}</summary>
         <div class="tool-body detail-groups">
@@ -1043,11 +1054,15 @@ main:has(.dashboard.stale) #job {opacity:.65}
         <dl class="readouts">
           <div class="readout"><dt>{{t:Jobs}}</dt><dd id="statJobs"></dd></div>
           <div class="readout"><dt>{{t:Print time}}</dt><dd id="statHours"></dd></div>
-          <div class="readout"><dt>{{t:Finished cleanly}}</dt><dd id="statSuccess"></dd></div>
+          <div class="readout"><dt>{{t:Print success rate}}</dt><dd id="statSuccess"></dd></div>
         </dl>
       </section>
       <p class="muted" id="historyStatus" role="status">{{t:Print history is recorded while OrcaSlicer is open.}}</p>
-      <div class="history-controls"><input type="search" id="historySearch" placeholder="{{t:Find a file}}" aria-label="{{t:Find a history entry}}"><label><input type="checkbox" id="failedJobs"> {{t:Errors and cancellations}}</label></div>
+      <div class="history-controls">
+        <select id="historyPrinter" aria-label="{{t:Printer}}"><option value="">{{t:All printers}}</option></select>
+        <input type="search" id="historySearch" placeholder="{{t:Find a file}}" aria-label="{{t:Find a history entry}}">
+        <label><input type="checkbox" id="failedJobs"> {{t:Errors and cancellations}}</label>
+      </div>
       <p class="history-summary" id="historySummary"></p>
       <div class="table-wrap" id="historyTable" hidden>
         <table class="history-table" role="table">
@@ -1061,24 +1076,17 @@ main:has(.dashboard.stale) #job {opacity:.65}
 <dialog class="settings" id="settingsDialog" aria-labelledby="settingsTitle">
   <form id="settingsForm" novalidate>
     <h2 id="settingsTitle">{{t:Settings}}</h2>
-    <div id="settingsSections" role="group" aria-label="{{t:Settings}}">
-      <button id="settingsAppearanceTab" type="button" data-icon="monitor" aria-controls="settingsAppearance" aria-pressed="false">{{t:Appearance}}</button>
-      <button id="settingsPrintersTab" type="button" data-icon="link" aria-controls="settingsPrinters" aria-pressed="true">{{t:Connection}}</button>
-    </div>
-    <div id="settingsContent">
-      <section id="settingsPrinters" aria-labelledby="settingsPrintersTab">
-        <div id="printerFields"></div>
-        <div class="row"><button type="button" id="findPrinters" data-icon="find">{{t:Find printers}}</button><button type="button" id="addPrinter" data-icon="plus">{{t:Add printer}}</button></div>
-        <div id="discoveredPrinters"></div>
-        <p class="caption" id="settingsStatus" role="status"></p>
-        <details id="bulk"><summary>{{t:Edit as text}}</summary><label for="printersText">{{t:One printer per line: address | CheckCode | name | serial number}}</label>
-          <textarea id="printersText" rows="5" spellcheck="false" placeholder="192.168.1.50 | 1a2b3c4d | Adventurer 5M"></textarea>
-          <p class="caption">{{t:Use a JSON array of four strings when a value contains a vertical bar.}}</p>
-        </details>
-        <p class="caption">{{t:Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.}}</p>
-      </section>
-      <section id="settingsAppearance" aria-labelledby="settingsAppearanceTab" hidden>
-        <div class="display-settings">
+    <div id="settingsLayout">
+      <div id="settingsSections" role="group" aria-label="{{t:Settings}}">
+        <button id="settingsAppearanceTab" type="button" data-icon="settings" aria-controls="settingsAppearance" aria-pressed="false">{{t:Appearance}}</button>
+        <button id="settingsMonitorTab" type="button" data-icon="monitor" aria-controls="settingsMonitor" aria-pressed="false">{{t:Monitor}}</button>
+        <button id="settingsFleetTab" type="button" data-icon="fleet" aria-controls="settingsFleet" aria-pressed="false">{{t:All printers}}</button>
+        <button id="settingsFilesTab" type="button" data-icon="print" aria-controls="settingsFiles" aria-pressed="false">{{t:Printer Files}}</button>
+        <button id="settingsHistoryTab" type="button" data-icon="history" aria-controls="settingsHistory" aria-pressed="false">{{t:Print History}}</button>
+        <button id="settingsPrintersTab" type="button" data-icon="link" aria-controls="settingsPrinters" aria-pressed="true">{{t:Connection}}</button>
+      </div>
+      <div id="settingsContent">
+        <section class="settings-fields" id="settingsAppearance" aria-labelledby="settingsAppearanceTab" hidden>
           <label for="displayTheme">{{t:Theme}}<select id="displayTheme">
             <option value="system">{{t:System theme}}</option>
             <option value="light">{{t:Light theme}}</option>
@@ -1088,44 +1096,57 @@ main:has(.dashboard.stale) #job {opacity:.65}
             <option value="standard">{{t:Standard}}</option>
             <option value="compact">{{t:Compact}}</option>
           </select></label>
-        </div>
-        <div class="display-blocks">
-          <details class="display-block" id="settingsMonitor">
-            <summary>{{t:Monitor}}</summary>
-            <div class="display-settings">
-              <label for="displayMonitorChart">{{t:Temperatures}}<input type="checkbox" id="displayMonitorChart"></label>
-              <label for="displayPrinterDetails">{{t:Printer details}}<input type="checkbox" id="displayPrinterDetails"></label>
-            </div>
+        </section>
+        <section class="settings-fields" id="settingsMonitor" aria-labelledby="settingsMonitorTab" hidden>
+          <label for="displayMonitorChart">{{t:Temperatures}}<input type="checkbox" id="displayMonitorChart"></label>
+          <label for="displayChartLayout">{{t:Chart layout}}<select id="displayChartLayout">
+            <option value="shared">{{t:Shared scale}}</option>
+            <option value="separate">{{t:Separate scales}}</option>
+          </select></label>
+          <label for="displayChartRange">{{t:Range}}<select id="displayChartRange">
+            <option value="5">{{t:5 min}}</option><option value="15">{{t:15 min}}</option><option value="30">{{t:30 min}}</option>
+          </select></label>
+          <label>{{t:Nozzle}}<input type="checkbox" data-chart-choice="nozzle"></label>
+          <label>{{t:Nozzle Target}}<input type="checkbox" data-chart-choice="nozzleTarget"></label>
+          <label>{{t:Bed}}<input type="checkbox" data-chart-choice="bed"></label>
+          <label>{{t:Bed Target}}<input type="checkbox" data-chart-choice="bedTarget"></label>
+          <label for="displayPrinterDetails">{{t:Printer details}}<input type="checkbox" id="displayPrinterDetails"></label>
+        </section>
+        <section class="settings-fields" id="settingsFleet" aria-labelledby="settingsFleetTab" hidden>
+          <label for="displayFleetCameras">{{t:Live cameras}}<select id="displayFleetCameras">
+            <option value="all">{{t:While this tab is open}}</option>
+            <option value="printing">{{t:Only during an active print}}</option>
+            <option value="off">{{t:Off}}</option>
+          </select></label>
+          <label for="displayFleetDetails">{{t:Job details}}<input type="checkbox" id="displayFleetDetails"></label>
+          <label for="displayFleetWaitForRemoval">{{t:Wait for part removal}}<input type="checkbox" id="displayFleetWaitForRemoval"></label>
+        </section>
+        <section class="settings-fields" id="settingsFiles" aria-labelledby="settingsFilesTab" hidden>
+          <label for="displayCardSize">{{t:Card size}}<select id="displayCardSize">
+            <option value="small">{{t:Small}}</option>
+            <option value="medium">{{t:Medium}}</option>
+            <option value="large">{{t:Large}}</option>
+          </select></label>
+          <label for="displayRows">{{t:Rows per page}}<select id="displayRows">
+            <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option>
+          </select></label>
+          <label for="displayPreviews">{{t:Show file previews}}<input type="checkbox" id="displayPreviews"></label>
+        </section>
+        <section class="settings-fields" id="settingsHistory" aria-labelledby="settingsHistoryTab" hidden>
+          <label for="displayHistoryTotals">{{t:Totals}}<input type="checkbox" id="displayHistoryTotals"></label>
+        </section>
+        <section id="settingsPrinters" aria-labelledby="settingsPrintersTab">
+          <div id="printerFields"></div>
+          <div class="row"><button type="button" id="findPrinters" data-icon="find">{{t:Find printers}}</button><button type="button" id="addPrinter" data-icon="plus">{{t:Add printer}}</button></div>
+          <div id="discoveredPrinters"></div>
+          <p class="caption" id="settingsStatus" role="status"></p>
+          <details id="bulk"><summary>{{t:Edit as text}}</summary><label for="printersText">{{t:One printer per line: address | CheckCode | name | serial number}}</label>
+            <textarea id="printersText" rows="5" spellcheck="false" placeholder="192.168.1.50 | 1a2b3c4d | Adventurer 5M"></textarea>
+            <p class="caption">{{t:Use a JSON array of four strings when a value contains a vertical bar.}}</p>
           </details>
-          <details class="display-block" id="settingsFleet">
-            <summary>{{t:All printers}}</summary>
-            <div class="display-settings">
-              <label for="displayFleetCameras">{{t:Live cameras}}<input type="checkbox" id="displayFleetCameras"></label>
-              <label for="displayFleetDetails">{{t:Job details}}<input type="checkbox" id="displayFleetDetails"></label>
-            </div>
-          </details>
-          <details class="display-block" id="settingsFiles">
-            <summary>{{t:Printer Files}}</summary>
-            <div class="display-settings">
-              <label for="displayCardSize">{{t:Card size}}<select id="displayCardSize">
-                <option value="small">{{t:Small}}</option>
-                <option value="medium">{{t:Medium}}</option>
-                <option value="large">{{t:Large}}</option>
-              </select></label>
-              <label for="displayRows">{{t:Rows per page}}<select id="displayRows">
-                <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option>
-              </select></label>
-              <label for="displayPreviews">{{t:Show file previews}}<input type="checkbox" id="displayPreviews"></label>
-            </div>
-          </details>
-          <details class="display-block" id="settingsHistory">
-            <summary>{{t:Print History}}</summary>
-            <div class="display-settings">
-              <label for="displayHistoryTotals">{{t:Totals}}<input type="checkbox" id="displayHistoryTotals"></label>
-            </div>
-          </details>
-        </div>
-      </section>
+          <p class="caption">{{t:Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.}}</p>
+        </section>
+      </div>
     </div>
     <div id="settingsFooter"><p class="caption" id="settingsSaveStatus" role="status"></p>
     <div class="settings-actions">
@@ -1178,20 +1199,21 @@ const stateLabel = value => t(Object.hasOwn(states, value) ? states[value] : val
 const jobActionLabel = action => t({pause:'Pause', resume:'Resume', cancel:'Cancel'}[action] || action);
 const formatLocales = [uiLocale, uiLocale === 'eu' ? 'es-ES' : 'en-GB'];
 const weightFormat = new Intl.NumberFormat(formatLocales, {style:'unit', unit:'gram', maximumFractionDigits:2});
-const hourFormat = new Intl.NumberFormat(formatLocales, {style:'unit', unit:'hour'});
-const minuteFormat = new Intl.NumberFormat(formatLocales, {style:'unit', unit:'minute'});
 const fileCountLabel = count => uiLocale === 'en-US' ? count + (count === 1 ? ' file' : ' files')
   : t("Files: {count}", {count});
 const displayKey = 'ff-display-settings';
 const systemTheme = matchMedia('(prefers-color-scheme: dark)');
+const chartLineKeys = ['nozzle','nozzleTarget','bed','bedTarget'];
 const defaults = {
   theme:'system', density:'standard', cardSize:'medium', rows:3, previews:true,
-  monitorChart:true, printerDetails:true, fleetDetails:true, historyTotals:true
+  monitorChart:true, chartLayout:'shared', chartRange:30, chartLines:chartLineKeys,
+  printerDetails:true, fleetDetails:true, fleetWaitForRemoval:true, historyTotals:true
 };
 function readDisplaySettings() {
   let saved;
   try {saved = JSON.parse(localStorage.getItem(displayKey));} catch {}
   if (!saved) return {...defaults};
+  const chartLines = Array.isArray(saved.chartLines) ? chartLineKeys.filter(key => saved.chartLines.includes(key)) : [];
   return {
     theme:['system','light','dark'].includes(saved.theme) ? saved.theme : defaults.theme,
     density:['standard','compact'].includes(saved.density) ? saved.density : defaults.density,
@@ -1199,8 +1221,12 @@ function readDisplaySettings() {
     rows:Number.isInteger(saved.rows) && saved.rows >= 1 && saved.rows <= 6 ? saved.rows : defaults.rows,
     previews:typeof saved.previews === 'boolean' ? saved.previews : defaults.previews,
     monitorChart:saved.monitorChart !== false,
+    chartLayout:saved.chartLayout === 'separate' ? 'separate' : 'shared',
+    chartRange:[5,15,30].includes(saved.chartRange) ? saved.chartRange : defaults.chartRange,
+    chartLines:chartLines.length ? chartLines : chartLineKeys,
     printerDetails:saved.printerDetails !== false,
     fleetDetails:saved.fleetDetails !== false,
+    fleetWaitForRemoval:saved.fleetWaitForRemoval !== false,
     historyTotals:saved.historyTotals !== false
   };
 }
@@ -1217,12 +1243,15 @@ function applyDisplayStyles() {
 }
 applyDisplayStyles();
 let pageSize = display.rows * 4;
-let view = ['#allPrinters', '#printJobs'].includes(location.hash) ? 'fleet'
+let view = location.hash === '#history' ? 'history' : ['#allPrinters', '#printJobs'].includes(location.hash) ? 'fleet'
   : !['#monitor', '#files-section'].includes(location.hash) && localStorage.getItem('ff-fleet') === '1' ? 'fleet' : 'monitor';
 let openFleetFiles = location.hash === '#files-section';
 let lastObservation = null;
 let connectionFailure = '';
-let historyJobs = [];
+let historyData = null;
+let historyLoading = false;
+let historyFilter = view === 'history' ? new URL(location.href).searchParams.get('historyPrinter') || '' : '';
+let historyRowsKey = '';
 let chartKey = 'nozzle';
 const finishClock = new Intl.DateTimeFormat(formatLocales, {hour:'2-digit', minute:'2-digit'});
 function finishAt(seconds, stamp) {
@@ -1256,7 +1285,7 @@ async function diagnose(host) {
     const url = host ? new URL('/' + encodeURIComponent(host) + '/diagnostics', location.origin) : endpoint('/diagnostics');
     const data = await postLocal('diagnostics', url);
     if (!current()) return;
-    showInfo(t("Connection check"), ['FlashForge Device Tab 1.13.0', t("Transport: {transport}", {transport:data.transport}), t("Status: received"),
+    showInfo(t("Connection check"), ['FlashForge Device Tab 1.14.0', t("Transport: {transport}", {transport:data.transport}), t("Status: received"),
       t("Authenticated readings: {availability}", {availability:data.authenticated ? t("available") : t("unavailable")}),
       t("Camera URL: {status}", {status:data.cameraReported ? t("reported; stream not tested") : t("not reported")})].join('\n'), true);
   } catch (error) { if (current()) showInfo(t("Connection check"), error.message, true); }
@@ -1369,7 +1398,7 @@ el('cameraLight').onclick = async () => {
 };
 function updateAge() {
   const age = lastObservation == null ? null : Math.max(0, Math.floor(Date.now()/1000-lastObservation));
-  el('freshness').textContent = age == null ? 'Waiting for the first reading' : t("Last reading: {seconds} s ago", {seconds:age});
+  el('freshness').textContent = age == null ? t("Waiting for readings") : t("Last reading: {seconds} s ago", {seconds:age});
   if (age > 30 && !connectionFailure) {
     el('status').textContent = t("Readings delayed");
     setReadingsSummary(t("Readings delayed"));
@@ -1388,7 +1417,7 @@ const separateTab = location.pathname === '/flashforge/';
 const nativePage = el('nativePage');
 function endpoint(path) {
   const url = new URL(path.replace(/^\//, ''), location.href);
-  if (selectedPrinter && !['/native','/settings','/notifications'].includes(path)) url.searchParams.set('printer',selectedPrinter);
+  if (selectedPrinter && !['/native','/settings','/notifications','/history'].includes(path)) url.searchParams.set('printer',selectedPrinter);
   return url;
 }
 function printerPage(host) {
@@ -1402,6 +1431,8 @@ let page = 0;
 let renderVersion = 0;
 let polling = false;
 let jobFile = '';
+let lastCompletedFile = '';
+let jobReady = false;
 let previewKey = '';
 let catalogLoaded = false;
 let catalogRevision;
@@ -1449,7 +1480,7 @@ function updateReadingsSummary(data, tools, heated) {
     compact.push(shortLabel + ' ' + (Number.isFinite(actual) ? plain(actual) + '°' : '—'));
   }
   if (tools.length < 2) {
-    addTemperature(t("Nozzle"), 'N', data.nozzle, data.nozzleTarget);
+    addTemperature(t("Nozzle"), t("N"), data.nozzle, data.nozzleTarget);
   } else if (heated.length === 1) {
     const tool = heated[0], label = 'T' + (tools.indexOf(tool) + 1);
     addTemperature(label, label, tool.actual, tool.target);
@@ -1458,12 +1489,16 @@ function updateReadingsSummary(data, tools, heated) {
     parts.push(status);
     compact.push(status);
   }
-  addTemperature(t("Bed"), 'B', data.bed, data.bedTarget);
+  addTemperature(t("Bed"), t("B"), data.bed, data.bedTarget);
   setReadingsSummary(parts.join(' · ') || t("No readings"), compact.join(' · ') || t("No readings"));
 }
 
 const chart = el('chart');
+const chartBed = el('chartBed');
 const chartRange = el('chartRange');
+const chartLegend = [...document.querySelectorAll('[data-chart-line]')];
+const chartChoices = [...document.querySelectorAll('[data-chart-choice]')];
+chartRange.value = String(display.chartRange);
 const chartDuration = () => Number(chartRange.value) * 60000;
 let temperatures = [];
 let chartEnd = 0;
@@ -1484,7 +1519,7 @@ function updateTemperatureTrend(now = Date.now()) {
   const cutoff = latest?.t - 5 * 60000;
   const wide = [], compact = [];
   const nozzle = chartKey === 'nozzle' ? t("Nozzle") : chartKey.toUpperCase();
-  for (const [field, label, shortLabel] of [[chartKey, nozzle, chartKey === 'nozzle' ? 'N' : nozzle], ['bed', t("Bed"), 'B']]) {
+  for (const [field, label, shortLabel] of [[chartKey, nozzle, chartKey === 'nozzle' ? t("N") : nozzle], ['bed', t("Bed"), t("B")]]) {
     if (!Number.isFinite(latest?.[field])) continue;
     const earlier = temperatures.reduce((closest, sample) => Number.isFinite(sample[field])
       && (!closest || Math.abs(sample.t - cutoff) < Math.abs(closest.t - cutoff)) ? sample : closest, null);
@@ -1500,35 +1535,67 @@ function updateTemperatureTrend(now = Date.now()) {
 }
 
 function drawChart() {
+  updateLegend();
+  const series = visibleTemperatureSeries();
+  const separate = display.chartLayout === 'separate';
+  const nozzle = separate ? series.filter(line => line.nozzle) : series;
+  const bed = separate ? series.filter(line => !line.nozzle) : [];
+  chart.hidden = !nozzle.length;
+  chartBed.hidden = !bed.length;
   if (!el('temperaturesPanel').open) return;
-  const width = chart.clientWidth;
-  const height = chart.clientHeight;
-  if (!width || !height) return;
-  const scale = window.devicePixelRatio || 1;
-  chart.width = Math.round(width * scale);
-  chart.height = Math.round(height * scale);
-  const ctx = chart.getContext('2d');
-  ctx.scale(scale, scale);
-  const colors = getComputedStyle(chart);
-  const series = [
-    [chartKey, colors.getPropertyValue('--blue').trim(), []],
-    [chartKey + 'Target', colors.getPropertyValue('--blue').trim(), [5, 4]],
-    ['bed', colors.getPropertyValue('--bed-series').trim(), []],
-    ['bedTarget', colors.getPropertyValue('--bed-series').trim(), [5, 4]]
-  ];
   const end = chartEnd = Date.now();
   const start = end - chartDuration();
-  const left = 41, right = width - 16, top = 11, bottom = height - 26;
-  const samples = temperatures.filter(sample => sample.t >= start);
-  const max = Math.max(100, Math.ceil(Math.max(0, ...samples.flatMap(sample =>
-    series.map(([field]) => sample[field] ?? 0))) / 50) * 50);
+  const samples = temperatures.filter(sample => sample.t >= start && sample.t <= end);
+  if (nozzle.length) drawTemperaturePlot(chart, nozzle, samples, start, end, separate ? el('chartNozzle').textContent : '');
+  if (bed.length) drawTemperaturePlot(chartBed, bed, samples, start, end, t("Bed"));
+}
+
+function visibleTemperatureSeries() {
+  return chartLegend.filter(element => display.chartLines.includes(element.dataset.chartLine)).map(element => {
+    const key = element.dataset.chartLine;
+    const target = key.endsWith('Target');
+    const nozzle = key.startsWith('nozzle');
+    return {nozzle, target, field:nozzle ? chartKey + (target ? 'Target' : '') : key,
+      color:nozzle ? '--blue' : '--bed-series', label:element.textContent};
+  });
+}
+
+function temperatureAxis(samples, series, separate) {
+  let low = Infinity, high = -Infinity;
+  for (const sample of samples) for (const {field} of series) {
+    if (!Number.isFinite(sample[field])) continue;
+    low = Math.min(low, sample[field]);
+    high = Math.max(high, sample[field]);
+  }
+  if (!separate || !Number.isFinite(high)) return {min:0, max:Math.max(100, Math.ceil(high / 50) * 50), steps:4};
+  const step = Math.max(5, Math.ceil((high - low) / 20) * 5);
+  const paddedMin = Math.floor((low - step / 2) / step) * step;
+  const min = low >= 0 ? Math.max(0, paddedMin) : paddedMin;
+  const max = Math.ceil((high + step / 2) / step) * step;
+  return {min, max, steps:(max - min) / step};
+}
+
+function drawTemperaturePlot(canvas, series, samples, start, end, title) {
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  if (!width || !height) return;
+  const scale = window.devicePixelRatio || 1;
+  canvas.width = Math.round(width * scale);
+  canvas.height = Math.round(height * scale);
+  canvas.setAttribute('aria-label', series.map(line => line.label).join(' · '));
+  const ctx = canvas.getContext('2d');
+  ctx.scale(scale, scale);
+  const colors = getComputedStyle(canvas);
+  const left = 41, right = width - 16, top = title ? 26 : 11, bottom = height - 26;
+  const {min,max,steps} = temperatureAxis(samples, series, Boolean(title));
   const x = t => left + (t - start) / (end - start) * (right - left);
-  const y = value => bottom - Math.max(0, value) / max * (bottom - top);
+  const y = value => bottom - (Math.max(min, value) - min) / (max - min) * (bottom - top);
   ctx.font = '11px "Segoe UI", sans-serif';
   ctx.fillStyle = colors.getPropertyValue('--muted').trim();
   ctx.strokeStyle = colors.getPropertyValue('--line').trim();
-  for (let tick = 0; tick <= 4; tick++) {
-    const value = max * tick / 4;
+  if (title) ctx.fillText(title, left, 12);
+  for (let tick = 0; tick <= steps; tick++) {
+    const value = min + (max - min) * tick / steps;
     ctx.beginPath();
     ctx.moveTo(left, y(value));
     ctx.lineTo(right, y(value));
@@ -1538,15 +1605,14 @@ function drawChart() {
   ctx.fillText(shortTime.format(start), left, height - 5);
   const current = shortTime.format(end);
   ctx.fillText(current, right - ctx.measureText(current).width, height - 5);
-  if (!samples.some(sample => sample[chartKey] != null || sample.bed != null)) {
+  if (!samples.some(sample => series.some(({field}) => Number.isFinite(sample[field])))) {
     const label = t("Waiting for temperature readings");
     ctx.fillText(label, Math.max(left + 5, (width - ctx.measureText(label).width) / 2), height / 2);
   }
-  for (const [field, color, dash] of series) {
-    ctx.strokeStyle = color;
-    ctx.fillStyle = color;
+  for (const {field,color,target} of series) {
+    ctx.strokeStyle = ctx.fillStyle = colors.getPropertyValue(color).trim();
     ctx.lineWidth = 2;
-    ctx.setLineDash(dash);
+    ctx.setLineDash(target ? [5, 4] : []);
     ctx.beginPath();
     let previous = 0;
     let last = null;
@@ -1563,7 +1629,7 @@ function drawChart() {
       last = [px, py];
     }
     ctx.stroke();
-    if (last && !dash.length) {
+    if (last && !target) {
       ctx.beginPath();
       ctx.arc(...last, 2.5, 0, 2 * Math.PI);
       ctx.fill();
@@ -1575,7 +1641,11 @@ function redrawTemperatureChart() {
   el('chartSample').textContent = '';
   drawChart();
 }
-chartRange.onchange = redrawTemperatureChart;
+chartRange.onchange = () => {
+  display = {...display, chartRange:Number(chartRange.value)};
+  try {localStorage.setItem(displayKey, JSON.stringify(display));} catch {}
+  redrawTemperatureChart();
+};
 el('chartTool').onchange = () => {
   chartKey = el('chartTool').value;
   updateLegend();
@@ -1586,18 +1656,27 @@ function updateLegend() {
   const label = chartKey === 'nozzle' ? el('nozzleLabel').textContent : chartKey.toUpperCase();
   el('chartNozzle').textContent = label;
   el('chartNozzleTarget').textContent = chartKey === 'nozzle' ? t("Nozzle Target") : label + ' · ' + t("Target");
+  for (const element of chartLegend) element.hidden = !display.chartLines.includes(element.dataset.chartLine);
+  const picker = el('chartTool');
+  picker.hidden = picker.options.length < 2 || !display.chartLines.some(key => key.startsWith('nozzle'));
 }
-chart.onpointermove = event => {
+function sampleTemperaturePlot(event) {
+  const canvas = event.currentTarget;
   const range = chartDuration();
-  const t = chartEnd - range + range * (event.offsetX - 41) / Math.max(1,chart.clientWidth-57);
+  const t = chartEnd - range + range * (event.offsetX - 41) / Math.max(1,canvas.clientWidth - 57);
   const s = temperatures.reduce((a,b) => !a || Math.abs(b.t-t)<Math.abs(a.t-t) ? b:a,null);
-  el('chartSample').textContent = s && Math.abs(s.t-t)<18000
-    ? shortTime.format(s.t) + ' · ' + el('chartNozzle').textContent + ' ' + plain(s[chartKey]) + ' / '
-      + plain(s[chartKey+'Target']) + ' °C · ' + t("Bed") + ' ' + plain(s.bed) + ' / ' + plain(s.bedTarget) + ' °C'
-    : '';
-};
-chart.onpointerleave = () => {el('chartSample').textContent = '';};
+  const readings = s && Math.abs(s.t-t)<18000 ? visibleTemperatureSeries()
+    .filter(line => Number.isFinite(s[line.field])
+      && (display.chartLayout === 'shared' || line.nozzle === (canvas === chart)))
+    .map(line => line.label + ' ' + plain(s[line.field]) + ' °C') : [];
+  el('chartSample').textContent = readings.length ? [shortTime.format(s.t), ...readings].join(' · ') : '';
+}
+for (const canvas of [chart, chartBed]) {
+  canvas.onpointermove = sampleTemperaturePlot;
+  canvas.onpointerleave = () => {el('chartSample').textContent = '';};
+}
 async function updateTools() {
+  updateHistory();
   try {
     const data = await getJson('/telemetry');
     if (data.language && data.language !== document.documentElement.lang && !document.querySelector('dialog[open]')) {
@@ -1610,39 +1689,36 @@ async function updateTools() {
       fleetPrinters = data.printers;
       applyView();
     }
-    if (data.stats) {
-      el('statJobs').textContent = String(data.stats.jobs || 0);
-      el('statHours').textContent = data.stats.seconds ? duration(data.stats.seconds) : t("0 min");
-      el('statSuccess').textContent = data.stats.successRate == null
-        ? '—' : data.stats.successRate + ' %';
-    }
     drawChart();
     if (data.cameraUrl && !el('cameraUrl').value && !el('cameraUrl').matches(':focus')) {
       el('cameraUrl').value = data.cameraUrl;
     }
-    if (!el('history').open) return;
-    const jobs = data.history;
-    let message = t("Print history is recorded while OrcaSlicer is open.");
-    if (data.historyError) message = t(data.historyError);
-    else if (!jobs.length) message = t("No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.");
-    el('historyStatus').textContent = message;
-    const completed = jobs.filter(job => job.result === 'complete');
-    const total = completed.reduce((seconds, job) => seconds + (job.elapsed ?? 0), 0);
-    el('historySummary').textContent = jobs.length
-      ? t("Completed: {done} of {total}", {done:completed.length, total:jobs.length})
-        + (total ? t(" · Total print time: {time}", {time:duration(total)}) : '')
-      : '';
-    historyJobs = jobs;
-    el('historySummary').dataset.summary = el('historySummary').textContent;
-    renderHistory();
   } catch {
     setTemperatureTrend(t("Trend unavailable"));
     drawChart();
+  }
+}
+
+async function updateHistory() {
+  const panel = el('history');
+  if (historyLoading || panel.hidden || !panel.open) return;
+  historyLoading = true;
+  try {
+    historyData = await getJson('/history');
+    renderHistory();
+  } catch {
     el('historyStatus').textContent = t("Print history is temporarily unavailable.");
+  } finally {
+    historyLoading = false;
   }
 }
 el('historySearch').oninput = renderHistory;
 el('failedJobs').onchange = renderHistory;
+el('historyPrinter').onchange = event => {
+  historyFilter = event.target.value;
+  replaceViewAddress();
+  renderHistory();
+};
 function appendFilename(label, name) {
   const parts = name.split(/(?<=_)(?=[^_])/);
   for (const [i, part] of parts.entries()) {
@@ -1651,39 +1727,84 @@ function appendFilename(label, name) {
   }
 }
 function renderHistory() {
-    const jobs = historyJobs.filter(job => (job.file || '').toLowerCase().includes(el('historySearch').value.toLowerCase())
-      && (!el('failedJobs').checked || ['error','cancelled'].includes(job.result)));
-    const results = {active: t("In Progress"), complete: t("Completed"), cancelled: t("Canceled"),
-                     error: t("Error"), unknown: t("Unknown Result")};
-    el('historyRows').replaceChildren(...jobs.map(job => {
-      const row = document.createElement('tr');
-      row.setAttribute('role', 'row');
-      const name = job.file || t("Unknown filename");
-      const started = historyTime.format(job.started * 1000);
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'history-filename';
-      appendFilename(button, name);
-      button.onclick = () => showInfo(name, [
-        t("Started: {time}", {time:started}),
-        t("Ended: {time}", {time:Number.isSafeInteger(job.ended) && job.ended >= 0 && job.ended <= 253402300799 ? historyTime.format(job.ended * 1000) : t("Not recorded")}),
-        t("Print time: {time}", {time:job.elapsed == null ? '—' : duration(job.elapsed)}), t("Result: {result}", {result:results[job.result]}),
-        job.result === 'unknown' ? t("The end of this job was not observed.") : ''
-      ].filter(Boolean).join('\n'));
-      row.insertCell().append(button);
-      for (const value of [started, job.elapsed == null ? '—' : duration(job.elapsed), results[job.result]])
-        row.insertCell().textContent = value;
-      return row;
-    }));
-    el('historyTable').hidden = !jobs.length;
-    if (!jobs.length && historyJobs.length) el('historySummary').textContent = t("No matching jobs.");
-    else el('historySummary').textContent = el('historySummary').dataset.summary || '';
+  if (!historyData) return;
+  const picker = el('historyPrinter');
+  const printers = historyData.printers;
+  const options = JSON.stringify(printers.map(({host,name}) => [host,name]));
+  if (picker.dataset.options !== options) {
+    picker.replaceChildren(new Option(t("All printers"), ''), ...printers.map(({host,name}) =>
+      new Option(name === host ? host : name + ' · ' + host, host)));
+    picker.dataset.options = options;
+  }
+  const selected = printers.find(printer => printer.host === historyFilter);
+  if (!selected && historyFilter) {
+    historyFilter = '';
+    replaceViewAddress();
+  }
+  picker.value = historyFilter;
+  const scope = selected ? [selected] : printers;
+  const stats = selected ? selected.stats : historyData.stats;
+  el('statJobs').textContent = String(stats.jobs);
+  el('statHours').textContent = stats.seconds ? duration(stats.seconds) : t("0 min");
+  el('statSuccess').textContent = stats.successRate == null ? '—' : stats.successRate + ' %';
+  const errors = scope.filter(printer => printer.error)
+    .map(printer => printer.name + ' · ' + t(printer.error));
+  el('historyStatus').textContent = errors.length ? errors.join('\n')
+    : t(stats.jobs ? "Print history is recorded while OrcaSlicer is open."
+      : "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.");
 
+  const query = el('historySearch').value.trim().toLowerCase();
+  const failures = el('failedJobs').checked;
+  const jobs = scope.flatMap(({host,name,jobs}) => jobs
+    .filter(job => job.file.toLowerCase().includes(query) && (!failures || ['error','cancelled'].includes(job.result)))
+    .map(job => ({job,host,name}))).sort((a,b) => b.job.started - a.job.started);
+  const completed = jobs.filter(({job}) => job.result === 'complete').length;
+  el('historySummary').textContent = jobs.length
+    ? t("Completed: {done} of {total}", {done:completed, total:jobs.length})
+    : stats.jobs ? t("No matching jobs.") : '';
+  el('historyTable').hidden = !jobs.length;
+  const key = JSON.stringify(jobs.map(({job,host,name}) =>
+    [host,name,job.file,job.started,job.ended,job.elapsed,job.result]));
+  if (historyRowsKey === key) return;
+  historyRowsKey = key;
+  const results = {active:t("In Progress"), complete:t("Completed"), cancelled:t("Canceled"),
+                   error:t("Error"), unknown:t("Unknown Result")};
+  const rows = document.createDocumentFragment();
+  for (const {job,host,name:printerName} of jobs) {
+    const row = document.createElement('tr');
+    row.setAttribute('role', 'row');
+    const name = job.file || t("Unknown filename");
+    const started = historyTime.format(job.started * 1000);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'history-filename';
+    appendFilename(button, name);
+    button.onclick = () => showInfo(name, [
+      t("Printer") + ' · ' + printerName + (printerName === host ? '' : ' (' + host + ')'),
+      t("Started: {time}", {time:started}),
+      t("Ended: {time}", {time:Number.isSafeInteger(job.ended) && job.ended >= 0 && job.ended <= 253402300799 ? historyTime.format(job.ended * 1000) : t("Not recorded")}),
+      t("Print time: {time}", {time:job.elapsed == null ? '—' : duration(job.elapsed)}),
+      t("Result: {result}", {result:results[job.result]}),
+      job.result === 'unknown' ? t("The end of this job was not observed.") : ''
+    ].filter(Boolean).join('\n'));
+    const label = document.createElement('span');
+    label.className = 'history-printer-name';
+    label.textContent = printerName;
+    label.title = host;
+    row.insertCell().append(button, label);
+    for (const value of [started, job.elapsed == null ? '—' : duration(job.elapsed), results[job.result]])
+      row.insertCell().textContent = value;
+    rows.append(row);
+  }
+  el('historyRows').replaceChildren(rows);
 }
 
 const cameraImage = el('cameraImage');
 const cameraUrl = el('cameraUrl');
 const cameraStatus = el('cameraStatus');
+const cameraSettings = el('cameraSettings');
+el('cameraOpen').onclick = () => cameraSettings.showModal();
+el('cameraSettingsClose').onclick = () => cameraSettings.close();
 const cameraStorageKey = 'flashforge-device-tab-camera-' + (selectedPrinter ? '/' + selectedPrinter + '/' : location.pathname);
 let cameraTimeout;
 let managedCamera = false;
@@ -1705,7 +1826,13 @@ function showCameraConnection(connected) {
   const restoreFocus = document.activeElement === (connected ? start : stop);
   stop.hidden = !connected;
   start.disabled = connected;
+  cameraUrl.readOnly = connected;
   if (restoreFocus) (connected ? stop : start).focus();
+}
+
+function showMonitorCameraFrame(visible) {
+  el('camera').hidden = !visible;
+  cameraImage.hidden = !visible;
 }
 
 function stopCamera(message = '', suspend = false) {
@@ -1717,11 +1844,11 @@ function stopCamera(message = '', suspend = false) {
   cameraSession = null;
   cameraFrame = null;
   clearTimeout(cameraTimeout);
+  closeCameraViewer(cameraImage);
   cameraImage.removeAttribute('src');
   if (frameUrl) URL.revokeObjectURL(frameUrl);
   frameUrl = '';
-  cameraImage.hidden = true;
-  el('cameraSnapshot').hidden = true;
+  showMonitorCameraFrame(false);
   showCameraConnection(false);
   cameraStatus.textContent = message;
   for (const tile of jobTiles.values()) {
@@ -1804,8 +1931,7 @@ async function startManagedCamera() {
       frameUrl = url;
       cameraFrame = blob;
       updateSharedJobCamera();
-      cameraImage.hidden = false;
-      el('cameraSnapshot').hidden = false;
+      showMonitorCameraFrame(true);
       cameraStatus.textContent = '';
       clearTimeout(cameraTimeout);
       cameraTimeout = setTimeout(frameTimeout, 10000);
@@ -1815,9 +1941,13 @@ async function startManagedCamera() {
   }
 }
 function syncCameraView() {
-  const camera = el('camera');
   const shared = !el('jobs').hidden && [...jobTiles.values()].some(tile => tile.shared);
-  const visible = !document.hidden && (shared || camera.open && !el('printerTools').hidden);
+  const monitorVisible = !el('monitor').hidden;
+  if (!monitorVisible) {
+    closeCameraViewer(cameraImage);
+    if (cameraSettings.open) cameraSettings.close();
+  }
+  const visible = !document.hidden && (shared || monitorVisible);
   if (!visible) {
     if (cameraSession || cameraImage.hasAttribute('src')) stopCamera('', true);
   } else if (managedCamera) {
@@ -1828,8 +1958,6 @@ function syncCameraView() {
 }
 function startDirectCamera() {
   cameraImage.src = directCameraSource;
-  cameraImage.hidden = false;
-  el('cameraSnapshot').hidden = false;
   showCameraConnection(true);
   cameraStatus.textContent = t("Connecting…");
   cameraTimeout = setTimeout(() => stopCamera(t("No frame received. Check the URL and confirm the stream uses MJPEG.")), 12000);
@@ -1851,7 +1979,8 @@ el('cameraForm').onsubmit = event => {
   startDirectCamera();
 };
 cameraImage.onload = () => {
-  if (managedCamera) return;
+  if (managedCamera || !cameraImage.hasAttribute('src')) return;
+  showMonitorCameraFrame(true);
   clearTimeout(cameraTimeout);
   cameraStatus.textContent = '';
 };
@@ -1859,7 +1988,7 @@ cameraImage.onerror = () => {
   if (cameraImage.hasAttribute('src')) stopCamera(t("Could not open the MJPEG stream. Check the camera URL."));
 };
 el('cameraStop').onclick = () => stopCamera();
-for (const id of ['camera','printerDetails','manualPanel','readingsPanel','temperaturesPanel','files-section']) {
+for (const id of ['printerDetails','manualPanel','readingsPanel','temperaturesPanel','files-section']) {
   const node = el(id), key='ff-layout:'+(selectedPrinter || location.pathname)+':'+id;
   try {
     const saved = localStorage.getItem(key);
@@ -1867,12 +1996,11 @@ for (const id of ['camera','printerDetails','manualPanel','readingsPanel','tempe
     if (id === 'manualPanel' && location.hash === '#manualPanel') node.open = true;
   } catch {}
   node.ontoggle=()=>{ try {localStorage.setItem(key,node.open?'open':'closed');} catch {}
-    if (id==='camera') syncCameraView();
     if (id==='temperaturesPanel' && node.open) drawChart();
   };
 }
-el('history').ontoggle = () => { if (el('history').open) updateTools(); };
-new ResizeObserver(drawChart).observe(chart);
+el('history').ontoggle = updateHistory;
+new ResizeObserver(drawChart).observe(el('chartPlots'));
 systemTheme.addEventListener('change', () => {
   if (display.theme !== 'system') return;
   applyDisplayStyles();
@@ -1883,7 +2011,13 @@ function previewUrl(id) {
   if (!imageRequests.has(id)) {
     const promise = fetch(endpoint('/preview/' + id), {signal: AbortSignal.timeout(12000)})
       .then(response => {
-        if (response.status === 404) return null;
+        if (response.status === 404) {
+          // A newly sent job may be listed before its thumbnail is available.
+          setTimeout(() => {
+            if (imageRequests.get(id) === promise) imageRequests.delete(id);
+          }, 5000);
+          return null;
+        }
         if (!response.ok) throw Error(t("Preview unavailable"));
         return response.blob().then(blob => URL.createObjectURL(blob));
       })
@@ -1897,13 +2031,13 @@ function previewUrl(id) {
 }
 
 async function updateJobPreview() {
-  const matching = files.filter(file => file.name === jobFile);
-  const key = jobFile && matching.length === 1 ? matching[0].id : '';
+  const filename = lastCompletedFile || jobFile;
+  const matching = files.filter(file => file.name === filename);
+  const key = filename && matching.length === 1 ? matching[0].id : '';
   const image = el('jobImage');
   if (key !== previewKey) {
     previewKey = key;
     image.hidden = true;
-    el('job').dataset.preview = 'none';
   }
   if (!image.hidden) return;
   if (!key) return;
@@ -1912,39 +2046,72 @@ async function updateJobPreview() {
   if (!url || previewKey !== key || imageRequests.get(key) !== request) return;
   image.src = url;
   image.hidden = false;
-  el('job').dataset.preview = 'available';
+}
+
+function renderJobProgress(card, value) {
+  const progress = card.querySelector('progress');
+  const percent = card.querySelector('.jobs-percent');
+  progress.hidden = percent.hidden = value == null;
+  progress.value = value ?? 0;
+  percent.textContent = value == null ? '' : value + '%';
+}
+
+function renderLastCompleted(card, filename) {
+  const row = card.querySelector('.jobs-last');
+  row.hidden = !filename;
+  row.querySelector('strong').textContent = filename || '';
+}
+
+function jobLayerLabel(layer, total) {
+  if (layer == null) return '';
+  return total ? t("Layer {layer} of {total}", {layer,total}) : t("Layer {layer}", {layer});
+}
+
+function jobTimeLeft(seconds) {
+  return seconds == null ? '' : t("{time} left", {time:duration(seconds)});
+}
+
+function updateJobReprint() {
+  const button = el('reprintJob');
+  button.hidden = !jobReady || !lastCompletedFile;
+  button.disabled = button.hidden || !catalogLoaded || el('refresh').disabled;
+}
+
+function isReadyForReprint(state, active) {
+  return !active && ['READY', 'IDLE'].includes(state);
 }
 
 function updateJob(data) {
+  const card = el('job');
   const previousJob = jobFile;
-  jobFile = data.file || '';
+  lastCompletedFile = data.active ? '' : data.lastCompleted?.file || '';
+  jobReady = isReadyForReprint(data.state, data.active);
+  jobFile = data.active || (data.complete && !lastCompletedFile) ? data.file || '' : '';
   if (catalogLoaded && (data.fileCatalogRevision !== catalogRevision
       || (data.active && jobFile && previousJob !== jobFile && !files.some(file => file.name === jobFile)))) refreshFiles();
   const hasJob = Boolean(jobFile || data.active || data.complete);
-  el('job').dataset.phase = hasJob ? 'visible' : 'idle';
-  el('jobFile').textContent = hasJob
+  const showProgress = hasJob && !lastCompletedFile;
+  renderLastCompleted(card, lastCompletedFile);
+  el('jobFile').textContent = showProgress
     ? jobFile || (data.complete ? t("Print complete") : t("Printing")) : t("No active print job");
-  el('jobFile').title = hasJob ? jobFile : '';
-  el('job').dataset.active = String(Boolean(data.active));
+  el('jobFile').title = jobFile;
+  card.dataset.active = String(Boolean(data.active));
   el('openJob').textContent = el('jobFile').textContent;
   el('openJob').title = jobFile;
   updateJobLink();
-  el('progressLine').hidden = data.percent == null;
-  el('percent').hidden = data.percent == null;
-  el('percent').textContent = data.percent == null ? '' : data.percent + '%';
-  el('bar').value = data.percent ?? 0;
-  el('time').hidden = data.remaining == null;
+  updateJobReprint();
+  renderJobProgress(card, showProgress ? data.percent : null);
+  el('time').hidden = !showProgress || data.remaining == null;
   const finish = data.state === 'PAUSED' ? '' : finishAt(data.remaining, data.observedAt);
   el('finishTime').hidden = !finish;
   el('finishTime').textContent = finish ? t("Finish ≈ {time}", {time:finish}) : '';
-  el('remaining').textContent = data.remaining == null ? '' : t("{time} left", {time:duration(data.remaining)});
+  el('remaining').textContent = jobTimeLeft(data.remaining);
   el('timeHint').hidden = !data.active || !data.timeHint;
   el('timeHint').textContent = t(data.timeHint);
-  el('layers').textContent = data.layer == null || !data.layerTotal
-    ? '' : t("Layer {layer} of {total}", {layer:data.layer, total:data.layerTotal});
+  el('layers').textContent = jobLayerLabel(data.layer, data.layerTotal);
   el('elapsed').textContent = data.elapsed == null ? '' : t("Elapsed: {time}", {time:duration(data.elapsed)});
   el('filament').textContent = data.filament == null ? '' : t("Estimated material: {weight}", {weight:weightFormat.format(data.filament)});
-  el('jobMeta').hidden = !el('layers').textContent && data.elapsed == null && data.filament == null;
+  el('jobMeta').hidden = !showProgress || (!el('layers').textContent && data.elapsed == null && data.filament == null);
   updateJobPreview();
 }
 
@@ -1985,7 +2152,6 @@ async function updateStatus() {
       picker.replaceChildren(...tools.map((_,i) => new Option('T'+(i+1),'t'+(i+1))));
       chartKey = tools.length ? picker.value : 'nozzle';
     }
-    picker.hidden = tools.length < 2;
     updateLegend();
     const temperatures = (actual, target) => [actual, target]
       .map(value => value == null ? '—' : celsius(value)).join(' / ');
@@ -2038,6 +2204,8 @@ async function updateStatus() {
     showSlots(lastSlots);
     updateLight(null);
     updateActions({}, error.status !== 409);
+    jobReady = false;
+    updateJobReprint();
     el('time').hidden = true;
     el('timeHint').hidden = true;
     if (error.status === 409) {
@@ -2069,7 +2237,8 @@ function updatePrinter(data) {
   set('printerLight', sensors.led == null ? '' : sensors.led ? t("On") : t("Off"));
   const ends = sensors.endstops || {};
   const parts = Object.entries(ends).map(([axis, value]) => axis.toUpperCase() + ' ' + value);
-  if (sensors.door) parts.push(t("Door / lid: {state}", {state:t(sensors.door)}));
+  const door = {open:"Open", close:"Closed"}[sensors.door];
+  if (door) parts.push(t("Door / lid: {state}", {state:t(door)}));
   if (sensors.errorCode) parts.push(t("Error: {code}", {code:sensors.errorCode}));
   set('printerSensors', Object.keys(ends).length ? t("Endstops: {state}", {state:parts.join('  ')}) : parts.join('  '));
 }
@@ -2519,6 +2688,7 @@ new ResizeObserver(() => {
 async function refreshFiles() {
   if (el('refresh').disabled || fileUploadBusy) return;
   el('refresh').disabled = true;
+  updateJobReprint();
   selectCatalogFile(null);
   el('fileCount').textContent = t("Loading…");
   el('filesSummary').textContent = t("Loading…");
@@ -2528,14 +2698,13 @@ async function refreshFiles() {
     printOptions = catalog.printOptions;
     catalogRevision = catalog.revision;
     el('uploadFile').hidden = !printOptions?.upload;
-    openReprint(catalog);
+    openReprintFromUrl();
     el('filesSummary').textContent = files.length ? fileCountLabel(files.length) : t("No files");
     catalogLoaded = true;
     for (const promise of imageRequests.values()) promise.then(url => { if (url) URL.revokeObjectURL(url); });
     imageRequests.clear();
     previewKey = '';
     el('jobImage').hidden = true;
-    el('job').dataset.preview = 'none';
     page = 0;
     updateJobPreview();
     renderFiles();
@@ -2544,6 +2713,7 @@ async function refreshFiles() {
     el('filesSummary').textContent = t("Could not load files");
   } finally {
     el('refresh').disabled = false;
+    updateJobReprint();
     selectCatalogFile(selectedCatalogFile);
   }
 }
@@ -2558,7 +2728,7 @@ el('uploadFile').onclick = () => {
   uploadFileInput.value = '';
   uploadFileName.value = '';
   uploadFileMessage.textContent = t("The file will be saved on the printer without starting a print.");
-  el('uploadFilePrinter').textContent = el('deviceName').textContent;
+  el('uploadFilePrinter').textContent = currentPrinterName();
   uploadFileProgress.hidden = true;
   uploadFileDialog.showModal();
 };
@@ -2679,11 +2849,18 @@ const fleetSearch = el('fleetSearch');
 const fleetFilters = [...document.querySelectorAll('[data-fleet-filter]')];
 let fleetFilter = 'all';
 const fleetCameraButton = el('fleetCameras');
+const confirmedBeds = new Map();
 let fleetCameras = localStorage.getItem('ff-fleet-cameras') !== 'off';
+let fleetCameraScope = localStorage.getItem('ff-fleet-camera-scope') === 'printing' ? 'printing' : 'all';
 fleetCameraButton.setAttribute('aria-pressed', String(fleetCameras));
 
+function waitingForPartRemoval(item) {
+  return display.fleetWaitForRemoval && !item.printing
+    && Boolean(item.bedClearToken && confirmedBeds.get(item.host) !== item.bedClearToken);
+}
+
 function fleetGroup(item) {
-  if (item.error || ['PAUSED', 'PAUSING', 'ERROR', 'ATTENTION'].includes(item.state)) return 'attention';
+  if (waitingForPartRemoval(item) || item.error || ['PAUSED', 'PAUSING', 'ERROR', 'ATTENTION'].includes(item.state)) return 'attention';
   if (item.printing) return 'active';
   if (item.observedAt && !['BUSY', 'CALIBRATING', 'CANCELING', 'CANCELLING'].includes(item.state)) return 'idle';
   return 'other';
@@ -2707,11 +2884,34 @@ function updateJobLink() {
 
 const jobTiles = new Map();
 const jobsCameraDialog = el('jobsCameraDialog');
-let enlargedJob = null;
+let enlargedCamera = null;
+
+function placeCameraImage(stream, parent, before = null) {
+  // A state-preserving move keeps direct MJPEG requests open in Chromium.
+  if (parent.moveBefore) parent.moveBefore(stream, before);
+  else parent.insertBefore(stream, before);
+}
+
+function openCameraViewer(stream, name) {
+  if (enlargedCamera || stream.hidden) return;
+  enlargedCamera = {stream, parent:stream.parentNode, before:stream.nextSibling};
+  el('jobsCameraName').textContent = name;
+  placeCameraImage(stream, el('jobsCameraFrame'));
+  jobsCameraDialog.showModal();
+}
+
+function closeCameraViewer(stream) {
+  if (enlargedCamera?.stream === stream && jobsCameraDialog.open) jobsCameraDialog.close();
+}
+
 jobsCameraDialog.onclose = () => {
-  if (enlargedJob) enlargedJob.cameraPanel.firstElementChild.prepend(enlargedJob.stream);
-  enlargedJob = null;
+  if (!enlargedCamera) return;
+  const {stream, parent, before} = enlargedCamera;
+  enlargedCamera = null;
+  if (parent.isConnected) placeCameraImage(stream, parent, before);
+  else stream.remove();
 };
+el('cameraExpand').onclick = () => openCameraViewer(cameraImage, currentPrinterName());
 
 function jobEndpoint(path, host) {
   const url = endpoint(path);
@@ -2735,16 +2935,29 @@ function showFleetFiles() {
   section.querySelector('summary').focus({preventScroll:true});
 }
 
-function openReprint(catalog) {
+function openReprintFromUrl() {
   const url = new URL(location.href);
   const name = url.searchParams.get('reprint');
   if (!name) return;
   url.searchParams.delete('reprint');
   window.history.replaceState(null, '', url);
-  const matches = catalog.files.filter(file => file.name === name);
-  if (matches.length === 1 && catalog.printOptions?.family) openPrint(matches[0]);
-  else showInfo(t("Print again"), t("The file is unavailable or cannot be identified on this printer."));
+  openReprint(name);
 }
+
+function openReprint(name) {
+  const matches = files.filter(file => file.name === name);
+  if (matches.length !== 1 || !printOptions?.family) {
+    showInfo(t("Print again"), t("The file is unavailable or cannot be identified on this printer."));
+  } else if (printOptions.family === 'creator' && !name.toLowerCase().endsWith('.3mf')) {
+    showInfo(t("Print again"), t("Creator repeat printing requires a .3mf."));
+  } else {
+    openPrint(matches[0]);
+  }
+}
+
+el('reprintJob').onclick = () => {
+  if (lastCompletedFile && !el('reprintJob').disabled) openReprint(lastCompletedFile);
+};
 
 function jobCameraSource(item) {
   if (item.managedCamera) return 'managed';
@@ -2759,7 +2972,7 @@ function jobCameraSource(item) {
 }
 
 function stopJobCamera(tile) {
-  if (enlargedJob === tile && jobsCameraDialog.open) jobsCameraDialog.close();
+  closeCameraViewer(tile.stream);
   tile.camera?.abort();
   tile.camera = null;
   tile.shared = false;
@@ -2806,7 +3019,8 @@ function updateSharedJobCamera() {
 }
 
 function startJobCamera(tile, item) {
-  const source = !fleetCameras || item.error ? '' : jobCameraSource(item);
+  const enabled = fleetCameras && (fleetCameraScope === 'all' || item.printing);
+  const source = enabled && !item.error ? jobCameraSource(item) : '';
   if (tile.source !== source) {
     stopJobCamera(tile);
     tile.source = source;
@@ -2849,27 +3063,69 @@ function startJobCamera(tile, item) {
   } else tile.stream.src = source;
 }
 
+function clearJobTilePreview(tile) {
+  tile.previewRequest?.abort();
+  tile.previewRequest = null;
+  tile.previewRetryAt = 0;
+  tile.previewFailures = 0;
+  const image = tile.node.querySelector('[data-preview]');
+  image.hidden = true;
+  image.removeAttribute('src');
+  if (tile.previewUrl) URL.revokeObjectURL(tile.previewUrl);
+  tile.previewUrl = '';
+}
+
 async function loadJobTilePreview(tile, item) {
-  if (!item.file || item.error || tile.previewRequest) return;
+  const filename = tile.active ? item.file : item.lastCompleted?.file || '';
+  if (tile.previewFile !== filename) {
+    clearJobTilePreview(tile);
+    tile.previewFile = filename;
+  }
+  const image = tile.node.querySelector('[data-preview]');
+  if (!filename || item.error || !image.hidden || tile.previewRequest || Date.now() < tile.previewRetryAt) return;
   const request = new AbortController();
   tile.previewRequest = request;
+  const signal = AbortSignal.any([request.signal, AbortSignal.timeout(12000)]);
+  let url = '';
   try {
-    const response = await fetch(jobEndpoint('/files', item.host), {signal:AbortSignal.any([request.signal, AbortSignal.timeout(12000)])});
-    if (!response.ok) {
-      if (response.status === 503 && !request.signal.aborted) tile.previewRetryAt = Date.now() + 15000;
+    const response = await fetch(jobEndpoint('/files', item.host), {signal});
+    if (!response.ok) throw Error('File catalog unavailable');
+    const matches = (await response.json()).files.filter(file => file.name === filename);
+    signal.throwIfAborted();
+    if (matches.length === 0) throw Error('File not yet in catalog');
+    if (matches.length > 1) {
+      tile.previewRetryAt = Infinity;
       return;
     }
-    const matches = (await response.json()).files.filter(file => file.name === item.file);
-    if (request.signal.aborted || matches.length !== 1) return;
-    const image = tile.node.querySelector('[data-preview]');
-    image.alt = t("Preview of {file}", {file:item.file});
-    image.onload = () => { if (!request.signal.aborted) image.hidden = false; };
-    image.src = jobEndpoint('/preview/' + matches[0].id, item.host);
-  } catch {}
+    const preview = await fetch(jobEndpoint('/preview/' + matches[0].id, item.host), {signal});
+    signal.throwIfAborted();
+    if (!preview.ok) throw Error('Preview unavailable');
+    const blob = await preview.blob();
+    signal.throwIfAborted();
+    url = URL.createObjectURL(blob);
+    image.src = url;
+    await image.decode();
+    signal.throwIfAborted();
+    image.alt = t("Preview of {file}", {file:filename});
+    image.hidden = false;
+    tile.previewUrl = url;
+    url = '';
+    tile.previewFailures = 0;
+  } catch {
+    if (!request.signal.aborted) {
+      image.removeAttribute('src');
+      const delay = Math.min(30000, 1500 * 2 ** Math.min(tile.previewFailures, 5));
+      tile.previewFailures++;
+      tile.previewRetryAt = Date.now() + delay;
+    }
+  } finally {
+    if (url) URL.revokeObjectURL(url);
+    if (tile.previewRequest === request) tile.previewRequest = null;
+  }
 }
 
 async function runJobTileAction(tile, action) {
-  if (tile.pending || !tile.item.jobControls || tile.item.error || !tile.item.file) return;
+  if (tile.pending || !tile.active || !tile.item.jobControls || tile.item.error || !tile.file) return;
   const buttons = tile.node.querySelectorAll('[data-print-action],[data-print-cancel]');
   const result = tile.node.querySelector('[data-job-result]');
   tile.pending = true;
@@ -2890,6 +3146,27 @@ async function runJobTileAction(tile, action) {
   }
 }
 
+async function confirmBedClear(tile) {
+  const item = tile.item;
+  if (tile.confirmingBed || !waitingForPartRemoval(item)) return;
+  const button = tile.node.querySelector('[data-clear-bed]');
+  const status = tile.node.querySelector('[data-job-result]');
+  tile.confirmingBed = true;
+  button.disabled = true;
+  status.textContent = t("Saving…");
+  try {
+    await postLocal('confirm-bed-clear', jobEndpoint('/confirm-bed-clear', item.host), {token:item.bedClearToken});
+    confirmedBeds.set(item.host, item.bedClearToken);
+    status.textContent = '';
+    if (view === 'fleet') renderJobs();
+  } catch (error) {
+    status.textContent = error.message || t("Could not save the settings.");
+  } finally {
+    tile.confirmingBed = false;
+    button.disabled = false;
+  }
+}
+
 function createJobTile(item) {
   const node = el('jobTile').content.firstElementChild.cloneNode(true);
   const cameraPanel = node.querySelector('.jobs-camera');
@@ -2900,6 +3177,7 @@ function createJobTile(item) {
   const tile = {node, stream, cameraPanel, mediaStatus, retry, item};
   const monitor = node.querySelector('[data-monitor]');
   const filesLink = node.querySelector('[data-files]');
+  node.querySelector('[data-clear-bed]').onclick = () => confirmBedClear(tile);
   for (const [link, showFiles] of [[monitor, false], [filesLink, true]]) {
     link.onclick = event => {
       if (!tile.item.current || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
@@ -2926,12 +3204,7 @@ function createJobTile(item) {
       }, 5000);
     }
   };
-  node.querySelector('[data-camera]').onclick = () => {
-    enlargedJob = tile;
-    el('jobsCameraName').textContent = tile.item.name || tile.item.host;
-    el('jobsCameraFrame').append(stream);
-    jobsCameraDialog.showModal();
-  };
+  node.querySelector('[data-camera]').onclick = () => openCameraViewer(stream, tile.item.name || tile.item.host);
   node.querySelector('[data-snapshot]').onclick = () => {
     if (tile.blob) saveCameraBlob(tile.blob);
   };
@@ -2950,18 +3223,12 @@ function updateTileJob(tile, item) {
   const {node} = tile;
   tile.active = active;
   tile.file = file;
-  tile.previewRequest?.abort();
-  tile.previewRequest = null;
-  tile.previewRetryAt = 0;
   tile.cancelUntil = 0;
   tile.controlState = null;
-  const preview = node.querySelector('[data-preview]');
-  preview.hidden = true;
-  preview.removeAttribute('src');
   node.querySelector('details').open = false;
   node.querySelector('[data-job-result]').textContent = '';
   node.dataset.active = String(active);
-  for (const selector of ['.jobs-media', 'progress', '.row.jobs-meta', 'details'])
+  for (const selector of ['.row.jobs-meta', 'details'])
     node.querySelector(selector).hidden = !active;
 }
 
@@ -2975,32 +3242,35 @@ function updateJobTile(tile, item) {
   };
   set('h3', item.name || item.host);
   node.dataset.group = fleetGroup(item);
-  const ready = !item.error && ['READY', 'IDLE'].includes(item.state);
-  node.dataset.ready = String(ready);
+  const waiting = waitingForPartRemoval(item);
+  const ready = !item.error && isReadyForReprint(item.state, item.printing);
+  node.dataset.ready = String(ready && !waiting);
+  node.querySelector('[data-clear-bed]').hidden = !waiting;
   node.querySelector('[data-monitor]').href = jobPage(item);
   startJobCamera(tile, item);
   if (!tile.source) tile.retry.hidden = true;
+  loadJobTilePreview(tile, item);
+  renderJobProgress(node, tile.active ? item.percent : null);
+  renderLastCompleted(node, !tile.active && (!item.error || waiting) ? item.lastCompleted?.file : '');
   if (!tile.active) {
-    set('.jobs-state', item.error ? t("Disconnected") : stateLabel(item.status) || (item.observedAt ? t("Connected") : t("Connecting…")));
-    set('.jobs-file', item.error ? t("Job status unavailable") : item.observedAt ? t("No active print job") : t("Waiting for job status"));
+    const warning = item.error || ['ERROR','ATTENTION'].includes(item.state);
+    const waitingLabel = waiting ? t("Waiting for part removal") : '';
+    set('.jobs-state', item.error ? t("Disconnected") : (!warning && waitingLabel) || stateLabel(item.status)
+      || (item.observedAt ? t("Connected") : t("Connecting…")));
+    set('.jobs-file', waiting ? (warning ? waitingLabel : '')
+      : item.error ? t("Job status unavailable") : item.observedAt ? t("No active print job") : t("Waiting for job status"));
     const completed = item.lastCompleted?.file;
-    set('.jobs-percent', '');
-    node.querySelector('.jobs-last').hidden = !completed || Boolean(item.error);
-    set('.jobs-last strong', completed || '');
+    node.querySelector('[data-print-action]').hidden = true;
+    node.querySelector('[data-print-cancel]').hidden = true;
     const filesLink = node.querySelector('[data-files]');
     filesLink.hidden = !ready;
     if (ready) filesLink.href = jobPage(item, {hash:'files-section'});
     const repeat = node.querySelector('[data-repeat]');
-    repeat.hidden = !ready || !completed;
+    repeat.hidden = !ready || waiting || !completed;
     if (!repeat.hidden) repeat.href = jobPage(item, {reprint:completed});
     return;
   }
-  for (const selector of ['.jobs-last', '[data-files]', '[data-repeat]']) node.querySelector(selector).hidden = true;
-  if (tile.previewRetryAt && Date.now() >= tile.previewRetryAt) {
-    tile.previewRetryAt = 0;
-    tile.previewRequest = null;
-  }
-  loadJobTilePreview(tile, item);
+  for (const selector of ['[data-files]', '[data-repeat]']) node.querySelector(selector).hidden = true;
   set('.jobs-state', item.error ? t("Disconnected") : stateLabel(item.status) || t("Printing"));
   set('.jobs-file', item.file || t("Active print"));
   const canControl = Boolean(item.jobControls && !item.error && item.file && item.state !== 'PAUSING');
@@ -3013,16 +3283,10 @@ function updateJobTile(tile, item) {
     set('[data-print-cancel]', t("Cancel"));
   }
   tile.controlState = item.state;
-  set('.jobs-percent', item.percent == null ? '' : item.percent + '%');
-  const progress = node.querySelector('progress');
-  progress.hidden = item.percent == null;
-  progress.value = item.percent ?? 0;
-  set('[data-layer]', item.layer == null ? '' : t("Layer {layer}", {layer:item.layer + (item.layerTotal ? ' / ' + item.layerTotal : '')}));
+  set('[data-layer]', jobLayerLabel(item.layer, item.layerTotal));
   const timed = !item.error && !['PAUSED', 'PAUSING'].includes(item.state);
   const finish = timed ? finishAt(item.remaining, item.observedAt) : '';
-  const minutes = Math.ceil(item.remaining / 60);
-  const eta = minutes >= 60 ? hourFormat.format(Math.floor(minutes / 60)) + " " + minuteFormat.format(minutes % 60) : minuteFormat.format(minutes);
-  set('[data-eta]', timed && item.remaining != null ? t("{time} left", {time:eta}) : '');
+  set('[data-eta]', timed ? jobTimeLeft(item.remaining) : '');
   const temp = (value, target) => value == null ? '' : plain(value) + (target == null ? '' : ' / ' + plain(target)) + ' °C';
   const tools = item.tools?.length > 1 ? item.tools.map((tool,i) => ['T' + (i + 1),temp(tool.actual,tool.target)]) : [];
   const metrics = [...(tools.length ? tools : [[t("Nozzle"),temp(item.nozzle,item.nozzleTarget)]]),
@@ -3065,7 +3329,7 @@ function renderJobs() {
     const item = byHost.get(host);
     if (item) continue;
     stopJobCamera(tile);
-    tile.previewRequest?.abort();
+    clearJobTilePreview(tile);
     tile.node.remove();
     jobTiles.delete(host);
   }
@@ -3094,20 +3358,24 @@ function renderJobs() {
   }
 }
 
+function currentPrinterName() {
+  const printer = fleetPrinters.find(item => item.current);
+  return printer?.name || printer?.host || t("Printer");
+}
+
 function applyView() {
   const hasPrinters = fleetPrinters.length > 0;
   const showFleet = hasPrinters && view === 'fleet';
   const showMonitor = hasPrinters && view === 'monitor';
+  const showHistory = view === 'history';
   updateJobLink();
   const current = fleetPrinters.find(item => item.current);
-  el('deviceName').textContent = showFleet ? 'FlashForge' : current?.name || 'FlashForge';
-  el('status').hidden = !hasPrinters || showFleet;
-  el('headerJob').hidden = !hasPrinters || showFleet;
+  el('status').hidden = !showMonitor;
+  el('monitorHistory').hidden = !showMonitor || !current;
   el('jobs').hidden = !showFleet;
-  el('jobActions').hidden = !showMonitor;
-  el('setup').hidden = hasPrinters;
-  el('history').hidden = !hasPrinters || view !== 'history';
-  if (!el('history').hidden) el('history').open = true;
+  el('setup').hidden = hasPrinters || showHistory;
+  el('history').hidden = !showHistory;
+  if (showHistory) el('history').open = true;
   for (const id of ['monitor','printerTools','files-section']) el(id).hidden = !showMonitor;
   if (showFleet) renderJobs();
   else stopJobCameras();
@@ -3126,17 +3394,36 @@ function applyView() {
   }
   picker.hidden = !showMonitor || fleetPrinters.length < 2;
 }
+function replaceViewAddress() {
+  const url = new URL(location.href);
+  url.hash = view === 'fleet' ? 'allPrinters' : view;
+  if (view === 'history' && historyFilter) url.searchParams.set('historyPrinter', historyFilter);
+  else url.searchParams.delete('historyPrinter');
+  if (url.href !== location.href) window.history.replaceState(null, '', url);
+}
 function switchTab(next) {
   view = next;
-  const url = new URL(location.href);
-  url.hash = next === 'fleet' ? 'allPrinters' : next === 'monitor' ? 'monitor' : '';
-  if (url.href !== location.href) window.history.replaceState(null, '', url);
+  replaceViewAddress();
   try {localStorage.setItem('ff-fleet',next === 'fleet' ? '1':'0');} catch {}
   applyView();drawChart();
+  if (next === 'history') {
+    renderHistory();
+    updateHistory();
+  }
 }
 el('devicePicker').onchange = event => {location.href = printerPage(event.target.value);};
 el('monitorTab').onclick = () => switchTab('monitor');
-el('historyTab').onclick = () => switchTab('history');
+el('historyTab').onclick = () => {
+  historyFilter = '';
+  switchTab('history');
+};
+el('monitorHistory').onclick = () => {
+  historyFilter = fleetPrinters.find(printer => printer.current)?.host || '';
+  el('historySearch').value = '';
+  el('failedJobs').checked = false;
+  switchTab('history');
+  el('historyPrinter').focus();
+};
 el('openJob').onclick = () => {
   const current = fleetPrinters.find(item => item.current);
   if (current && (!matchesFleetSearch(current, fleetSearch.value.trim().toLowerCase())
@@ -3145,7 +3432,7 @@ el('openJob').onclick = () => {
   const heading = jobTiles.get(current?.host)?.node.querySelector('h3');
   (heading ?? fleetToggle).focus();
 };
-el('job').querySelector('.job-visual').onclick = () => {
+el('job').querySelector('.jobs-model').onclick = () => {
   if (!el('openJob').hidden) el('openJob').click();
 };
 fleetToggle.onclick = () => switchTab('fleet');
@@ -3165,14 +3452,20 @@ el('fleetClear').onclick = () => {
   refreshFleetView();
   fleetSearch.focus();
 };
-function setFleetCameras(value) {
-  if (fleetCameras === value) return;
-  fleetCameras = value;
+function setFleetCameraMode(mode) {
+  const enabled = mode !== 'off';
+  const scope = enabled ? mode : fleetCameraScope;
+  if (fleetCameras === enabled && fleetCameraScope === scope) return;
+  fleetCameras = enabled;
+  fleetCameraScope = scope;
   fleetCameraButton.setAttribute('aria-pressed', String(fleetCameras));
-  try {localStorage.setItem('ff-fleet-cameras', fleetCameras ? 'on' : 'off');} catch {}
+  try {
+    localStorage.setItem('ff-fleet-cameras', fleetCameras ? 'on' : 'off');
+    localStorage.setItem('ff-fleet-camera-scope', fleetCameraScope);
+  } catch {}
   if (!el('jobs').hidden) refreshFleetView();
 }
-fleetCameraButton.onclick = () => setFleetCameras(!fleetCameras);
+fleetCameraButton.onclick = () => setFleetCameraMode(fleetCameras ? 'off' : fleetCameraScope);
 el('fleetRefresh').onclick = async event => {
   const button = event.currentTarget;
   button.disabled = true;
@@ -3335,9 +3628,13 @@ el('settingsButton').onclick = async () => {
   el('displayRows').value = display.rows;
   el('displayPreviews').checked = display.previews;
   el('displayMonitorChart').checked = display.monitorChart;
+  el('displayChartLayout').value = display.chartLayout;
+  el('displayChartRange').value = String(display.chartRange);
+  for (const choice of chartChoices) choice.checked = display.chartLines.includes(choice.dataset.chartChoice);
   el('displayPrinterDetails').checked = display.printerDetails;
-  el('displayFleetCameras').checked = fleetCameras;
+  el('displayFleetCameras').value = fleetCameras ? fleetCameraScope : 'off';
   el('displayFleetDetails').checked = display.fleetDetails;
+  el('displayFleetWaitForRemoval').checked = display.fleetWaitForRemoval;
   el('displayHistoryTotals').checked = display.historyTotals;
   showSettingsSection(fleetPrinters.length ? 'settingsAppearance' : 'settingsPrinters');
   settingsDialog.showModal();
@@ -3370,6 +3667,11 @@ el('settingsForm').onsubmit = async event => {
   el('settingsContent').inert = true;
   status.textContent = t("Saving…");
   try {
+    const chartLines = chartChoices.filter(choice => choice.checked).map(choice => choice.dataset.chartChoice);
+    if (!chartLines.length) {
+      showSettingsSection('settingsMonitor');
+      throw Error(t("Select at least one temperature line."));
+    }
     let printers, data;
     if (printerSettingsSnapshot !== null) {
       try {
@@ -3389,8 +3691,12 @@ el('settingsForm').onsubmit = async event => {
       cardSize:el('displayCardSize').value, rows:Number(el('displayRows').value),
       previews:el('displayPreviews').checked,
       monitorChart:el('displayMonitorChart').checked,
+      chartLayout:el('displayChartLayout').value,
+      chartRange:Number(el('displayChartRange').value),
+      chartLines,
       printerDetails:el('displayPrinterDetails').checked,
       fleetDetails:el('displayFleetDetails').checked,
+      fleetWaitForRemoval:el('displayFleetWaitForRemoval').checked,
       historyTotals:el('displayHistoryTotals').checked
     };
     if (JSON.stringify(next) !== JSON.stringify(display)) {
@@ -3398,9 +3704,11 @@ el('settingsForm').onsubmit = async event => {
       display = next;
       applyDisplayStyles();
       renderFiles();
-      drawChart();
+      chartRange.value = String(display.chartRange);
+      redrawTemperatureChart();
+      if (view === 'fleet') renderJobs();
     }
-    setFleetCameras(el('displayFleetCameras').checked);
+    setFleetCameraMode(el('displayFleetCameras').value);
     settingsDialog.close();
     if (!data) return;
     if (!separateTab && data.moved && !printers.some(p => location.pathname === '/' + p.host + '/')) {
@@ -3585,7 +3893,8 @@ def translate_error(language, message):
 
 
 ACTIVE_JOB = {"PRINTING", "BUILDING", "BUILDING_FROM_SD", "PAUSED", "HEATING", "PAUSING"}
-ENDED_JOB = {"CANCELLED": "cancelled", "CANCELED": "cancelled", "STOPPED": "cancelled", "ERROR": "error"}
+CANCELLED_JOB = {"CANCELLED", "CANCELED", "STOPPED"}
+ENDED_JOB = {**dict.fromkeys(CANCELLED_JOB, "cancelled"), "ERROR": "error"}
 ACK = re.compile(rb"(?:^|\n)ok\r?\n")
 TEMP_ACK = re.compile(rb"(?:^|\n)ok[ \t]+T0:[^\r\n]+\r?\n")
 LIST_HEADER = b"D\xaa\xaaD"
@@ -3701,6 +4010,24 @@ def read_preview(host, path):
         except TimeoutError:
             pass
     return None
+
+
+def last_completed_job(jobs):
+    completed = next((job for job in jobs if job["result"] == "complete" and job["file"]), None)
+    if completed:
+        return {"file": completed["file"], "ended": completed.get("ended", 0)}
+    return None
+
+
+def bed_clear_token(jobs, active):
+    if active or not jobs or jobs[0]["result"] != "complete":
+        return ""
+    job = jobs[0]
+    ended = job.get("ended")
+    if type(ended) is not int or ended < job["started"]:
+        return ""
+    identity = json.dumps([job["started"], ended, job["file"]]).encode("ascii")
+    return hashlib.sha256(identity).hexdigest()
 
 
 def history_stats(jobs, now):
@@ -3941,7 +4268,7 @@ def manual_family(model):
     return None
 
 
-def manual_controls(detail, state, tcp_model="", nozzle=None):
+def manual_controls(detail, state, tcp_model="", nozzle=None, *, tcp_idle_after_cancel=False):
     tcp = manual_family(tcp_model)
     pid = detail.get("pid")
     if pid is None:
@@ -3955,8 +4282,10 @@ def manual_controls(detail, state, tcp_model="", nozzle=None):
         return None
     if not legacy and not detail:
         return None
-    idle = state in {"READY", "IDLE"} and (legacy or str(detail.get("status", "")).upper() in {"READY", "IDLE"})
     error = detail.get("errorCode")
+    idle = tcp_idle_after_cancel or (
+        state in {"READY", "IDLE"} and (legacy or str(detail.get("status", "")).strip().upper() in {"READY", "IDLE"})
+    )
     tcp_motion = tcp == family and (legacy or family == "5m")
     motion = tcp_motion or family == "ad5x"
     filament = tcp_motion or (family == "ad5x" and detail.get("extrudeCtrl") == 1)
@@ -3998,8 +4327,13 @@ def manual_controls(detail, state, tcp_model="", nozzle=None):
                 allowed.extend(("e+10", "e-10"))
         if "timer" in groups:
             allowed.extend(("timer0", "timer30", "timer60", "timer120"))
+    if tcp_idle_after_cancel:
+        # The TCP session confirms motion and heating independently of the HTTP job status.
+        allowed = [key for key in allowed if key == "home" or key.startswith(("heat", "x", "y", "z", "e"))]
     timer = detail.get("autoShutdown")
     notes = ["Ready" if idle else "Locked · printer must be idle"]
+    if not idle and state in CANCELLED_JOB | {"CANCELING", "CANCELLING"}:
+        notes.append(STATES[state])
     if idle and error:
         notes.append(str(error))
     return {"allowed": allowed, "groups": groups, "tcpMotion": tcp_motion,
@@ -4043,9 +4377,14 @@ def at_5m_park(position):
     return position and all(abs(value - 110) <= 0.2 for value in position[:2])
 
 
+def at_5m_final_park(position):
+    return (all(isinstance(value, (int, float)) for value in position)
+            and at_5m_park(position) and abs(position[2] - 220) <= 0.05)
+
+
 def stationary_check_seconds(position):
     # Only use the short window at the 5M's final XYZ parking position.
-    return 2 if at_5m_park(position) and abs(position[2] - 220) <= 0.05 else 10
+    return 2 if at_5m_final_park(position) else 10
 
 
 def checked_manual_target(key, position, volume, family):
@@ -4084,7 +4423,8 @@ def ad5x_axis_position(host, axis):
         return None
 
 
-def tcp_manual_move(host, key, volume, model, release_marker=None, settled_homing=None, track_home=None, record_target=None):
+def tcp_manual_move(host, key, volume, model, release_marker=None, settled_homing=None, track_home=None, record_target=None,
+                    *, require_idle_axes=False):
     """Keep the idle check and the single move in the same printer control session."""
     with socket.create_connection((host, PORT), timeout=2) as sock:
         def send(code, deadline=None):
@@ -4105,6 +4445,8 @@ def tcp_manual_move(host, key, volume, model, release_marker=None, settled_homin
             mode = mode_match[1].upper() if mode_match else ""
             if not re.search(r"^MachineStatus:[ \t]*(?:READY|IDLE)[ \t]*\r?$", status, re.M | re.I):
                 raise ManualAxesBusy("Printer must be idle.")
+            if require_idle_axes and mode not in {"READY", "IDLE"}:
+                raise ManualAxesBusy("Printer must be idle. Wait for movement or Home to finish.")
             verified_park = None
             if mode == "HOMING" and settled_homing and manual_family(model) == "5m":
                 if bounded_5m_position(send("M114")) == settled_homing:
@@ -4117,10 +4459,13 @@ def tcp_manual_move(host, key, volume, model, release_marker=None, settled_homin
                     raise ValueError("Unsupported nozzle target.")
                 target = int(key[4:])
                 send(f"M104 S{target}")
-                reading = re.search(r"\bT0:\s*[\d.]+\s*/\s*(\d+(?:\.\d+)?)", send("M105"))
-                if not reading or float(reading[1]) != target:
-                    raise ValueError("Printer has not confirmed the nozzle target. Check Printer Readings.")
-                return "Printer confirmed the nozzle target."
+                for attempt in range(4):
+                    if attempt:
+                        time.sleep(0.5)
+                    reading = re.search(r"\bT0:\s*[\d.]+\s*/\s*(\d+(?:\.\d+)?)", send("M105"))
+                    if reading and float(reading[1]) == target:
+                        return "Printer confirmed the nozzle target."
+                raise ValueError("Printer has not confirmed the nozzle target. Check Printer Readings.")
             if key == "home":
                 try:
                     # A 5M can take several seconds to acknowledge homing.
@@ -4290,7 +4635,9 @@ def read_status(host, check_code, include_details=False):
         state_match = re.search(r"^MachineStatus:[ \t]*(\S+)", status, re.M)
         if not state_match or not re.search(r"\bT0:", temp):
             raise ValueError("Unexpected response from the printer")
-        state = state_match[1]
+        state = state_match[1].upper()
+        move = re.search(r"^MoveMode:[ \t]*(\S+)", status, re.M | re.I)
+        move_mode = move[1].upper() if move else ""
         serial = None
         machine = ""
         try:
@@ -4308,7 +4655,7 @@ def read_status(host, check_code, include_details=False):
                 reply = command(sock, "M114", deadline)
                 position = {axis: manual_axis_position(reply, axis) for axis in "XYZ"}
                 if (serial and check_code and family == "5m"
-                        and re.search(r"^MoveMode:[ \t]*HOMING\b", status, re.M | re.I)):
+                        and move_mode == "HOMING"):
                     homing_park = bounded_5m_position(reply)
             except (OSError, ValueError):
                 pass
@@ -4323,12 +4670,17 @@ def read_status(host, check_code, include_details=False):
     layer = re.search(r"^Layer:\s*(\d+)\s*/\s*(\d+)", progress, re.M | re.I)
     current, total = (int(layer[1]), int(layer[2])) if layer else (0, 0)
     detail, time_hint = {}, ""
+    tcp_idle_after_cancel = False
     if serial:
         detail, time_hint = read_job_detail(serial[1], check_code, host)
-        if str(detail.get("status", "")).strip().casefold() not in {"ready", "idle"} or detail.get("errorCode"):
+        http_state = str(detail.get("status", "")).strip().upper()
+        if http_state not in {"READY", "IDLE"} or detail.get("errorCode"):
             homing_park = None
-        if str(detail.get("status", "")).strip().casefold() == "calibrate_doing":
+        if http_state == "CALIBRATE_DOING":
             state = "CALIBRATING"
+        elif family == "5m" and state in {"READY", "IDLE"} and http_state in CANCELLED_JOB:
+            state = http_state
+            tcp_idle_after_cancel = move_mode in {"READY", "IDLE"} and not detail.get("errorCode")
     elif state in ACTIVE_JOB:
         if not check_code:
             time_hint = "Enter your CheckCode in the plugin settings"
@@ -4380,12 +4732,12 @@ def read_status(host, check_code, include_details=False):
             if match:
                 endstops[axis] = int(match[1])
     led = re.search(r"^LED:[ \t]*(\d+)", status, re.M)
-    move = re.search(r"^MoveMode:[ \t]*(\S+)", status, re.M)
     sensors = {"endstops": endstops,
                "led": bool(int(led[1])) if led else None,
-               "moveMode": move[1] if move else "", "stationaryCandidate": homing_park,
+               "moveMode": move_mode, "stationaryCandidate": homing_park,
                "homingPark": homing_park if at_5m_park(homing_park) else None}
-    controls = manual_controls(detail, state, info.get("model", ""), readings["nozzle"])
+    controls = manual_controls(detail, state, info.get("model", ""), readings["nozzle"],
+                               tcp_idle_after_cancel=tcp_idle_after_cancel)
     if controls and position:
         limited = []
         for key in controls["allowed"]:
@@ -4877,14 +5229,20 @@ class PrinterMonitor:
             return
         state = status["state"]
         motion = sensors.get("moveMode", "").upper()
-        error = (status.get("manual") or {}).get("errorCode")
+        manual = status.get("manual") or {}
+        error = manual.get("errorCode")
         idle = state in {"READY", "IDLE"}
         settled = self.settled_homing_position(status)
         parked_after_home = at_5m_park(settled) and (self.manual_home_acknowledged or self.manual_home_seen)
+        position = manual.get("position") or {}
+        xyz = tuple(position.get(axis) for axis in "XYZ")
+        # G28 can finish before the first status poll observes any motion.
+        idle_after_home = motion in {"READY", "IDLE"} and (
+            self.manual_home_seen or (self.manual_home_acknowledged and at_5m_final_park(xyz)))
         if (now >= self.manual_home_until or status["active"] or error
                 or state in ENDED_JOB or state in {"ATTENTION", "CALIBRATING"}):
             self.manual_home_until = 0
-        elif idle and (parked_after_home or (self.manual_home_seen and motion in {"READY", "IDLE"})):
+        elif idle and (parked_after_home or idle_after_home):
             self.manual_home_until = 0
             try:
                 self.manual_release_marker.unlink(missing_ok=True)
@@ -5053,6 +5411,21 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
         self.monitors = {}
         self.error = ""
         self.state_lock = threading.Lock()
+        self.cleared_beds_path = storage / "cleared-beds.json"
+        try:
+            cleared = json.loads(self.cleared_beds_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            cleared = {}
+        self.cleared_beds = ({host: token for host, token in cleared.items()
+                              if isinstance(token, str) and re.fullmatch(r"[0-9a-f]{64}", token)}
+                             if isinstance(cleared, dict) else {})
+        self.history_names_path = storage / "history-printers.json"
+        try:
+            names = json.loads(self.history_names_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            names = {}
+        self.history_names = ({host: name[:60] for host, name in names.items() if isinstance(name, str) and name}
+                              if isinstance(names, dict) else {})
         self.printer_lock = threading.Lock()
         self.discovery_lock = threading.Lock()
         self.source_lock = threading.Lock()
@@ -5116,7 +5489,76 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
         return {"printers": printers, "endpoint": printers[0]["host"] if printers else "",
                 "notifications": self.notifications, "placement": self.placement}
 
+    def remember_history_names(self, entries):
+        names = {**self.history_names, **{entry["host"]: entry["name"] for entry in entries}}
+        if names == self.history_names:
+            return
+        pending = self.history_names_path.with_suffix(".tmp")
+        try:
+            pending.write_text(json.dumps(names, ensure_ascii=False), encoding="utf-8")
+            os.replace(pending, self.history_names_path)
+        except OSError:
+            return
+        self.history_names = names
+
+    def history_payload(self):
+        configured = {entry["host"]: entry["name"] for entry in self.printers()}
+        with self.state_lock:
+            monitors = self.monitors.copy()
+        paths = {}
+        for path in self.storage.glob("flashforge-*-history.json"):
+            try:
+                host = local_address(path.name.removeprefix("flashforge-").removesuffix("-history.json"))
+            except ValueError:
+                continue
+            if path.is_file() and not path.is_symlink():
+                paths[host] = path
+        now = int(time.time())
+        printers = []
+        for host in dict.fromkeys((*configured, *sorted(paths))):
+            name = configured.get(host) or self.history_names.get(host) or host
+            monitor = monitors.get(host)
+            if monitor is not None and host in configured:
+                with monitor.state_lock:
+                    jobs, error = monitor.history_snapshot, monitor.history_error
+            elif host in paths:
+                saved = PrintHistory(paths[host])
+                jobs = saved.jobs
+                error = "Print history is temporarily unavailable." if saved.error else ""
+                if host not in configured:
+                    # A retired printer is no longer sampled, so an unfinished
+                    # record is not a live print. Leave the saved row intact.
+                    jobs = [{**job, "result": "unknown"} if job["result"] == "active" else job for job in jobs]
+            else:
+                jobs, error = [], ""
+            printers.append({"host": host, "name": name, "jobs": jobs, "error": error,
+                             "stats": history_stats(jobs, now)})
+        jobs = [job for printer in printers for job in printer["jobs"]]
+        jobs.sort(key=lambda job: job["started"], reverse=True)
+        return {"printers": printers, "stats": history_stats(jobs, now)}
+
+    def confirm_bed_clear(self, host, token):
+        if host not in {entry["host"] for entry in self.printers()}:
+            return False
+        with self.state_lock:
+            monitor = self.monitors.get(host)
+            if monitor is None:
+                return False
+            with monitor.state_lock:
+                expected = bed_clear_token(monitor.history_snapshot, (monitor.latest or {}).get("active"))
+                if not expected or expected != token:
+                    return False
+                if self.cleared_beds.get(host) != token:
+                    updated = {**self.cleared_beds, host: token}
+                    pending = self.cleared_beds_path.with_suffix(".tmp")
+                    pending.write_text(json.dumps(updated), encoding="utf-8")
+                    os.replace(pending, self.cleared_beds_path)
+                    self.cleared_beds = updated
+                return True
+
     def fleet_payload(self, current=None):
+        with self.state_lock:
+            cleared = self.cleared_beds
         items = []
         for entry in self.printers():
             monitor = self.monitors.get(entry["host"])
@@ -5128,14 +5570,13 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
                     camera = monitor.camera_url
                     history = monitor.history_snapshot
             job = history[0] if history and history[0]["result"] == "active" else {}
-            completed = next((row for row in history if row["result"] == "complete" and row["file"]), None)
             item = {"host": entry["host"], "name": entry["name"],
                     "current": entry["host"] == current, "error": error,
                     "status": None, "percent": None, "remaining": None,
                     "file": "", "nozzle": None, "bed": None,
                     "printing": False, "complete": False, "cameraUrl": camera,
                     "events": job.get("events", []),
-                    "lastCompleted": {"file": completed["file"], "ended": completed.get("ended", 0)} if completed else None}
+                    "lastCompleted": last_completed_job(history)}
             if data:
                 item.update(state=data.get("state"), observedAt=data.get("observedAt"), status=data.get("status"), percent=data.get("percent"),
                             remaining=data.get("remaining"), file=data.get("file"),
@@ -5147,6 +5588,9 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
                 )})
             elif job and error:
                 item.update(printing=True, file=job["file"], layer=job.get("layer"))
+            token = bed_clear_token(history, item["printing"])
+            if token and cleared.get(entry["host"]) != token:
+                item["bedClearToken"] = token
             items.append(item)
         return items
 
@@ -5217,6 +5661,7 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
                 mono = time.monotonic()
                 try:
                     entries = self.printers()
+                    self.remember_history_names(entries)
                     hosts = {entry["host"] for entry in entries}
                     with self.state_lock:
                         for host in [name for name in self.monitors if name not in hosts]:
@@ -5356,11 +5801,11 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 or self.headers.get("Origin") != f"http://{authority}"
                 or self.headers.get("Sec-Fetch-Site") not in (None, "same-origin")
                 or action not in ("settings", "action", "diagnostics", "notifications", "camera-stream",
-                                  "discover", "test-printer", "print-source", "upload-file")):
+                                  "discover", "test-printer", "print-source", "upload-file", "confirm-bed-clear")):
             self.reply_json({"error": "Open the monitor in OrcaSlicer."}, 403)
             return
         endpoint, route = self.request_route()
-        if route in {"camera-stream", "action", "print-source", "upload-file"} or (route == "diagnostics" and "?" in self.path):
+        if route in {"camera-stream", "action", "print-source", "upload-file", "confirm-bed-clear"} or (route == "diagnostics" and "?" in self.path):
             try:
                 endpoint = self.checked_printer(endpoint)
             except (OSError, RuntimeError, ValueError) as error:
@@ -5390,6 +5835,26 @@ class MonitorHandler(BaseHTTPRequestHandler):
             return
         if route == action == "print-source":
             self.prepare_print_source(endpoint)
+            return
+        if route == action == "confirm-bed-clear":
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                if not 0 < length <= 256:
+                    raise ValueError
+                payload = json.loads(self.rfile.read(length))
+                token = payload.get("token") if isinstance(payload, dict) else None
+                if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{64}", token):
+                    raise ValueError
+                confirmed = self.server.confirm_bed_clear(endpoint, token)
+            except ValueError:
+                self.reply_json({"error": "Invalid request."}, 400)
+            except OSError:
+                self.reply_json({"error": "Could not save the settings."}, 503)
+            else:
+                if confirmed:
+                    self.reply_json({"confirmed": True})
+                else:
+                    self.reply_json({"error": "The print job changed. Refresh its status and try again."}, 409)
             return
         if route == action == "notifications":
             try:
@@ -5785,6 +6250,9 @@ class MonitorHandler(BaseHTTPRequestHandler):
         if route == "settings":
             self.reply_json(self.server.settings_payload())
             return
+        if route == "history":
+            self.reply_json(self.server.history_payload())
+            return
         if route == "placement":
             self.reply_json({"placement": self.server.placement})
             return
@@ -5837,7 +6305,8 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 error = monitor.error
                 calibration = monitor.calibration
                 if route == "status" and data is not None:
-                    data = {**data, "manual": monitor.manual_controls_view(data.get("manual"), data)}
+                    data = {**data, "manual": monitor.manual_controls_view(data.get("manual"), data),
+                            "lastCompleted": last_completed_job(monitor.history_snapshot)}
             if data is None:
                 self.reply_json({"error": error}, 503)
                 return
@@ -6523,7 +6992,8 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                         try:
                             result = tcp_manual_move(host, key, info.get("volume"), info.get("model", ""),
                                                      monitor.manual_release_marker, settled_homing, track_home,
-                                                     monitor.record_manual_target)
+                                                     monitor.record_manual_target,
+                                                     require_idle_axes=current["state"] in CANCELLED_JOB)
                         except (ManualAxesBusy, ManualTravelLimit):
                             may_move = False
                             raise
@@ -6655,6 +7125,15 @@ class FlashForgePage(orca.pages.PagesPluginCapabilityBase):
 # Embedded so installing the single .py file also installs its translations.
 TRANSLATIONS = {
     "ca": {
+        "While this tab is open": "Mentre aquesta pestanya estigui oberta",
+        "Only during an active print": "Només durant una impressió activa",
+        "Waiting for part removal": "Pendent de retirar la peça",
+        "Wait for part removal": "Esperar que es retiri la peça",
+        "Bed is clear": "El llit és lliure",
+        "Chart layout": "Disposició del gràfic",
+        "Shared scale": "Escala compartida",
+        "Separate scales": "Escales separades",
+        "Select at least one temperature line.": "Seleccioneu almenys una línia de temperatura.",
         " · Total print time: {time}": " · Temps total d'impressió: {time}",
         "0 min": "0 min",
         "1 mm": "1 mm",
@@ -6676,23 +7155,24 @@ TRANSLATIONS = {
         "Allow access to the printer, then reload the plugin.": "Permet l'accés a la impressora i, a continuació, torna a carregar el connector.",
         "Another print source is being read.": "S'està llegint una altra font d'impressió.",
         "Appearance": "Aparença",
-        "Apply": "Aplicar",
+        "Apply": "Aplica",
         "Attention": "Atenció",
         "Authenticated readings: {availability}": "Lectures autenticades: {availability}",
         "Auto shutdown": "Apagat automàtic",
         "Axes": "Eixos",
         "Axes busy": "Eixos ocupats",
         "Axis movement step": "Pas de moviment de l'eix",
+        "B": "Llit",
         "Basic readings received. CheckCode could not be verified.": "Lectures bàsiques rebudes. No s'ha pogut verificar CheckCode.",
         "Bed": "Llit",
-        "Bed Target": "Objectiu de llit",
-        "Bed Z": "Llit Z",
+        "Bed Target": "Temperatura objectiu del llit",
+        "Bed Z": "Eix Z del llit",
         "Bed leveling": "Anivellament del llit",
         "Black": "Negre",
         "Blue": "Blau",
         "Brown": "Marró",
         "Browse files": "Explorar fitxers",
-        "Build volume": "Crear volum",
+        "Build volume": "Volum d’impressió",
         "Busy": "Ocupat",
         "Calibrating": "Calibrant",
         "Calibration": "Calibració",
@@ -6708,10 +7188,10 @@ TRANSLATIONS = {
         "Cancel": "Cancel·lar",
         "Cancel print?": "Cancel·la la impressió?",
         "Canceled": "Cancel·lat",
-        "Canceling": "Cancel·lació",
+        "Canceling": "Cancel·lant",
         "Card size": "Mida de la targeta",
-        "Chamber": "Cambra",
-        "Chamber light": "Llum de cambra",
+        "Chamber": "Cambra d’impressió",
+        "Chamber light": "Llum de la cambra d’impressió",
         "Chart nozzle": "Broquet gràfic",
         "Chart of actual and target temperatures for the nozzle and bed": "Gràfic de temperatures reals i objectiu per al broquet i el llit",
         "Check connection": "Comproveu la connexió",
@@ -6735,12 +7215,12 @@ TRANSLATIONS = {
         "Choose a material and color supported by this printer.": "Trieu un material i un color compatibles amb aquesta impressora.",
         "Choose a nonempty print file no larger than 128 MB.": "Trieu un fitxer d'impressió no buit que no superi els 128 MB.",
         "Choose a print file no larger than 128 MB.": "Trieu un fitxer d'impressió que no superi els 128 MB.",
-        "Choose a sliced .3mf with one plate and filament information.": "Trieu un .3mf a rodanxes amb una placa i informació del filament.",
-        "Choose a sliced .3mf with one plate.": "Trieu un .3mf a rodanxes amb un plat.",
+        "Choose a sliced .3mf with one plate and filament information.": "Tria un fitxer .3mf amb una sola placa laminada i dades dels filaments.",
+        "Choose a sliced .3mf with one plate.": "Tria un fitxer .3mf amb una sola placa laminada.",
         "Choose a text .gcode file or a sliced .3mf.": "Trieu un fitxer .gcode de text o un .3mf en rodanxes.",
         "Choose delay…": "Tria retard...",
         "Choose material": "Trieu material",
-        "Choose the original .3mf with one sliced plate and the same file name.": "Trieu el .3mf original amb un plat a rodanxes i el mateix nom de fitxer.",
+        "Choose the original .3mf with one sliced plate and the same file name.": "Tria el fitxer .3mf original amb una sola placa laminada i el mateix nom.",
         "Choose the original sliced .3mf for this Creator file.": "Trieu el .3mf original per a aquest fitxer Creator.",
         "Choose the original sliced .3mf.": "Trieu el .3mf original a rodanxes.",
         "Choose the sliced .3mf that matches the stored file name.": "Trieu el .3mf tallat que coincideixi amb el nom del fitxer emmagatzemat.",
@@ -6748,7 +7228,7 @@ TRANSLATIONS = {
         "Clear filters": "Esborra els filtres",
         "Close": "Tancar",
         "Closed": "Tancat",
-        "Collecting readings…": "Recollint lectures...",
+        "Collecting readings…": "Recollint mesures…",
         "Color": "Color",
         "Color differs": "El color és diferent",
         "Command accepted. The printer has not confirmed the change.": "S'ha acceptat l'ordre. La impressora no ha confirmat el canvi.",
@@ -6817,7 +7297,7 @@ TRANSLATIONS = {
         "Empty camera stream": "Flux de càmera buit",
         "Enable LAN-only mode on the printer.": "Habiliteu el mode només LAN a la impressora.",
         "Ended: {time}": "Finalitzat: {time}",
-        "Endstops: {state}": "Topes finals: {state}",
+        "Endstops: {state}": "Finals de cursa: {state}",
         "Enlarge camera": "Ampliar la càmera",
         "Enter a local IPv4 address for the printer.": "Introduïu una adreça IPv4 local per a la impressora.",
         "Enter a page number": "Introduïu un número de pàgina",
@@ -6845,7 +7325,6 @@ TRANSLATIONS = {
         "Find printers": "Cerca impressores",
         "Finish": "Acabat",
         "Finish ≈ {time}": "Acabat ≈ {time}",
-        "Finished cleanly": "Acabat net",
         "Finished. Printer ready.": "Acabat. Impressora a punt.",
         "Firmware": "Firmware",
         "FlashForge Device Tab is shutting down.": "FlashForge Device Tab s'està tancant.",
@@ -6855,13 +7334,13 @@ TRANSLATIONS = {
         "Heat nozzle to 180 °C": "Escalfar el broquet a 180 °C",
         "Heat off": "Escalfament apagat",
         "Heat the nozzle to at least 180 °C.": "Escalfeu el broquet com a mínim a 180 °C.",
-        "Heating": "Calefacció",
-        "Heating nozzles: {count}": "Broquets de calefacció: {count}",
+        "Heating": "Escalfament",
+        "Heating nozzles: {count}": "Broquets en escalfament: {count}",
         "History": "Historial",
         "Home": "Origen",
         "Home all axes": "Porta tots els eixos a l’origen",
         "Home required": "Cal tornar a l’origen",
-        "Home sent. Waiting for the printer to confirm completion.": "Casa enviada. S'està esperant que la impressora confirmi la finalització.",
+        "Home sent. Waiting for the printer to confirm completion.": "S’ha enviat l’ordre de tornar a l’origen. Esperant que la impressora confirmi que ha acabat.",
         "Homing…": "Inici...",
         "Host notifications": "Notificacions de l'amfitrió",
         "IPv4 address": "Adreça IPv4",
@@ -6884,9 +7363,9 @@ TRANSLATIONS = {
         "Invalid printer list.": "Llista d'impressores no vàlida.",
         "Invalid request.": "Sol·licitud no vàlida.",
         "Invalid slice information.": "Informació del sector no vàlida.",
-        "Job details": "Detalls de la feina",
-        "Job status unavailable": "Estat de la feina no disponible",
-        "Jobs": "Ocupació",
+        "Job details": "Detalls de la impressió",
+        "Job status unavailable": "Estat de la impressió no disponible",
+        "Jobs": "Treballs d’impressió",
         "Large": "Gran",
         "Last completed": "Darrer completat",
         "Last reading: {seconds} s ago": "Última lectura: fa {seconds} s",
@@ -6930,6 +7409,7 @@ TRANSLATIONS = {
         "Move sent to the printer.": "Moviment enviat a la impressora.",
         "Move up": "Mou cap amunt",
         "Moving…": "S'està movent...",
+        "N": "Broq.",
         "Name": "Nom",
         "Needs Attention": "Necessita atenció",
         "Network discovery unavailable. Enter the printer address manually.": "Detecció de xarxa no disponible. Introduïu l'adreça de la impressora manualment.",
@@ -6941,7 +7421,7 @@ TRANSLATIONS = {
         "No idle printers.": "No hi ha impressores inactives.",
         "No loaded slot matches": "No hi ha coincidències d'espai carregat",
         "No matching files": "No s’han trobat fitxers",
-        "No matching jobs.": "No hi ha llocs de treball coincidents.",
+        "No matching jobs.": "No hi ha treballs d’impressió coincidents.",
         "No new printers found.": "No s'han trobat impressores noves.",
         "No preview": "Sense previsualització",
         "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.": "Encara no s'han enregistrat treballs d'impressió. L'historial d'impressió s'enregistra mentre OrcaSlicer està obert.",
@@ -6955,9 +7435,9 @@ TRANSLATIONS = {
         "Not recorded": "No registrat",
         "Notifications": "Notificacions",
         "Nozzle": "Broquet",
-        "Nozzle Target": "Objectiu del broquet",
+        "Nozzle Target": "Temperatura objectiu del broquet",
         "Nozzle T{tool}": "Broquet T{tool}",
-        "Nozzle Z": "Broquet Z",
+        "Nozzle Z": "Eix Z del broquet",
         "Nozzle {temperature} °C": "Broquet {temperature} °C",
         "Nozzles": "Broquets",
         "Nozzles: {count}": "Broquets: {count}",
@@ -6978,11 +7458,11 @@ TRANSLATIONS = {
         "Orange": "Taronja",
         "OrcaSlicer is sending a print job. Monitoring will resume when the transfer is complete.": "OrcaSlicer està enviant una tasca d'impressió. La supervisió es reprendrà quan finalitzi la transferència.",
         "OrcaSlicer is sending a print job. Try again when it finishes.": "OrcaSlicer està enviant una tasca d'impressió. Torna-ho a provar quan acabi.",
-        "Original sliced .3mf": ".3mf original a rodanxes",
+        "Original sliced .3mf": "Fitxer .3mf original amb la laminació",
         "Other nozzles": "Altres broquets",
         "Page number": "Número de pàgina",
-        "Part Cooling Fan": "Ventilador de refrigeració de part",
-        "Part fan": "Ventilador parcial",
+        "Part Cooling Fan": "Ventilador de refrigeració de la peça",
+        "Part fan": "Ventilador de peça",
         "Pause": "Pausa",
         "Paused": "En pausa",
         "Paused, disconnected or reporting a problem": "En pausa, desconnectat o informant d'un problema",
@@ -7016,6 +7496,7 @@ TRANSLATIONS = {
         "Print speed": "Velocitat d'impressió",
         "Print started · {file}": "Impressió iniciada · {file}",
         "Print stored file": "Imprimeix el fitxer emmagatzemat",
+        "Print success rate": "Taxa d’èxit",
         "Print time": "Temps d'impressió",
         "Print time: {time}": "Hora d'impressió: {time}",
         "Printer": "Impressora",
@@ -7024,7 +7505,7 @@ TRANSLATIONS = {
         "Printer Readings": "Lectures de la impressora",
         "Printer accepted the command.": "La impressora ha acceptat l'ordre.",
         "Printer accepted the command. Axis limits could not be checked.": "La impressora ha acceptat l'ordre. No s'han pogut comprovar els límits dels eixos.",
-        "Printer camera feed": "Alimentació de la càmera de la impressora",
+        "Printer camera feed": "Vídeo de la càmera de la impressora",
         "Printer confirmed the nozzle target.": "La impressora ha confirmat l'objectiu del broquet.",
         "Printer confirmed the shutdown timer setting.": "La impressora ha confirmat la configuració del temporitzador d'apagada.",
         "Printer confirmed {command} · {state}": "Impressora confirmada {command} · {state}",
@@ -7042,7 +7523,7 @@ TRANSLATIONS = {
         "Printer has not confirmed the nozzle target. Check Printer Readings.": "La impressora no ha confirmat l'objectiu del broquet. Comproveu les lectures de la impressora.",
         "Printer jobs": "Treballs d'impressora",
         "Printer must be idle.": "La impressora ha d'estar inactiva.",
-        "Printer must be idle. Wait for movement or Home to finish.": "La impressora ha d'estar inactiva. Espereu que finalitzi el moviment o Inici.",
+        "Printer must be idle. Wait for movement or Home to finish.": "La impressora ha d’estar inactiva. Espera que acabi el moviment o la tornada a l’origen.",
         "Printer must be idle. {reason}": "La impressora ha d'estar inactiva. {reason}",
         "Printer rejected the selected file.": "La impressora ha rebutjat el fitxer seleccionat.",
         "Printer rejected {command}.": "La impressora ha rebutjat {command}.",
@@ -7058,7 +7539,7 @@ TRANSLATIONS = {
         "Profile changed": "Perfil canviat",
         "Purple": "Lila",
         "Range": "Interval",
-        "Reading materials…": "Materials de lectura...",
+        "Reading materials…": "Llegint les dades dels materials…",
         "Reading printer status…": "S'està llegint l'estat de la impressora...",
         "Readings delayed": "Lectures retardades",
         "Readings unavailable": "Lectures no disponibles",
@@ -7069,9 +7550,9 @@ TRANSLATIONS = {
         "Refresh": "Actualitzar",
         "Refresh the Creator printer's file list first.": "Actualitzeu primer la llista de fitxers de la impressora Creator.",
         "Refresh the file list and check the loaded materials.": "Actualitzeu la llista de fitxers i comproveu els materials carregats.",
-        "Release motors": "Alliberar motors",
+        "Release motors": "Desbloqueja els motors",
         "Remove": "Eliminar",
-        "Replace Printer tab": "Pestanya Substitueix la impressora",
+        "Replace Printer tab": "Substitueix el contingut de la pestanya Impressora",
         "Request failed.": "La sol·licitud ha fallat.",
         "Restored the printer's original web page.": "S'ha restaurat la pàgina web original de la impressora.",
         "Result": "Resultat",
@@ -7109,9 +7590,10 @@ TRANSLATIONS = {
         "Serial": "Serial",
         "Serial number": "Número de sèrie",
         "Serial number (required for Creator 5 / 5 Pro)": "Número de sèrie (necessari per a Creator 5 / 5 Pro)",
-        "Set target": "Estableix un objectiu",
+        "Set temperature": "Fixa la temperatura",
+        "Heat": "Escalfa",
         "Set up your first printer": "Configura la teva primera impressora",
-        "Setting light…": "S'està posant la llum...",
+        "Setting light…": "Canviant la llum de la cambra…",
         "Settings": "Configuració",
         "Settings are unavailable.": "La configuració no està disponible.",
         "Show file previews": "Mostra les previsualitzacions de fitxers",
@@ -7129,8 +7611,8 @@ TRANSLATIONS = {
         "Stored files": "Fitxers emmagatzemats",
         "System theme": "Tema del sistema",
         "Tab placement": "Col·locació de pestanyes",
-        "Tan": "Tan",
-        "Target": "Objectiu",
+        "Tan": "Beix fosc",
+        "Target": "Temperatura objectiu",
         "Teal": "Teal",
         "Temperature change over the last 5 minutes": "Canvi de temperatura durant els últims 5 minuts",
         "Temperatures": "Temperatures",
@@ -7170,7 +7652,7 @@ TRANSLATIONS = {
         "The printer must be idle.": "La impressora ha d'estar inactiva.",
         "The printer rejected the HTTP request (code {code}).": "La impressora va rebutjar la sol·licitud HTTP (codi {code}).",
         "The printer reported an active print. Check the printer before retrying.": "La impressora ha informat d'una impressió activa. Comproveu la impressora abans de tornar-ho a provar.",
-        "The printer requires homing before manual movement.": "La impressora requereix una posició d'origen abans del moviment manual.",
+        "The printer requires homing before manual movement.": "Torna els eixos a l’origen abans de moure’ls manualment.",
         "The printer response is too large": "La resposta de la impressora és massa gran",
         "The printer returned an invalid file list.": "La impressora ha retornat una llista de fitxers no vàlida.",
         "The printer returned invalid HTTP data.": "La impressora ha retornat dades HTTP no vàlides.",
@@ -7189,8 +7671,8 @@ TRANSLATIONS = {
         "Timer {minutes} min": "Temporitzador {minutes} min",
         "Total pages: {count}": "Pàgines totals: {count}",
         "Totals": "Totals",
-        "Transport: {transport}": "Transport: {transport}",
-        "Travel limit": "Límit de viatge",
+        "Transport: {transport}": "Protocol: {transport}",
+        "Travel limit": "Límit de recorregut de l’eix",
         "Trend unavailable": "Tendència no disponible",
         "Unavailable": "No disponible",
         "Unexpected response from the printer": "Resposta inesperada de la impressora",
@@ -7219,7 +7701,7 @@ TRANSLATIONS = {
         "Waiting for Home to finish…": "Esperant que els eixos arribin a l’origen…",
         "Waiting for job status": "Esperant l'estat de la feina",
         "Waiting for printer…": "S'està esperant la impressora...",
-        "Waiting for readings": "Esperant les lectures",
+        "Waiting for readings": "Esperant les mesures",
         "Waiting for temperature readings": "Esperant les lectures de temperatura",
         "Waiting for the printer to confirm calibration.": "Esperant que la impressora confirmi el calibratge.",
         "Waiting for the printer…": "S'està esperant la impressora...",
@@ -7235,6 +7717,15 @@ TRANSLATIONS = {
         "{time} left": "Queden {time}",
     },
     "cs": {
+        "While this tab is open": "Když je tato karta otevřená",
+        "Only during an active print": "Pouze během aktivního tisku",
+        "Waiting for part removal": "Čeká na sejmutí výtisku",
+        "Wait for part removal": "Čekat na sejmutí výtisku",
+        "Bed is clear": "Podložka je volná",
+        "Chart layout": "Rozložení grafu",
+        "Shared scale": "Společná stupnice",
+        "Separate scales": "Samostatné stupnice",
+        "Select at least one temperature line.": "Vyberte alespoň jednu teplotní křivku.",
         " · Total print time: {time}": " · Celkový čas tisku: {time}",
         "0 min": "0 min",
         "1 mm": "1 mm",
@@ -7263,16 +7754,17 @@ TRANSLATIONS = {
         "Axes": "Osy",
         "Axes busy": "Osy jsou zaneprázdněné",
         "Axis movement step": "Krok pohybu osy",
+        "B": "Podl.",
         "Basic readings received. CheckCode could not be verified.": "Přijaté základní hodnoty. CheckCode se nepodařilo ověřit.",
         "Bed": "Podložka",
-        "Bed Target": "Bed Target",
-        "Bed Z": "Postel Z",
+        "Bed Target": "Cílová teplota podložky",
+        "Bed Z": "Osa Z podložky",
         "Bed leveling": "Vyrovnání podložky",
         "Black": "Černá",
         "Blue": "Modrá",
         "Brown": "Hnědá",
         "Browse files": "Procházet soubory",
-        "Build volume": "Vytvořit objem",
+        "Build volume": "Tiskový objem",
         "Busy": "Zaneprázdněn",
         "Calibrating": "Kalibrace",
         "Calibration": "Kalibrace",
@@ -7288,10 +7780,10 @@ TRANSLATIONS = {
         "Cancel": "Zrušit",
         "Cancel print?": "Zrušit tisk?",
         "Canceled": "Zrušeno",
-        "Canceling": "Zrušení",
+        "Canceling": "Ruší se",
         "Card size": "Velikost karty",
-        "Chamber": "Komora",
-        "Chamber light": "Komorové osvětlení",
+        "Chamber": "Tisková komora",
+        "Chamber light": "Osvětlení tiskové komory",
         "Chart nozzle": "Kartáčová tryska",
         "Chart of actual and target temperatures for the nozzle and bed": "Tabulka skutečných a cílových teplot pro trysku a lože",
         "Check connection": "Zkontrolujte připojení",
@@ -7315,12 +7807,12 @@ TRANSLATIONS = {
         "Choose a material and color supported by this printer.": "Vyberte materiál a barvu podporovanou touto tiskárnou.",
         "Choose a nonempty print file no larger than 128 MB.": "Vyberte prázdný tiskový soubor ne větší než 128 MB.",
         "Choose a print file no larger than 128 MB.": "Vyberte tiskový soubor ne větší než 128 MB.",
-        "Choose a sliced .3mf with one plate and filament information.": "Vyberte nakrájený .3mf s jednou destičkou a informacemi o vláknu.",
-        "Choose a sliced .3mf with one plate.": "Vyberte si nakrájený .3mf s jedním talířem.",
+        "Choose a sliced .3mf with one plate and filament information.": "Vyberte soubor .3mf s jednou naslicovanou podložkou a údaji o filamentu.",
+        "Choose a sliced .3mf with one plate.": "Vyberte soubor .3mf s jednou naslicovanou tiskovou podložkou.",
         "Choose a text .gcode file or a sliced .3mf.": "Vyberte textový soubor .gcode nebo rozdělený .3mf.",
         "Choose delay…": "Vyberte zpoždění…",
         "Choose material": "Vyberte materiál",
-        "Choose the original .3mf with one sliced plate and the same file name.": "Vyberte původní .3mf s jednou plátkem na plátky a stejným názvem souboru.",
+        "Choose the original .3mf with one sliced plate and the same file name.": "Vyberte původní soubor .3mf s jednou naslicovanou podložkou a stejným názvem.",
         "Choose the original sliced .3mf for this Creator file.": "Vyberte původní rozřezaný .3mf pro tento soubor Creator.",
         "Choose the original sliced .3mf.": "Vyberte původní nakrájený .3mf.",
         "Choose the sliced .3mf that matches the stored file name.": "Vyberte rozdělený .3mf, který odpovídá názvu uloženého souboru.",
@@ -7328,7 +7820,7 @@ TRANSLATIONS = {
         "Clear filters": "Vymazat filtry",
         "Close": "Zavřít",
         "Closed": "Zavřeno",
-        "Collecting readings…": "Sbírání hodnot…",
+        "Collecting readings…": "Sběr naměřených hodnot…",
         "Color": "Barva",
         "Color differs": "Barva se liší",
         "Command accepted. The printer has not confirmed the change.": "Příkaz přijat. Tiskárna nepotvrdila změnu.",
@@ -7397,7 +7889,7 @@ TRANSLATIONS = {
         "Empty camera stream": "Prázdný tok z kamery",
         "Enable LAN-only mode on the printer.": "Povolte na tiskárně režim pouze LAN.",
         "Ended: {time}": "Ukončeno: {time}",
-        "Endstops: {state}": "Koncové dorazy: {state}",
+        "Endstops: {state}": "Koncové spínače: {state}",
         "Enlarge camera": "Zvětšení kamery",
         "Enter a local IPv4 address for the printer.": "Zadejte místní adresu IPv4 pro tiskárnu.",
         "Enter a page number": "Zadejte číslo stránky",
@@ -7425,7 +7917,6 @@ TRANSLATIONS = {
         "Find printers": "Najít tiskárny",
         "Finish": "Dokončit",
         "Finish ≈ {time}": "Dokončit ≈ {time}",
-        "Finished cleanly": "Dokončeno čistě",
         "Finished. Printer ready.": "Hotovo. Tiskárna připravena.",
         "Firmware": "Firmware",
         "FlashForge Device Tab is shutting down.": "FlashForge Device Tab se vypíná.",
@@ -7435,13 +7926,13 @@ TRANSLATIONS = {
         "Heat nozzle to 180 °C": "Zahřejte trysku na 180 °C",
         "Heat off": "Vyhřívání vypnuto",
         "Heat the nozzle to at least 180 °C.": "Zahřejte trysku alespoň na 180 °C.",
-        "Heating": "Topení",
-        "Heating nozzles: {count}": "Topné trysky: {count}",
+        "Heating": "Zahřívání",
+        "Heating nozzles: {count}": "Zahřívané trysky: {count}",
         "History": "Historie",
         "Home": "Nastavit výchozí polohu",
         "Home all axes": "Nastavit výchozí polohu všech os",
         "Home required": "Je nutné nastavit výchozí polohu",
-        "Home sent. Waiting for the printer to confirm completion.": "Posláno domů. Čekání, až tiskárna potvrdí dokončení.",
+        "Home sent. Waiting for the printer to confirm completion.": "Příkaz k návratu do výchozí polohy byl odeslán. Čeká se na potvrzení dokončení tiskárnou.",
         "Homing…": "Návrat domů…",
         "Host notifications": "Oznámení hostitele",
         "IPv4 address": "Adresa IPv4",
@@ -7464,9 +7955,9 @@ TRANSLATIONS = {
         "Invalid printer list.": "Neplatný seznam tiskáren.",
         "Invalid request.": "Neplatný požadavek.",
         "Invalid slice information.": "Neplatné informace o řezu.",
-        "Job details": "Podrobnosti o práci",
-        "Job status unavailable": "Stav úlohy není k dispozici",
-        "Jobs": "Zaměstnání",
+        "Job details": "Podrobnosti tiskové úlohy",
+        "Job status unavailable": "Stav tiskové úlohy není k dispozici",
+        "Jobs": "Tiskové úlohy",
         "Large": "Velký",
         "Last completed": "Naposledy dokončeno",
         "Last reading: {seconds} s ago": "Poslední údaj před {seconds} s",
@@ -7510,6 +8001,7 @@ TRANSLATIONS = {
         "Move sent to the printer.": "Přesun odeslán do tiskárny.",
         "Move up": "Přejít nahoru",
         "Moving…": "Stěhování…",
+        "N": "Tr.",
         "Name": "Jméno",
         "Needs Attention": "Vyžaduje pozornost",
         "Network discovery unavailable. Enter the printer address manually.": "Zjišťování sítě není k dispozici. Zadejte adresu tiskárny ručně.",
@@ -7521,7 +8013,7 @@ TRANSLATIONS = {
         "No idle printers.": "Žádné nečinné tiskárny.",
         "No loaded slot matches": "Žádný načtený slot neodpovídá",
         "No matching files": "Nenalezeny žádné soubory",
-        "No matching jobs.": "Žádné odpovídající úlohy.",
+        "No matching jobs.": "Žádné odpovídající tiskové úlohy.",
         "No new printers found.": "Nebyly nalezeny žádné nové tiskárny.",
         "No preview": "Žádný náhled",
         "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.": "Dosud nebyly zaznamenány žádné tiskové úlohy. Historie tisku se zaznamenává, když je OrcaSlicer otevřené.",
@@ -7535,9 +8027,9 @@ TRANSLATIONS = {
         "Not recorded": "Nezaznamenáno",
         "Notifications": "Oznámení",
         "Nozzle": "Tryska",
-        "Nozzle Target": "Cíl trysky",
+        "Nozzle Target": "Cílová teplota trysky",
         "Nozzle T{tool}": "Tryska T{tool}",
-        "Nozzle Z": "Tryska Z",
+        "Nozzle Z": "Osa Z trysky",
         "Nozzle {temperature} °C": "Tryska {temperature} °C",
         "Nozzles": "Trysky",
         "Nozzles: {count}": "Trysky: {count}",
@@ -7545,7 +8037,7 @@ TRANSLATIONS = {
         "Offline for at least one minute": "Offline po dobu alespoň jedné minuty",
         "On": "Zapnuto",
         "One printer per line: address | CheckCode | name | serial number": "Jedna tiskárna na řádek: adresa | CheckCode | jméno | sériové číslo",
-        "Open": "Otevřít",
+        "Open": "Otevřeno",
         "Open FlashForge": "Otevřete FlashForge",
         "Open FlashForge Device Tab for a FlashForge printer profile from Speed Dial.": "Otevřete FlashForge Device Tab pro profil tiskárny FlashForge z rychlé volby.",
         "Open FlashForge Device Tab for the current printer profile from Speed Dial.": "Otevřete FlashForge Device Tab pro aktuální profil tiskárny z rychlé volby.",
@@ -7558,11 +8050,11 @@ TRANSLATIONS = {
         "Orange": "Oranžová",
         "OrcaSlicer is sending a print job. Monitoring will resume when the transfer is complete.": "OrcaSlicer odesílá tiskovou úlohu. Po dokončení přenosu bude sledování pokračovat.",
         "OrcaSlicer is sending a print job. Try again when it finishes.": "OrcaSlicer odesílá tiskovou úlohu. Zkuste to znovu, až to skončí.",
-        "Original sliced .3mf": "Originální krájený .3mf",
+        "Original sliced .3mf": "Původní naslicovaný soubor .3mf",
         "Other nozzles": "Jiné trysky",
         "Page number": "Číslo stránky",
-        "Part Cooling Fan": "Ventilátor chlazení dílů",
-        "Part fan": "Částečný ventilátor",
+        "Part Cooling Fan": "Ventilátor chlazení výtisku",
+        "Part fan": "Ventilátor výtisku",
         "Pause": "Pauza",
         "Paused": "Pozastaveno",
         "Paused, disconnected or reporting a problem": "Pozastaveno, odpojeno nebo hlášen problém",
@@ -7596,6 +8088,7 @@ TRANSLATIONS = {
         "Print speed": "Rychlost tisku",
         "Print started · {file}": "Tisk zahájen · {file}",
         "Print stored file": "Tisk uloženého souboru",
+        "Print success rate": "Úspěšnost tisku",
         "Print time": "Doba tisku",
         "Print time: {time}": "Čas tisku: {time}",
         "Printer": "Tiskárna",
@@ -7604,7 +8097,7 @@ TRANSLATIONS = {
         "Printer Readings": "Údaje tiskárny",
         "Printer accepted the command.": "Tiskárna přijala příkaz.",
         "Printer accepted the command. Axis limits could not be checked.": "Tiskárna přijala příkaz. Limity os nebylo možné zkontrolovat.",
-        "Printer camera feed": "Posuv fotoaparátu tiskárny",
+        "Printer camera feed": "Obraz z kamery tiskárny",
         "Printer confirmed the nozzle target.": "Tiskárna potvrdila cíl trysky.",
         "Printer confirmed the shutdown timer setting.": "Tiskárna potvrdila nastavení časovače vypnutí.",
         "Printer confirmed {command} · {state}": "Tiskárna potvrzena {command} · {state}",
@@ -7622,7 +8115,7 @@ TRANSLATIONS = {
         "Printer has not confirmed the nozzle target. Check Printer Readings.": "Tiskárna nepotvrdila cíl trysky. Zkontrolujte hodnoty na tiskárně.",
         "Printer jobs": "Tiskové úlohy",
         "Printer must be idle.": "Tiskárna musí být nečinná.",
-        "Printer must be idle. Wait for movement or Home to finish.": "Tiskárna musí být nečinná. Počkejte na dokončení pohybu nebo domova.",
+        "Printer must be idle. Wait for movement or Home to finish.": "Tiskárna musí být v klidu. Počkejte, až skončí pohyb nebo návrat do výchozí polohy.",
         "Printer must be idle. {reason}": "Tiskárna musí být nečinná. {reason}",
         "Printer rejected the selected file.": "Tiskárna odmítla vybraný soubor.",
         "Printer rejected {command}.": "Tiskárna odmítnuta {command}.",
@@ -7638,7 +8131,7 @@ TRANSLATIONS = {
         "Profile changed": "Profil změněn",
         "Purple": "Fialová",
         "Range": "Rozsah",
-        "Reading materials…": "Materiály ke čtení…",
+        "Reading materials…": "Načítání údajů o materiálech…",
         "Reading printer status…": "Načítání stavu tiskárny…",
         "Readings delayed": "Zpoždění čtení",
         "Readings unavailable": "Údaje nejsou k dispozici",
@@ -7649,9 +8142,9 @@ TRANSLATIONS = {
         "Refresh": "Obnovit",
         "Refresh the Creator printer's file list first.": "Nejprve obnovte seznam souborů tiskárny Creator.",
         "Refresh the file list and check the loaded materials.": "Obnovte seznam souborů a zkontrolujte vložené materiály.",
-        "Release motors": "Uvolněte motory",
+        "Release motors": "Uvolnit motory",
         "Remove": "Odstraňte",
-        "Replace Printer tab": "Karta Vyměnit tiskárnu",
+        "Replace Printer tab": "Nahradit obsah karty Tiskárna",
         "Request failed.": "Požadavek se nezdařil.",
         "Restored the printer's original web page.": "Obnovení původní webové stránky tiskárny.",
         "Result": "Výsledek",
@@ -7689,9 +8182,10 @@ TRANSLATIONS = {
         "Serial": "Sériové",
         "Serial number": "Sériové číslo",
         "Serial number (required for Creator 5 / 5 Pro)": "Sériové číslo (vyžadováno pro Creator 5 / 5 Pro)",
-        "Set target": "Stanovte cíl",
+        "Set temperature": "Nastavit teplotu",
+        "Heat": "Ohřát",
         "Set up your first printer": "Nastavte svou první tiskárnu",
-        "Setting light…": "Nastavení světla…",
+        "Setting light…": "Přepínání osvětlení…",
         "Settings": "Nastavení",
         "Settings are unavailable.": "Nastavení nejsou dostupná.",
         "Show file previews": "Zobrazit náhledy souborů",
@@ -7709,8 +8203,8 @@ TRANSLATIONS = {
         "Stored files": "Uložené soubory",
         "System theme": "Systémové téma",
         "Tab placement": "Umístění tabulátoru",
-        "Tan": "Tan",
-        "Target": "Cíl",
+        "Tan": "Světle hnědá",
+        "Target": "Cílová teplota",
         "Teal": "Šedozelená",
         "Temperature change over the last 5 minutes": "Změna teploty za posledních 5 minut",
         "Temperatures": "Teploty",
@@ -7750,7 +8244,7 @@ TRANSLATIONS = {
         "The printer must be idle.": "Tiskárna musí být nečinná.",
         "The printer rejected the HTTP request (code {code}).": "Tiskárna odmítla požadavek HTTP (kód {code}).",
         "The printer reported an active print. Check the printer before retrying.": "Tiskárna oznámila aktivní tisk. Před dalším pokusem zkontrolujte tiskárnu.",
-        "The printer requires homing before manual movement.": "Tiskárna vyžaduje před ručním přesunem návrat do výchozí polohy.",
+        "The printer requires homing before manual movement.": "Před ručním pohybem vraťte osy do výchozí polohy.",
         "The printer response is too large": "Odezva tiskárny je příliš velká",
         "The printer returned an invalid file list.": "Tiskárna vrátila neplatný seznam souborů.",
         "The printer returned invalid HTTP data.": "Tiskárna vrátila neplatná data HTTP.",
@@ -7769,8 +8263,8 @@ TRANSLATIONS = {
         "Timer {minutes} min": "Časovač {minutes} min",
         "Total pages: {count}": "Celkový počet stran: {count}",
         "Totals": "Celkem",
-        "Transport: {transport}": "Doprava: {transport}",
-        "Travel limit": "Cestovní limit",
+        "Transport: {transport}": "Protokol: {transport}",
+        "Travel limit": "Limit pojezdu osy",
         "Trend unavailable": "Trend nedostupný",
         "Unavailable": "Nedostupné",
         "Unexpected response from the printer": "Neočekávaná odezva tiskárny",
@@ -7799,7 +8293,7 @@ TRANSLATIONS = {
         "Waiting for Home to finish…": "Čeká se na nastavení výchozí polohy…",
         "Waiting for job status": "Čekání na stav úlohy",
         "Waiting for printer…": "Čekání na tiskárnu…",
-        "Waiting for readings": "Čekání na čtení",
+        "Waiting for readings": "Čekání na naměřené hodnoty",
         "Waiting for temperature readings": "Čekání na odečty teploty",
         "Waiting for the printer to confirm calibration.": "Čekání, až tiskárna potvrdí kalibraci.",
         "Waiting for the printer…": "Čekání na tiskárnu…",
@@ -7815,6 +8309,15 @@ TRANSLATIONS = {
         "{time} left": "Zbývá {time}",
     },
     "de": {
+        "While this tab is open": "Solange dieser Tab geöffnet ist",
+        "Only during an active print": "Nur bei einem aktiven Druckauftrag",
+        "Waiting for part removal": "Wartet auf Entnahme des Druckteils",
+        "Wait for part removal": "Auf Entnahme des Druckteils warten",
+        "Bed is clear": "Druckbett ist frei",
+        "Chart layout": "Diagrammlayout",
+        "Shared scale": "Gemeinsame Skala",
+        "Separate scales": "Getrennte Skalen",
+        "Select at least one temperature line.": "Wählen Sie mindestens eine Temperaturkurve aus.",
         " · Total print time: {time}": " · Gesamtdruckzeit: {time}",
         "0 min": "0 Min",
         "1 mm": "1 mm",
@@ -7836,23 +8339,24 @@ TRANSLATIONS = {
         "Allow access to the printer, then reload the plugin.": "Erlauben Sie den Zugriff auf den Drucker und laden Sie dann das Plugin neu.",
         "Another print source is being read.": "Eine andere Druckquelle wird gelesen.",
         "Appearance": "Aussehen",
-        "Apply": "Bewerben",
+        "Apply": "Anwenden",
         "Attention": "Achtung",
         "Authenticated readings: {availability}": "Authentifizierte Messwerte: {availability}",
         "Auto shutdown": "Automatische Abschaltung",
         "Axes": "Achsen",
         "Axes busy": "Achsen beschäftigt",
         "Axis movement step": "Achsenbewegungsschritt",
+        "B": "Bett",
         "Basic readings received. CheckCode could not be verified.": "Grundlegende Messwerte erhalten. CheckCode konnte nicht verifiziert werden.",
         "Bed": "Druckbett",
         "Bed Target": "Druckbett-Solltemperatur",
-        "Bed Z": "Bett Z",
+        "Bed Z": "Z-Achse des Druckbetts",
         "Bed leveling": "Druckbettnivellierung",
         "Black": "Schwarz",
         "Blue": "Blau",
         "Brown": "Braun",
         "Browse files": "Dateien durchsuchen",
-        "Build volume": "Volumen erstellen",
+        "Build volume": "Bauvolumen",
         "Busy": "Beschäftigt",
         "Calibrating": "Kalibrieren",
         "Calibration": "Kalibrierung",
@@ -7868,10 +8372,10 @@ TRANSLATIONS = {
         "Cancel": "Abbrechen",
         "Cancel print?": "Druck abbrechen?",
         "Canceled": "Abgesagt",
-        "Canceling": "Stornieren",
+        "Canceling": "Wird abgebrochen",
         "Card size": "Kartengröße",
-        "Chamber": "Kammer",
-        "Chamber light": "Kammerlicht",
+        "Chamber": "Druckkammer",
+        "Chamber light": "Druckkammerbeleuchtung",
         "Chart nozzle": "Diagrammdüse",
         "Chart of actual and target temperatures for the nozzle and bed": "Diagramm der Ist- und Zieltemperaturen für Düse und Bett",
         "Check connection": "Verbindung prüfen",
@@ -7895,12 +8399,12 @@ TRANSLATIONS = {
         "Choose a material and color supported by this printer.": "Wählen Sie ein Material und eine Farbe, die von diesem Drucker unterstützt werden.",
         "Choose a nonempty print file no larger than 128 MB.": "Wählen Sie eine nicht leere Druckdatei, die nicht größer als 128 MB ist.",
         "Choose a print file no larger than 128 MB.": "Wählen Sie eine Druckdatei, die nicht größer als 128 MB ist.",
-        "Choose a sliced .3mf with one plate and filament information.": "Wählen Sie ein geschnittenes .3mf mit einer Platte und Filamentinformationen.",
-        "Choose a sliced .3mf with one plate.": "Wählen Sie ein geschnittenes .3mf mit einem Teller.",
+        "Choose a sliced .3mf with one plate and filament information.": "Wählen Sie eine .3mf-Datei mit einer geslicten Druckplatte und Filamentinformationen.",
+        "Choose a sliced .3mf with one plate.": "Wählen Sie eine .3mf-Datei mit genau einer geslicten Druckplatte.",
         "Choose a text .gcode file or a sliced .3mf.": "Wählen Sie eine Text-.gcode-Datei oder eine segmentierte .3mf-Datei.",
         "Choose delay…": "Verzögerung wählen…",
         "Choose material": "Material auswählen",
-        "Choose the original .3mf with one sliced plate and the same file name.": "Wählen Sie das ursprüngliche .3mf mit einer geschnittenen Platte und demselben Dateinamen.",
+        "Choose the original .3mf with one sliced plate and the same file name.": "Wählen Sie die originale .3mf-Datei mit genau einer geslicten Druckplatte und demselben Dateinamen.",
         "Choose the original sliced .3mf for this Creator file.": "Wählen Sie das ursprünglich geschnittene .3mf für diese Creator-Datei.",
         "Choose the original sliced .3mf.": "Wählen Sie das original geschnittene .3mf.",
         "Choose the sliced .3mf that matches the stored file name.": "Wählen Sie das geschnittene .3mf aus, das dem gespeicherten Dateinamen entspricht.",
@@ -7908,7 +8412,7 @@ TRANSLATIONS = {
         "Clear filters": "Filter löschen",
         "Close": "Schließen",
         "Closed": "Geschlossen",
-        "Collecting readings…": "Messwerte sammeln…",
+        "Collecting readings…": "Messwerte werden erfasst…",
         "Color": "Farbe",
         "Color differs": "Farbe weicht ab",
         "Command accepted. The printer has not confirmed the change.": "Befehl angenommen. Der Drucker hat die Änderung nicht bestätigt.",
@@ -7977,7 +8481,7 @@ TRANSLATIONS = {
         "Empty camera stream": "Leerer Kamerastream",
         "Enable LAN-only mode on the printer.": "Aktivieren Sie den Nur-LAN-Modus auf dem Drucker.",
         "Ended: {time}": "Beendet: {time}",
-        "Endstops: {state}": "Endanschläge: {state}",
+        "Endstops: {state}": "Endschalter: {state}",
         "Enlarge camera": "Kamera vergrößern",
         "Enter a local IPv4 address for the printer.": "Geben Sie eine lokale IPv4-Adresse für den Drucker ein.",
         "Enter a page number": "Geben Sie eine Seitenzahl ein",
@@ -8005,7 +8509,6 @@ TRANSLATIONS = {
         "Find printers": "Drucker finden",
         "Finish": "Fertig",
         "Finish ≈ {time}": "Ende ≈ {time}",
-        "Finished cleanly": "Sauber verarbeitet",
         "Finished. Printer ready.": "Fertig. Drucker bereit.",
         "Firmware": "Firmware",
         "FlashForge Device Tab is shutting down.": "FlashForge Device Tab wird heruntergefahren.",
@@ -8015,13 +8518,13 @@ TRANSLATIONS = {
         "Heat nozzle to 180 °C": "Düse auf 180 °C erwärmen",
         "Heat off": "Heizung aus",
         "Heat the nozzle to at least 180 °C.": "Erhitzen Sie die Düse auf mindestens 180 °C.",
-        "Heating": "Heizung",
-        "Heating nozzles: {count}": "Heizdüsen: {count}",
+        "Heating": "Aufheizen",
+        "Heating nozzles: {count}": "Aufheizende Düsen: {count}",
         "History": "Verlauf",
         "Home": "Referenzfahrt",
         "Home all axes": "Alle Achsen referenzieren",
         "Home required": "Referenzfahrt erforderlich",
-        "Home sent. Waiting for the printer to confirm completion.": "Nach Hause geschickt. Warten auf die Bestätigung des Abschlusses durch den Drucker.",
+        "Home sent. Waiting for the printer to confirm completion.": "Referenzfahrt angefordert. Warten auf die Bestätigung des Druckers.",
         "Homing…": "Referenzfahrt…",
         "Host notifications": "Host-Benachrichtigungen",
         "IPv4 address": "IPv4-Adresse",
@@ -8044,9 +8547,9 @@ TRANSLATIONS = {
         "Invalid printer list.": "Ungültige Druckerliste.",
         "Invalid request.": "Ungültige Anfrage.",
         "Invalid slice information.": "Ungültige Slice-Informationen.",
-        "Job details": "Jobdetails",
-        "Job status unavailable": "Auftragsstatus nicht verfügbar",
-        "Jobs": "Jobs",
+        "Job details": "Druckauftragsdetails",
+        "Job status unavailable": "Druckauftragsstatus nicht verfügbar",
+        "Jobs": "Druckaufträge",
         "Large": "Groß",
         "Last completed": "Zuletzt abgeschlossen",
         "Last reading: {seconds} s ago": "Letzter Messwert vor {seconds} s",
@@ -8090,6 +8593,7 @@ TRANSLATIONS = {
         "Move sent to the printer.": "Verschieben an den Drucker gesendet.",
         "Move up": "Nach oben bewegen",
         "Moving…": "Umzug…",
+        "N": "Düse",
         "Name": "Name",
         "Needs Attention": "Benötigt Aufmerksamkeit",
         "Network discovery unavailable. Enter the printer address manually.": "Netzwerkerkennung nicht verfügbar. Geben Sie die Druckeradresse manuell ein.",
@@ -8101,7 +8605,7 @@ TRANSLATIONS = {
         "No idle printers.": "Keine inaktiven Drucker.",
         "No loaded slot matches": "Keine geladenen Slot-Übereinstimmungen",
         "No matching files": "Keine passenden Dateien",
-        "No matching jobs.": "Keine passenden Jobs.",
+        "No matching jobs.": "Keine passenden Druckaufträge.",
         "No new printers found.": "Keine neuen Drucker gefunden.",
         "No preview": "Keine Vorschau",
         "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.": "Noch keine Druckaufträge erfasst. Der Druckverlauf wird aufgezeichnet, während OrcaSlicer geöffnet ist.",
@@ -8117,7 +8621,7 @@ TRANSLATIONS = {
         "Nozzle": "Düse",
         "Nozzle Target": "Düsen-Solltemperatur",
         "Nozzle T{tool}": "Düse T{tool}",
-        "Nozzle Z": "Düse Z",
+        "Nozzle Z": "Z-Achse der Düse",
         "Nozzle {temperature} °C": "Düse {temperature} °C",
         "Nozzles": "Düsen",
         "Nozzles: {count}": "Düsen: {count}",
@@ -8125,7 +8629,7 @@ TRANSLATIONS = {
         "Offline for at least one minute": "Mindestens eine Minute offline",
         "On": "Ein",
         "One printer per line: address | CheckCode | name | serial number": "Ein Drucker pro Zeile: Adresse | CheckCode | Name | Seriennummer",
-        "Open": "Öffnen",
+        "Open": "Offen",
         "Open FlashForge": "Öffnen Sie FlashForge",
         "Open FlashForge Device Tab for a FlashForge printer profile from Speed Dial.": "Öffnen Sie FlashForge Device Tab für ein FlashForge-Druckerprofil über Speed Dial.",
         "Open FlashForge Device Tab for the current printer profile from Speed Dial.": "Öffnen Sie FlashForge Device Tab für das aktuelle Druckerprofil über Speed ​​Dial.",
@@ -8138,11 +8642,11 @@ TRANSLATIONS = {
         "Orange": "Orange",
         "OrcaSlicer is sending a print job. Monitoring will resume when the transfer is complete.": "OrcaSlicer sendet einen Druckauftrag. Die Überwachung wird wieder aufgenommen, sobald die Übertragung abgeschlossen ist.",
         "OrcaSlicer is sending a print job. Try again when it finishes.": "OrcaSlicer sendet einen Druckauftrag. Versuchen Sie es erneut, wenn der Vorgang abgeschlossen ist.",
-        "Original sliced .3mf": "Original geschnittenes .3mf",
+        "Original sliced .3mf": "Originale geslicte .3mf-Datei",
         "Other nozzles": "Andere Düsen",
         "Page number": "Seitenzahl",
         "Part Cooling Fan": "Bauteillüfter",
-        "Part fan": "Teilventilator",
+        "Part fan": "Bauteillüfter",
         "Pause": "Pause",
         "Paused": "Angehalten",
         "Paused, disconnected or reporting a problem": "Angehalten, getrennt oder ein Problem gemeldet",
@@ -8176,6 +8680,7 @@ TRANSLATIONS = {
         "Print speed": "Druckgeschwindigkeit",
         "Print started · {file}": "Druck gestartet · {file}",
         "Print stored file": "Gespeicherte Datei drucken",
+        "Print success rate": "Erfolgsquote",
         "Print time": "Druckzeit",
         "Print time: {time}": "Druckzeit: {time}",
         "Printer": "Drucker",
@@ -8184,7 +8689,7 @@ TRANSLATIONS = {
         "Printer Readings": "Druckermesswerte",
         "Printer accepted the command.": "Drucker hat den Befehl akzeptiert.",
         "Printer accepted the command. Axis limits could not be checked.": "Drucker akzeptierte den Befehl. Achsengrenzen konnten nicht überprüft werden.",
-        "Printer camera feed": "Druckerkamera-Feed",
+        "Printer camera feed": "Bild der Druckerkamera",
         "Printer confirmed the nozzle target.": "Der Drucker bestätigte das Düsenziel.",
         "Printer confirmed the shutdown timer setting.": "Der Drucker hat die Einstellung des Abschalttimers bestätigt.",
         "Printer confirmed {command} · {state}": "Drucker bestätigt {command} · {state}",
@@ -8202,7 +8707,7 @@ TRANSLATIONS = {
         "Printer has not confirmed the nozzle target. Check Printer Readings.": "Der Drucker hat das Düsenziel nicht bestätigt. Überprüfen Sie die Druckerwerte.",
         "Printer jobs": "Druckeraufträge",
         "Printer must be idle.": "Der Drucker muss im Leerlauf sein.",
-        "Printer must be idle. Wait for movement or Home to finish.": "Der Drucker muss im Leerlauf sein. Warten Sie, bis die Bewegung oder die Home-Taste beendet ist.",
+        "Printer must be idle. Wait for movement or Home to finish.": "Der Drucker muss im Leerlauf sein. Warten Sie, bis die Bewegung oder die Referenzfahrt abgeschlossen ist.",
         "Printer must be idle. {reason}": "Der Drucker muss im Leerlauf sein. {reason}",
         "Printer rejected the selected file.": "Der Drucker hat die ausgewählte Datei abgelehnt.",
         "Printer rejected {command}.": "Drucker abgelehnt {command}.",
@@ -8218,7 +8723,7 @@ TRANSLATIONS = {
         "Profile changed": "Profil geändert",
         "Purple": "Lila",
         "Range": "Reichweite",
-        "Reading materials…": "Lesematerialien…",
+        "Reading materials…": "Materialdaten werden gelesen…",
         "Reading printer status…": "Druckerstatus wird gelesen…",
         "Readings delayed": "Messwerte verzögert",
         "Readings unavailable": "Messwerte nicht verfügbar",
@@ -8229,9 +8734,9 @@ TRANSLATIONS = {
         "Refresh": "Aktualisieren",
         "Refresh the Creator printer's file list first.": "Aktualisieren Sie zuerst die Dateiliste des Creator-Druckers.",
         "Refresh the file list and check the loaded materials.": "Aktualisieren Sie die Dateiliste und überprüfen Sie die geladenen Materialien.",
-        "Release motors": "Motoren freigeben",
+        "Release motors": "Motoren entriegeln",
         "Remove": "Entfernen",
-        "Replace Printer tab": "Ersetzen Sie die Registerkarte „Drucker“.",
+        "Replace Printer tab": "Inhalt des Drucker-Tabs ersetzen",
         "Request failed.": "Anfrage fehlgeschlagen.",
         "Restored the printer's original web page.": "Die ursprüngliche Webseite des Druckers wurde wiederhergestellt.",
         "Result": "Ergebnis",
@@ -8269,9 +8774,10 @@ TRANSLATIONS = {
         "Serial": "Seriell",
         "Serial number": "Seriennummer",
         "Serial number (required for Creator 5 / 5 Pro)": "Seriennummer (erforderlich für Creator 5 / 5 Pro)",
-        "Set target": "Ziel festlegen",
+        "Set temperature": "Solltemperatur einstellen",
+        "Heat": "Heizen",
         "Set up your first printer": "Richten Sie Ihren ersten Drucker ein",
-        "Setting light…": "Licht einstellen…",
+        "Setting light…": "Beleuchtung wird umgeschaltet…",
         "Settings": "Einstellungen",
         "Settings are unavailable.": "Einstellungen sind nicht verfügbar.",
         "Show file previews": "Dateivorschau anzeigen",
@@ -8290,7 +8796,7 @@ TRANSLATIONS = {
         "System theme": "Systemthema",
         "Tab placement": "Tab-Platzierung",
         "Tan": "Hellbraun",
-        "Target": "Ziel",
+        "Target": "Solltemperatur",
         "Teal": "Blaugrün",
         "Temperature change over the last 5 minutes": "Temperaturänderung in den letzten 5 Minuten",
         "Temperatures": "Temperaturen",
@@ -8330,7 +8836,7 @@ TRANSLATIONS = {
         "The printer must be idle.": "Der Drucker muss im Leerlauf sein.",
         "The printer rejected the HTTP request (code {code}).": "Der Drucker hat die HTTP-Anfrage abgelehnt (Code {code}).",
         "The printer reported an active print. Check the printer before retrying.": "Der Drucker hat einen aktiven Druck gemeldet. Überprüfen Sie den Drucker, bevor Sie es erneut versuchen.",
-        "The printer requires homing before manual movement.": "Der Drucker erfordert vor der manuellen Bewegung eine Referenzfahrt.",
+        "The printer requires homing before manual movement.": "Führen Sie vor manuellen Bewegungen eine Referenzfahrt durch.",
         "The printer response is too large": "Die Druckerantwort ist zu groß",
         "The printer returned an invalid file list.": "Der Drucker hat eine Liste ungültiger Dateien zurückgegeben.",
         "The printer returned invalid HTTP data.": "Der Drucker hat ungültige HTTP-Daten zurückgegeben.",
@@ -8349,8 +8855,8 @@ TRANSLATIONS = {
         "Timer {minutes} min": "Timer {minutes} min",
         "Total pages: {count}": "Gesamtseiten: {count}",
         "Totals": "Gesamtsummen",
-        "Transport: {transport}": "Transport: {transport}",
-        "Travel limit": "Reisebegrenzung",
+        "Transport: {transport}": "Protokoll: {transport}",
+        "Travel limit": "Verfahrgrenze der Achse",
         "Trend unavailable": "Trend nicht verfügbar",
         "Unavailable": "Nicht verfügbar",
         "Unexpected response from the printer": "Unerwartete Antwort vom Drucker",
@@ -8395,6 +8901,15 @@ TRANSLATIONS = {
         "{time} left": "Noch {time}",
     },
     "es": {
+        "While this tab is open": "Mientras esta pestaña esté abierta",
+        "Only during an active print": "Solo con una impresión activa",
+        "Waiting for part removal": "Esperando retirar la pieza",
+        "Wait for part removal": "Esperar a que se retire la pieza",
+        "Bed is clear": "La cama está libre",
+        "Chart layout": "Diseño del gráfico",
+        "Shared scale": "Escala común",
+        "Separate scales": "Escalas independientes",
+        "Select at least one temperature line.": "Selecciona al menos una línea de temperatura.",
         " · Total print time: {time}": " · Tiempo total de impresión: {time}",
         "0 min": "0 minutos",
         "1 mm": "1mm",
@@ -8423,16 +8938,17 @@ TRANSLATIONS = {
         "Axes": "Ejes",
         "Axes busy": "Ejes ocupados",
         "Axis movement step": "Paso de movimiento del eje",
+        "B": "Cama",
         "Basic readings received. CheckCode could not be verified.": "Lecturas básicas recibidas. No se pudo verificar CheckCode.",
         "Bed": "Cama",
         "Bed Target": "Temperatura objetivo de la cama",
-        "Bed Z": "Cama Z",
+        "Bed Z": "Eje Z de la cama",
         "Bed leveling": "Nivelación de Cama",
         "Black": "Negro",
         "Blue": "Azul",
         "Brown": "Marrón",
         "Browse files": "Explorar archivos",
-        "Build volume": "Volumen de construcción",
+        "Build volume": "Volumen de impresión",
         "Busy": "Ocupado",
         "Calibrating": "Calibración",
         "Calibration": "Calibración",
@@ -8448,10 +8964,10 @@ TRANSLATIONS = {
         "Cancel": "Cancelar",
         "Cancel print?": "¿Cancelar impresión?",
         "Canceled": "Cancelado",
-        "Canceling": "Cancelación",
+        "Canceling": "Cancelando",
         "Card size": "Tamaño de tarjeta",
-        "Chamber": "Cámara",
-        "Chamber light": "Luz de la cámara",
+        "Chamber": "Cámara de impresión",
+        "Chamber light": "Luz de la cámara de impresión",
         "Chart nozzle": "Boquilla para gráficos",
         "Chart of actual and target temperatures for the nozzle and bed": "Gráfico de temperaturas reales y objetivo para la boquilla y el lecho",
         "Check connection": "Comprobar conexión",
@@ -8475,12 +8991,12 @@ TRANSLATIONS = {
         "Choose a material and color supported by this printer.": "Elija un material y color admitidos por esta impresora.",
         "Choose a nonempty print file no larger than 128 MB.": "Elija un archivo de impresión que no esté vacío y no supere los 128 MB.",
         "Choose a print file no larger than 128 MB.": "Elija un archivo de impresión que no supere los 128 MB.",
-        "Choose a sliced .3mf with one plate and filament information.": "Elija un .3mf en rodajas con una placa e información sobre el filamento.",
-        "Choose a sliced .3mf with one plate.": "Elija un .3mf en rodajas con un plato.",
+        "Choose a sliced .3mf with one plate and filament information.": "Selecciona un archivo .3mf con una sola placa laminada y datos del filamento.",
+        "Choose a sliced .3mf with one plate.": "Selecciona un archivo .3mf con una sola placa de impresión ya laminada.",
         "Choose a text .gcode file or a sliced .3mf.": "Elija un archivo .gcode de texto o un archivo .3mf cortado.",
         "Choose delay…": "Elige retraso…",
         "Choose material": "Elige material",
-        "Choose the original .3mf with one sliced plate and the same file name.": "Elija el .3mf original con un plato cortado y el mismo nombre de archivo.",
+        "Choose the original .3mf with one sliced plate and the same file name.": "Selecciona el archivo .3mf original con una sola placa laminada y el mismo nombre de archivo.",
         "Choose the original sliced .3mf for this Creator file.": "Elija el .3mf cortado original para este archivo Creator.",
         "Choose the original sliced .3mf.": "Elija el .3mf en rodajas original.",
         "Choose the sliced .3mf that matches the stored file name.": "Elija el .3mf cortado que coincida con el nombre del archivo almacenado.",
@@ -8488,7 +9004,7 @@ TRANSLATIONS = {
         "Clear filters": "Borrar filtros",
         "Close": "Cerrar",
         "Closed": "Cerrado",
-        "Collecting readings…": "Recopilación de lecturas…",
+        "Collecting readings…": "Recopilando mediciones…",
         "Color": "Color",
         "Color differs": "El color difiere",
         "Command accepted. The printer has not confirmed the change.": "Comando aceptado. La imprenta no ha confirmado el cambio.",
@@ -8557,7 +9073,7 @@ TRANSLATIONS = {
         "Empty camera stream": "Transmisión de cámara vacía",
         "Enable LAN-only mode on the printer.": "Habilite el modo solo LAN en la impresora.",
         "Ended: {time}": "Finalizó: {time}",
-        "Endstops: {state}": "Topes finales: {state}",
+        "Endstops: {state}": "Finales de carrera: {state}",
         "Enlarge camera": "Ampliar cámara",
         "Enter a local IPv4 address for the printer.": "Introduzca una dirección IPv4 local para la impresora.",
         "Enter a page number": "Introduzca un número de página",
@@ -8585,7 +9101,6 @@ TRANSLATIONS = {
         "Find printers": "Buscar impresoras",
         "Finish": "Finalizar",
         "Finish ≈ {time}": "Acabado ≈ {time}",
-        "Finished cleanly": "Terminado limpiamente",
         "Finished. Printer ready.": "Terminado. Impresora lista.",
         "Firmware": "Firmware",
         "FlashForge Device Tab is shutting down.": "FlashForge Device Tab se está cerrando.",
@@ -8595,13 +9110,13 @@ TRANSLATIONS = {
         "Heat nozzle to 180 °C": "Calentar la boquilla a 180 °C",
         "Heat off": "Calor apagado",
         "Heat the nozzle to at least 180 °C.": "Calentar la boquilla al menos a 180 °C.",
-        "Heating": "Calefacción",
-        "Heating nozzles: {count}": "Boquillas calefactoras: {count}",
+        "Heating": "Calentando",
+        "Heating nozzles: {count}": "Boquillas en calentamiento: {count}",
         "History": "Historial",
         "Home": "Llevar al origen",
         "Home all axes": "Llevar todos los ejes al origen",
         "Home required": "Es necesario llevar los ejes al origen",
-        "Home sent. Waiting for the printer to confirm completion.": "Envío a domicilio. Esperando a que la impresora confirme la finalización.",
+        "Home sent. Waiting for the printer to confirm completion.": "Se envió la orden de volver al origen. Esperando la confirmación de la impresora.",
         "Homing…": "Regresando…",
         "Host notifications": "Notificaciones del anfitrión",
         "IPv4 address": "Dirección IPv4",
@@ -8624,9 +9139,9 @@ TRANSLATIONS = {
         "Invalid printer list.": "Lista de impresoras no válidas.",
         "Invalid request.": "Solicitud no válida.",
         "Invalid slice information.": "Información de sector no válida.",
-        "Job details": "Detalles del trabajo",
-        "Job status unavailable": "Estado del trabajo no disponible",
-        "Jobs": "Empleos",
+        "Job details": "Detalles del trabajo de impresión",
+        "Job status unavailable": "Estado del trabajo de impresión no disponible",
+        "Jobs": "Trabajos de impresión",
         "Large": "Grande",
         "Last completed": "Último completado",
         "Last reading: {seconds} s ago": "Última lectura: hace {seconds} s",
@@ -8670,6 +9185,7 @@ TRANSLATIONS = {
         "Move sent to the printer.": "Mover enviado a la impresora.",
         "Move up": "Subir",
         "Moving…": "Moviéndose…",
+        "N": "Boq.",
         "Name": "Nombre",
         "Needs Attention": "Necesita Atención",
         "Network discovery unavailable. Enter the printer address manually.": "Descubrimiento de red no disponible. Introduzca la dirección de la impresora manualmente.",
@@ -8681,7 +9197,7 @@ TRANSLATIONS = {
         "No idle printers.": "No hay impresoras inactivas.",
         "No loaded slot matches": "No hay coincidencias de tragamonedas cargadas",
         "No matching files": "No hay archivos coincidentes",
-        "No matching jobs.": "No hay trabajos coincidentes.",
+        "No matching jobs.": "No hay trabajos de impresión que coincidan.",
         "No new printers found.": "No se encontraron nuevas impresoras.",
         "No preview": "Sin vista previa",
         "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.": "Aún no se han registrado trabajos de impresión. El historial de impresión se registra mientras OrcaSlicer está abierto.",
@@ -8697,7 +9213,7 @@ TRANSLATIONS = {
         "Nozzle": "Boquilla",
         "Nozzle Target": "Temperatura objetivo de la boquilla",
         "Nozzle T{tool}": "Boquilla T{tool}",
-        "Nozzle Z": "Boquilla Z",
+        "Nozzle Z": "Eje Z de la boquilla",
         "Nozzle {temperature} °C": "Boquilla {temperature} °C",
         "Nozzles": "Boquillas",
         "Nozzles: {count}": "Boquillas: {count}",
@@ -8718,11 +9234,11 @@ TRANSLATIONS = {
         "Orange": "Naranja",
         "OrcaSlicer is sending a print job. Monitoring will resume when the transfer is complete.": "OrcaSlicer está enviando un trabajo de impresión. La supervisión se reanudará cuando se complete la transferencia.",
         "OrcaSlicer is sending a print job. Try again when it finishes.": "OrcaSlicer está enviando un trabajo de impresión. Inténtalo de nuevo cuando termine.",
-        "Original sliced .3mf": "Rebanado original .3mf",
+        "Original sliced .3mf": "Archivo .3mf laminado original",
         "Other nozzles": "Otras boquillas",
         "Page number": "Número de página",
         "Part Cooling Fan": "Ventilador de capa",
-        "Part fan": "Ventilador parcial",
+        "Part fan": "Ventilador de capa",
         "Pause": "Pausa",
         "Paused": "En pausa",
         "Paused, disconnected or reporting a problem": "Pausado, desconectado o reportando un problema",
@@ -8756,6 +9272,7 @@ TRANSLATIONS = {
         "Print speed": "Velocidad de impresión",
         "Print started · {file}": "Impresión iniciada · {file}",
         "Print stored file": "Imprimir archivo almacenado",
+        "Print success rate": "Tasa de éxito",
         "Print time": "Hora de impresión",
         "Print time: {time}": "Hora de impresión: {time}",
         "Printer": "Impresora",
@@ -8764,7 +9281,7 @@ TRANSLATIONS = {
         "Printer Readings": "Lecturas de la impresora",
         "Printer accepted the command.": "La impresora aceptó el comando.",
         "Printer accepted the command. Axis limits could not be checked.": "La impresora aceptó el comando. No se pudieron comprobar los límites del eje.",
-        "Printer camera feed": "Alimentación de la cámara de la impresora",
+        "Printer camera feed": "Vídeo de la cámara de la impresora",
         "Printer confirmed the nozzle target.": "La impresora confirmó el objetivo de la boquilla.",
         "Printer confirmed the shutdown timer setting.": "La impresora confirmó la configuración del temporizador de apagado.",
         "Printer confirmed {command} · {state}": "Impresora confirmada {command} · {state}",
@@ -8782,7 +9299,7 @@ TRANSLATIONS = {
         "Printer has not confirmed the nozzle target. Check Printer Readings.": "La impresora no ha confirmado el objetivo de la boquilla. Verifique las lecturas de la impresora.",
         "Printer jobs": "Trabajos de impresora",
         "Printer must be idle.": "La impresora debe estar inactiva.",
-        "Printer must be idle. Wait for movement or Home to finish.": "La impresora debe estar inactiva. Espere a que finalice el movimiento o Inicio.",
+        "Printer must be idle. Wait for movement or Home to finish.": "La impresora debe estar inactiva. Espera a que termine el movimiento o el regreso al origen.",
         "Printer must be idle. {reason}": "La impresora debe estar inactiva. {reason}",
         "Printer rejected the selected file.": "La impresora rechazó el archivo seleccionado.",
         "Printer rejected {command}.": "Impresora rechazada {command}.",
@@ -8798,7 +9315,7 @@ TRANSLATIONS = {
         "Profile changed": "Perfil cambiado",
         "Purple": "Púrpura",
         "Range": "Rango",
-        "Reading materials…": "Materiales de lectura…",
+        "Reading materials…": "Leyendo los datos de los materiales…",
         "Reading printer status…": "Leyendo el estado de la impresora…",
         "Readings delayed": "Lecturas retrasadas",
         "Readings unavailable": "Lecturas no disponibles",
@@ -8809,9 +9326,9 @@ TRANSLATIONS = {
         "Refresh": "Actualizar",
         "Refresh the Creator printer's file list first.": "Primero actualice la lista de archivos de la impresora Creator.",
         "Refresh the file list and check the loaded materials.": "Actualice la lista de archivos y verifique los materiales cargados.",
-        "Release motors": "Liberar motores",
+        "Release motors": "Desbloquear motores",
         "Remove": "Eliminar",
-        "Replace Printer tab": "Reemplazar pestaña Impresora",
+        "Replace Printer tab": "Sustituir el contenido de la pestaña Impresora",
         "Request failed.": "La solicitud falló.",
         "Restored the printer's original web page.": "Restauró la página web original de la impresora.",
         "Result": "Resultado",
@@ -8849,9 +9366,10 @@ TRANSLATIONS = {
         "Serial": "Serie",
         "Serial number": "Número de serie",
         "Serial number (required for Creator 5 / 5 Pro)": "Número de serie (obligatorio para Creator 5 / 5 Pro)",
-        "Set target": "Establecer objetivo",
+        "Set temperature": "Fijar temperatura",
+        "Heat": "Calentar",
         "Set up your first printer": "Configure su primera impresora",
-        "Setting light…": "Configuración de la luz…",
+        "Setting light…": "Cambiando la iluminación…",
         "Settings": "Ajustes",
         "Settings are unavailable.": "Las configuraciones no están disponibles.",
         "Show file previews": "Mostrar vistas previas de archivos",
@@ -8869,8 +9387,8 @@ TRANSLATIONS = {
         "Stored files": "Archivos almacenados",
         "System theme": "Tema del sistema",
         "Tab placement": "Colocación de pestañas",
-        "Tan": "Bronceado",
-        "Target": "Objetivo",
+        "Tan": "Beige oscuro",
+        "Target": "Temperatura objetivo",
         "Teal": "Verde azulado",
         "Temperature change over the last 5 minutes": "Cambio de temperatura en los últimos 5 minutos",
         "Temperatures": "Temperaturas",
@@ -8910,7 +9428,7 @@ TRANSLATIONS = {
         "The printer must be idle.": "La impresora debe estar inactiva.",
         "The printer rejected the HTTP request (code {code}).": "La impresora rechazó la solicitud HTTP (código {code}).",
         "The printer reported an active print. Check the printer before retrying.": "La impresora informó una impresión activa. Verifique la impresora antes de volver a intentarlo.",
-        "The printer requires homing before manual movement.": "La impresora requiere referencia antes del movimiento manual.",
+        "The printer requires homing before manual movement.": "Lleva los ejes al origen antes de moverlos manualmente.",
         "The printer response is too large": "La respuesta de la impresora es demasiado grande",
         "The printer returned an invalid file list.": "La impresora devolvió una lista de archivos no válida.",
         "The printer returned invalid HTTP data.": "La impresora devolvió datos HTTP no válidos.",
@@ -8929,8 +9447,8 @@ TRANSLATIONS = {
         "Timer {minutes} min": "Temporizador {minutes} mín.",
         "Total pages: {count}": "Total de páginas: {count}",
         "Totals": "Totales",
-        "Transport: {transport}": "Transporte: {transport}",
-        "Travel limit": "Límite de viaje",
+        "Transport: {transport}": "Protocolo: {transport}",
+        "Travel limit": "Límite de recorrido del eje",
         "Trend unavailable": "Tendencia no disponible",
         "Unavailable": "No disponible",
         "Unexpected response from the printer": "Respuesta inesperada de la impresora",
@@ -8959,7 +9477,7 @@ TRANSLATIONS = {
         "Waiting for Home to finish…": "Esperando que los ejes lleguen al origen…",
         "Waiting for job status": "Esperando el estado del trabajo",
         "Waiting for printer…": "Esperando la impresora…",
-        "Waiting for readings": "Esperando lecturas",
+        "Waiting for readings": "Esperando las mediciones",
         "Waiting for temperature readings": "Esperando lecturas de temperatura",
         "Waiting for the printer to confirm calibration.": "Esperando a que la impresora confirme la calibración.",
         "Waiting for the printer…": "Esperando la impresora…",
@@ -8975,6 +9493,15 @@ TRANSLATIONS = {
         "{time} left": "Quedan {time}",
     },
     "eu": {
+        "While this tab is open": "Fitxa hau irekita dagoen bitartean",
+        "Only during an active print": "Inprimaketa aktiboan soilik",
+        "Waiting for part removal": "Pieza kentzeko zain",
+        "Wait for part removal": "Pieza kendu arte itxaron",
+        "Bed is clear": "Ohea libre dago",
+        "Chart layout": "Grafikoaren diseinua",
+        "Shared scale": "Eskala partekatua",
+        "Separate scales": "Eskala bereiziak",
+        "Select at least one temperature line.": "Hautatu gutxienez tenperatura-lerro bat.",
         " · Total print time: {time}": " · Inprimatze-denbora osoa: {time}",
         "0 min": "0 min",
         "1 mm": "1 mm",
@@ -9003,16 +9530,17 @@ TRANSLATIONS = {
         "Axes": "Ardatzak",
         "Axes busy": "Ardatzak lanpetuta",
         "Axis movement step": "Ardatzaren mugimenduaren urratsa",
+        "B": "Ohea",
         "Basic readings received. CheckCode could not be verified.": "Jasotako oinarrizko irakurketak. Ezin izan da egiaztatu CheckCode.",
         "Bed": "Ohea",
-        "Bed Target": "Ohearen helburua",
-        "Bed Z": "Z ohea",
+        "Bed Target": "Ohearen helburuko tenperatura",
+        "Bed Z": "Ohearen Z ardatza",
         "Bed leveling": "Ohearen nibelatzea",
         "Black": "Beltza",
         "Blue": "Urdina",
         "Brown": "Marroia",
         "Browse files": "Arakatu fitxategiak",
-        "Build volume": "Eraiki bolumena",
+        "Build volume": "Inprimatze-bolumena",
         "Busy": "Lanpetuta",
         "Calibrating": "Kalibratzen",
         "Calibration": "Kalibrazioa",
@@ -9028,10 +9556,10 @@ TRANSLATIONS = {
         "Cancel": "Utzi",
         "Cancel print?": "Inprimatzea bertan behera utzi?",
         "Canceled": "Ezeztatuta",
-        "Canceling": "Baliogabetzea",
+        "Canceling": "Ezeztatzen",
         "Card size": "Txartelaren tamaina",
-        "Chamber": "Ganbera",
-        "Chamber light": "Ganberako argia",
+        "Chamber": "Inprimatze-ganbera",
+        "Chamber light": "Inprimatze-ganberako argia",
         "Chart nozzle": "Diagramako pita",
         "Chart of actual and target temperatures for the nozzle and bed": "Toberaren eta ohearen benetako eta helburuko tenperaturaren taula",
         "Check connection": "Egiaztatu konexioa",
@@ -9055,12 +9583,12 @@ TRANSLATIONS = {
         "Choose a material and color supported by this printer.": "Aukeratu inprimagailu honek onartzen duen materiala eta kolorea.",
         "Choose a nonempty print file no larger than 128 MB.": "Aukeratu 128 MB baino handiagoa ez den inprimatzeko fitxategi bat.",
         "Choose a print file no larger than 128 MB.": "Aukeratu 128 MB baino handiagoa ez den inprimatzeko fitxategi bat.",
-        "Choose a sliced .3mf with one plate and filament information.": "Aukeratu zatitutako .3mf plaka eta harizpien informazioarekin.",
-        "Choose a sliced .3mf with one plate.": "Aukeratu plater batekin zatitutako .3mf.",
+        "Choose a sliced .3mf with one plate and filament information.": "Hautatu geruzatutako plaka bakarra eta filamentuen informazioa dituen .3mf fitxategia.",
+        "Choose a sliced .3mf with one plate.": "Hautatu inprimatze-plaka geruzatu bakarra duen .3mf fitxategia.",
         "Choose a text .gcode file or a sliced .3mf.": "Aukeratu testu-.gcode fitxategi bat edo zatitutako .3mf.",
         "Choose delay…": "Aukeratu atzerapena…",
         "Choose material": "Aukeratu materiala",
-        "Choose the original .3mf with one sliced plate and the same file name.": "Aukeratu jatorrizko .3mf plater xerra batekin eta fitxategi-izen berarekin.",
+        "Choose the original .3mf with one sliced plate and the same file name.": "Hautatu izen bereko jatorrizko .3mf fitxategia, geruzatutako plaka bakarra duena.",
         "Choose the original sliced .3mf for this Creator file.": "Aukeratu xertatutako jatorrizko .3mf Sortzaile fitxategi honetarako.",
         "Choose the original sliced .3mf.": "Aukeratu zatitutako jatorrizko .3mf.",
         "Choose the sliced .3mf that matches the stored file name.": "Aukeratu gordetako fitxategi-izenarekin bat datorren zatitutako .3mf.",
@@ -9068,7 +9596,7 @@ TRANSLATIONS = {
         "Clear filters": "Garbitu iragazkiak",
         "Close": "Itxi",
         "Closed": "Itxita",
-        "Collecting readings…": "Irakurgaiak biltzen…",
+        "Collecting readings…": "Neurketak biltzen…",
         "Color": "Kolorea",
         "Color differs": "Kolorea desberdina da",
         "Command accepted. The printer has not confirmed the change.": "Komandoa onartu da. Inprimagailuak ez du aldaketa baieztatu.",
@@ -9137,7 +9665,7 @@ TRANSLATIONS = {
         "Empty camera stream": "Kamera korronte hutsa",
         "Enable LAN-only mode on the printer.": "Gaitu LAN soilik modua inprimagailuan.",
         "Ended: {time}": "Amaitu: {time}",
-        "Endstops: {state}": "Bukaerak: {state}",
+        "Endstops: {state}": "Ibilbide-amaierako etengailuak: {state}",
         "Enlarge camera": "Kamera handitu",
         "Enter a local IPv4 address for the printer.": "Sartu inprimagailurako tokiko IPv4 helbide bat.",
         "Enter a page number": "Sartu orrialde-zenbaki bat",
@@ -9165,7 +9693,6 @@ TRANSLATIONS = {
         "Find printers": "Bilatu inprimagailuak",
         "Finish": "Amaitu",
         "Finish ≈ {time}": "Amaitu ≈ {time}",
-        "Finished cleanly": "Garbi amaituta",
         "Finished. Printer ready.": "Amaitu. Inprimagailua prest.",
         "Firmware": "Firmwarea",
         "FlashForge Device Tab is shutting down.": "FlashForge Device Tab itzaltzen ari da.",
@@ -9175,13 +9702,13 @@ TRANSLATIONS = {
         "Heat nozzle to 180 °C": "Berotu pita 180 °C-ra",
         "Heat off": "Beroa itzali",
         "Heat the nozzle to at least 180 °C.": "Berotu pita gutxienez 180 °C-ra.",
-        "Heating": "Berokuntza",
-        "Heating nozzles: {count}": "Berokuntza-toberak: {count}",
+        "Heating": "Berotzen",
+        "Heating nozzles: {count}": "Berotzen ari diren pitak: {count}",
         "History": "Historia",
         "Home": "Hasierako posiziora",
         "Home all axes": "Eraman ardatz guztiak hasierako posiziora",
         "Home required": "Hasierako posiziora itzuli behar da",
-        "Home sent. Waiting for the printer to confirm completion.": "Etxera bidali da. Inprimagailuak amaitu dela berresteko zain.",
+        "Home sent. Waiting for the printer to confirm completion.": "Hasierako posiziora itzultzeko agindua bidali da. Inprimagailuaren baieztapenaren zain.",
         "Homing…": "Hasiera…",
         "Host notifications": "Ostalariaren jakinarazpenak",
         "IPv4 address": "IPv4 helbidea",
@@ -9204,9 +9731,9 @@ TRANSLATIONS = {
         "Invalid printer list.": "Inprimagailuen zerrenda baliogabea.",
         "Invalid request.": "Eskaera baliogabea.",
         "Invalid slice information.": "Xerraren informazio baliogabea.",
-        "Job details": "Lanpostuaren xehetasunak",
-        "Job status unavailable": "Lanaren egoera ez dago erabilgarri",
-        "Jobs": "Lanpostuak",
+        "Job details": "Inprimatze-lanaren xehetasunak",
+        "Job status unavailable": "Inprimatze-lanaren egoera ezin da ikusi",
+        "Jobs": "Inprimatze-lanak",
         "Large": "Handia",
         "Last completed": "Azken osatua",
         "Last reading: {seconds} s ago": "Azken irakurketa: duela {seconds} s",
@@ -9250,6 +9777,7 @@ TRANSLATIONS = {
         "Move sent to the printer.": "Mugitu bidalitako inprimagailura.",
         "Move up": "Mugitu gora",
         "Moving…": "Mugitzen…",
+        "N": "Pita",
         "Name": "Izena",
         "Needs Attention": "Arreta behar du",
         "Network discovery unavailable. Enter the printer address manually.": "Sarearen aurkikuntza ez dago erabilgarri. Sartu eskuz inprimagailuaren helbidea.",
@@ -9261,7 +9789,7 @@ TRANSLATIONS = {
         "No idle printers.": "Ez dago inaktibo inprimagailurik.",
         "No loaded slot matches": "Ez dago kargatutako zirrikitu bat-etortzerik",
         "No matching files": "Ez dago bat datorren fitxategirik",
-        "No matching jobs.": "Ez dago bat datorren lanik.",
+        "No matching jobs.": "Ez dago bat datorren inprimatze-lanik.",
         "No new printers found.": "Ez da inprimagailu berririk aurkitu.",
         "No preview": "Aurrebistarik ez",
         "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.": "Oraindik ez da inprimatze-lanik erregistratu. Inprimatze-historia OrcaSlicer irekita dagoen bitartean erregistratzen da.",
@@ -9275,9 +9803,9 @@ TRANSLATIONS = {
         "Not recorded": "Ez da erregistratu",
         "Notifications": "Jakinarazpenak",
         "Nozzle": "Pita",
-        "Nozzle Target": "Tobera Helburua",
+        "Nozzle Target": "Pitaren helburuko tenperatura",
         "Nozzle T{tool}": "Tobera T{tool}",
-        "Nozzle Z": "Tobera Z",
+        "Nozzle Z": "Pitaren Z ardatza",
         "Nozzle {temperature} °C": "Tobera {temperature} °C",
         "Nozzles": "Toberak",
         "Nozzles: {count}": "Toberak: {count}",
@@ -9285,7 +9813,7 @@ TRANSLATIONS = {
         "Offline for at least one minute": "Lineaz kanpo minutu batez gutxienez",
         "On": "Aktibatuta",
         "One printer per line: address | CheckCode | name | serial number": "Inprimagailu bat lerro bakoitzeko: helbidea | CheckCode | izena | serie zenbakia",
-        "Open": "Ireki",
+        "Open": "Irekita",
         "Open FlashForge": "Ireki FlashForge",
         "Open FlashForge Device Tab for a FlashForge printer profile from Speed Dial.": "Ireki FlashForge Device Tab FlashForge inprimagailu-profil baterako Markatze Abiarrean.",
         "Open FlashForge Device Tab for the current printer profile from Speed Dial.": "Ireki FlashForge Device Tab uneko inprimagailuaren profilerako Markaketa Abiarrekotik.",
@@ -9298,11 +9826,11 @@ TRANSLATIONS = {
         "Orange": "Laranja",
         "OrcaSlicer is sending a print job. Monitoring will resume when the transfer is complete.": "OrcaSlicer inprimatze-lan bat bidaltzen ari da. Kontrola transferentzia amaitzean berriro hasiko da.",
         "OrcaSlicer is sending a print job. Try again when it finishes.": "OrcaSlicer inprimatze-lan bat bidaltzen ari da. Saiatu berriro amaitzen denean.",
-        "Original sliced .3mf": "Jatorrizko .3mf xerratan",
+        "Original sliced .3mf": "Jatorrizko .3mf geruzatua",
         "Other nozzles": "Beste tober batzuk",
         "Page number": "Orri-zenbakia",
-        "Part Cooling Fan": "Zatiak Hozteko Fan",
-        "Part fan": "Zati-haizagailua",
+        "Part Cooling Fan": "Pieza hozteko haizagailua",
+        "Part fan": "Pieza-haizagailua",
         "Pause": "Pausa",
         "Paused": "Pausatuta",
         "Paused, disconnected or reporting a problem": "Pausatuta, deskonektatuta edo arazo baten berri ematen",
@@ -9336,6 +9864,7 @@ TRANSLATIONS = {
         "Print speed": "Inprimatzeko abiadura",
         "Print started · {file}": "Inprimaketa hasi da · {file}",
         "Print stored file": "Inprimatu gordetako fitxategia",
+        "Print success rate": "Arrakasta-tasa",
         "Print time": "Inprimatzeko ordua",
         "Print time: {time}": "Inprimatzeko ordua: {time}",
         "Printer": "Inprimagailua",
@@ -9344,7 +9873,7 @@ TRANSLATIONS = {
         "Printer Readings": "Inprimagailuaren irakurketak",
         "Printer accepted the command.": "Inprimagailuak komandoa onartu du.",
         "Printer accepted the command. Axis limits could not be checked.": "Inprimagailuak komandoa onartu du. Ardatzen mugak ezin izan dira egiaztatu.",
-        "Printer camera feed": "Inprimagailuaren kamera jarioa",
+        "Printer camera feed": "Inprimagailuaren kameraren irudia",
         "Printer confirmed the nozzle target.": "Inprimagailuak toberaren helburua berretsi du.",
         "Printer confirmed the shutdown timer setting.": "Inprimagailuak itzaltzeko tenporizadorearen ezarpena berretsi du.",
         "Printer confirmed {command} · {state}": "Inprimagailuak baieztatu du {command} · {state}",
@@ -9362,7 +9891,7 @@ TRANSLATIONS = {
         "Printer has not confirmed the nozzle target. Check Printer Readings.": "Inprimagailuak ez du toberaren xedea baieztatu. Egiaztatu inprimagailuaren irakurketak.",
         "Printer jobs": "Inprimagailu-lanak",
         "Printer must be idle.": "Inprimagailuak inaktibo egon behar du.",
-        "Printer must be idle. Wait for movement or Home to finish.": "Inprimagailuak inaktibo egon behar du. Itxaron mugimendua edo Hasiera amaitu arte.",
+        "Printer must be idle. Wait for movement or Home to finish.": "Inprimagailuak geldirik egon behar du. Itxaron mugimendua edo hasierako posiziora itzultzea amaitu arte.",
         "Printer must be idle. {reason}": "Inprimagailuak inaktibo egon behar du. {reason}",
         "Printer rejected the selected file.": "Inprimagailuak aukeratutako fitxategia baztertu du.",
         "Printer rejected {command}.": "Inprimagailuak baztertu du {command}.",
@@ -9378,7 +9907,7 @@ TRANSLATIONS = {
         "Profile changed": "Profila aldatu da",
         "Purple": "Morea",
         "Range": "Tartea",
-        "Reading materials…": "Irakurgaiak...",
+        "Reading materials…": "Materialen datuak irakurtzen…",
         "Reading printer status…": "Inprimagailuaren egoera irakurtzen…",
         "Readings delayed": "Irakurketak atzeratuta",
         "Readings unavailable": "Irakurgaiak ez daude erabilgarri",
@@ -9389,9 +9918,9 @@ TRANSLATIONS = {
         "Refresh": "Freskatu",
         "Refresh the Creator printer's file list first.": "Freskatu Creator inprimagailuaren fitxategien zerrenda lehenik.",
         "Refresh the file list and check the loaded materials.": "Freskatu fitxategien zerrenda eta egiaztatu kargatutako materialak.",
-        "Release motors": "Askatu motorrak",
+        "Release motors": "Desblokeatu motorrak",
         "Remove": "Kendu",
-        "Replace Printer tab": "Ordeztu Inprimagailua fitxa",
+        "Replace Printer tab": "Ordeztu Inprimagailua fitxaren edukia",
         "Request failed.": "Eskaerak huts egin du.",
         "Restored the printer's original web page.": "Inprimagailuaren jatorrizko web orria leheneratu da.",
         "Result": "Emaitza",
@@ -9429,9 +9958,10 @@ TRANSLATIONS = {
         "Serial": "Seriea",
         "Serial number": "Serie-zenbakia",
         "Serial number (required for Creator 5 / 5 Pro)": "Serie-zenbakia (beharrezkoa Creator 5 / 5 Pro)",
-        "Set target": "Ezarri helburua",
+        "Set temperature": "Ezarri tenperatura",
+        "Heat": "Berotu",
         "Set up your first printer": "Konfiguratu zure lehen inprimagailua",
-        "Setting light…": "Argia jartzen…",
+        "Setting light…": "Ganberako argia aldatzen…",
         "Settings": "Ezarpenak",
         "Settings are unavailable.": "Ezarpenak ez daude erabilgarri.",
         "Show file previews": "Erakutsi fitxategien aurrebista",
@@ -9449,8 +9979,8 @@ TRANSLATIONS = {
         "Stored files": "Gordetako fitxategiak",
         "System theme": "Sistemaren gaia",
         "Tab placement": "Fitxen kokapena",
-        "Tan": "Tan",
-        "Target": "Helburua",
+        "Tan": "Marroi argia",
+        "Target": "Helburuko tenperatura",
         "Teal": "Zertzeta",
         "Temperature change over the last 5 minutes": "Tenperatura aldaketa azken 5 minutuetan",
         "Temperatures": "Tenperaturak",
@@ -9490,7 +10020,7 @@ TRANSLATIONS = {
         "The printer must be idle.": "Inprimagailuak inaktibo egon behar du.",
         "The printer rejected the HTTP request (code {code}).": "Inprimagailuak HTTP eskaera baztertu du ({code} kodea).",
         "The printer reported an active print. Check the printer before retrying.": "Inprimagailuak inprimaketa aktibo baten berri eman du. Egiaztatu inprimagailua berriro saiatu aurretik.",
-        "The printer requires homing before manual movement.": "Inprimagailuak homing behar du eskuz mugitu aurretik.",
+        "The printer requires homing before manual movement.": "Eraman ardatzak hasierako posiziora eskuz mugitu aurretik.",
         "The printer response is too large": "Inprimagailuaren erantzuna handiegia da",
         "The printer returned an invalid file list.": "Inprimagailuak fitxategi-zerrenda baliogabea itzuli du.",
         "The printer returned invalid HTTP data.": "Inprimagailuak HTTP datu baliogabeak itzuli ditu.",
@@ -9504,13 +10034,13 @@ TRANSLATIONS = {
         "This printer has no camera.": "Inprimagailu honek ez du kamerarik.",
         "This printer is not configured yet.": "Inprimagailu hau ez dago oraindik konfiguratuta.",
         "This printer is not in the plugin settings.": "Inprimagailu hau ez dago pluginaren ezarpenetan.",
-        "This step exceeds the axis travel limit": "Urrats honek ardatzaren bidaia-muga gainditzen du",
+        "This step exceeds the axis travel limit": "Urrats honek ardatzaren ibilbide-muga gainditzen du",
         "Timer off": "Tenporizadorea itzalita",
         "Timer {minutes} min": "Tenporizadore {minutes} min",
         "Total pages: {count}": "Orriak guztira: {count}",
         "Totals": "Guztira",
-        "Transport: {transport}": "Garraioa: {transport}",
-        "Travel limit": "Bidaia-muga",
+        "Transport: {transport}": "Protokoloa: {transport}",
+        "Travel limit": "Ardatzaren ibilbide-muga",
         "Trend unavailable": "Joera ez dago erabilgarri",
         "Unavailable": "Ez dago erabilgarri",
         "Unexpected response from the printer": "Inprimagailuaren ustekabeko erantzuna",
@@ -9539,7 +10069,7 @@ TRANSLATIONS = {
         "Waiting for Home to finish…": "Ardatzak hasierako posiziora iritsi zain…",
         "Waiting for job status": "Lanpostuaren egoeraren zain",
         "Waiting for printer…": "Inprimagailuaren zain...",
-        "Waiting for readings": "Irakurgaien zain",
+        "Waiting for readings": "Neurketen zain",
         "Waiting for temperature readings": "Tenperaturaren irakurketen zain",
         "Waiting for the printer to confirm calibration.": "Inprimagailuak kalibrazioa berresteko zain.",
         "Waiting for the printer…": "Inprimagailuaren zain...",
@@ -9555,6 +10085,15 @@ TRANSLATIONS = {
         "{time} left": "{time} geratzen da",
     },
     "fr": {
+        "While this tab is open": "Tant que cet onglet est ouvert",
+        "Only during an active print": "Uniquement pendant une impression active",
+        "Waiting for part removal": "En attente du retrait de la pièce",
+        "Wait for part removal": "Attendre le retrait de la pièce",
+        "Bed is clear": "Plateau libre",
+        "Chart layout": "Disposition du graphique",
+        "Shared scale": "Échelle commune",
+        "Separate scales": "Échelles séparées",
+        "Select at least one temperature line.": "Sélectionnez au moins une courbe de température.",
         " · Total print time: {time}": " · Temps d'impression total : {time}",
         "0 min": "0 min",
         "1 mm": "1 mm",
@@ -9576,23 +10115,24 @@ TRANSLATIONS = {
         "Allow access to the printer, then reload the plugin.": "Autorisez l'accès à l'imprimante, puis rechargez le plugin.",
         "Another print source is being read.": "Une autre source d'impression est en cours de lecture.",
         "Appearance": "Apparence",
-        "Apply": "Postuler",
+        "Apply": "Appliquer",
         "Attention": "Attention",
         "Authenticated readings: {availability}": "Lectures authentifiées : {availability}",
         "Auto shutdown": "Arrêt automatique",
         "Axes": "Axes",
         "Axes busy": "Axes occupés",
-        "Axis movement step": "Pas de mouvement de l'axe",
+        "Axis movement step": "Incrément de déplacement des axes",
+        "B": "Plat.",
         "Basic readings received. CheckCode could not be verified.": "Lectures de base reçues. CheckCode n’a pas pu être vérifié.",
         "Bed": "Plateau",
         "Bed Target": "Consigne du plateau",
-        "Bed Z": "Lit Z",
+        "Bed Z": "Axe Z du plateau",
         "Bed leveling": "Mise à niveau du plateau",
         "Black": "Noir",
         "Blue": "Bleu",
         "Brown": "Marron",
         "Browse files": "Parcourir les fichiers",
-        "Build volume": "Volume de construction",
+        "Build volume": "Volume d’impression",
         "Busy": "Occupé",
         "Calibrating": "Calibrage",
         "Calibration": "Étalonnage",
@@ -9608,10 +10148,10 @@ TRANSLATIONS = {
         "Cancel": "Annuler",
         "Cancel print?": "Annuler l'impression ?",
         "Canceled": "Annulé",
-        "Canceling": "Annulation",
+        "Canceling": "Annulation en cours",
         "Card size": "Taille de la carte",
-        "Chamber": "Chambre",
-        "Chamber light": "Éclairage de la chambre",
+        "Chamber": "Chambre d’impression",
+        "Chamber light": "Éclairage de la chambre d’impression",
         "Chart nozzle": "Buse graphique",
         "Chart of actual and target temperatures for the nozzle and bed": "Graphique des températures réelles et cibles pour la buse et le lit",
         "Check connection": "Vérifier la connexion",
@@ -9635,12 +10175,12 @@ TRANSLATIONS = {
         "Choose a material and color supported by this printer.": "Choisissez un matériau et une couleur pris en charge par cette imprimante.",
         "Choose a nonempty print file no larger than 128 MB.": "Choisissez un fichier d'impression non vide ne dépassant pas 128 Mo.",
         "Choose a print file no larger than 128 MB.": "Choisissez un fichier d'impression ne dépassant pas 128 Mo.",
-        "Choose a sliced .3mf with one plate and filament information.": "Choisissez un .3mf tranché avec une plaque et des informations sur le filament.",
-        "Choose a sliced .3mf with one plate.": "Choisissez un .3mf tranché avec une assiette.",
+        "Choose a sliced .3mf with one plate and filament information.": "Choisissez un fichier .3mf contenant une seule plaque tranchée et les données de filament.",
+        "Choose a sliced .3mf with one plate.": "Choisissez un fichier .3mf qui contient une seule plaque déjà tranchée.",
         "Choose a text .gcode file or a sliced .3mf.": "Choisissez un fichier texte .gcode ou un fichier .3mf tranché.",
         "Choose delay…": "Choisissez le délai…",
         "Choose material": "Choisissez le matériau",
-        "Choose the original .3mf with one sliced plate and the same file name.": "Choisissez le .3mf original avec une plaque tranchée et le même nom de fichier.",
+        "Choose the original .3mf with one sliced plate and the same file name.": "Choisissez le fichier .3mf d’origine qui contient une seule plaque tranchée et porte le même nom.",
         "Choose the original sliced .3mf for this Creator file.": "Choisissez le .3mf tranché original pour ce fichier Creator.",
         "Choose the original sliced .3mf.": "Choisissez le .3mf tranché original.",
         "Choose the sliced .3mf that matches the stored file name.": "Choisissez le .3mf découpé qui correspond au nom du fichier stocké.",
@@ -9648,7 +10188,7 @@ TRANSLATIONS = {
         "Clear filters": "Effacer les filtres",
         "Close": "Fermer",
         "Closed": "Fermé",
-        "Collecting readings…": "Collecte de lectures…",
+        "Collecting readings…": "Collecte des mesures…",
         "Color": "Couleur",
         "Color differs": "La couleur diffère",
         "Command accepted. The printer has not confirmed the change.": "Commande acceptée. L'imprimeur n'a pas confirmé le changement.",
@@ -9717,7 +10257,7 @@ TRANSLATIONS = {
         "Empty camera stream": "Flux de caméra vide",
         "Enable LAN-only mode on the printer.": "Activez le mode LAN uniquement sur l'imprimante.",
         "Ended: {time}": "Terminé : {time}",
-        "Endstops: {state}": "Butées : {state}",
+        "Endstops: {state}": "Fins de course : {state}",
         "Enlarge camera": "Agrandir la caméra",
         "Enter a local IPv4 address for the printer.": "Saisissez une adresse IPv4 locale pour l'imprimante.",
         "Enter a page number": "Entrez un numéro de page",
@@ -9745,7 +10285,6 @@ TRANSLATIONS = {
         "Find printers": "Rechercher des imprimantes",
         "Finish": "Terminer",
         "Finish ≈ {time}": "Finition ≈ {time}",
-        "Finished cleanly": "Fini proprement",
         "Finished. Printer ready.": "Terminé. Imprimante prête.",
         "Firmware": "Micrologiciel",
         "FlashForge Device Tab is shutting down.": "FlashForge Device Tab s'arrête.",
@@ -9755,13 +10294,13 @@ TRANSLATIONS = {
         "Heat nozzle to 180 °C": "Chauffer la buse à 180 °C",
         "Heat off": "Arrêt du chauffage",
         "Heat the nozzle to at least 180 °C.": "Chauffer la buse à au moins 180 °C.",
-        "Heating": "Chauffage",
-        "Heating nozzles: {count}": "Buses de chauffage : {count}",
+        "Heating": "Chauffe",
+        "Heating nozzles: {count}": "Buses en chauffe : {count}",
         "History": "Historique",
         "Home": "Prise d’origine",
         "Home all axes": "Faire la prise d’origine de tous les axes",
         "Home required": "Prise d’origine requise",
-        "Home sent. Waiting for the printer to confirm completion.": "Accueil envoyé. En attente que l'imprimante confirme l'achèvement.",
+        "Home sent. Waiting for the printer to confirm completion.": "Prise d’origine demandée. En attente de la confirmation de l’imprimante.",
         "Homing…": "Retour à destination…",
         "Host notifications": "Notifications de l'hôte",
         "IPv4 address": "Adresse IPv4",
@@ -9784,9 +10323,9 @@ TRANSLATIONS = {
         "Invalid printer list.": "Liste d'imprimantes invalide.",
         "Invalid request.": "Demande invalide.",
         "Invalid slice information.": "Informations de tranche invalides.",
-        "Job details": "Détails du poste",
-        "Job status unavailable": "Statut du travail indisponible",
-        "Jobs": "Emplois",
+        "Job details": "Détails de la tâche d’impression",
+        "Job status unavailable": "État de la tâche d’impression indisponible",
+        "Jobs": "Tâches d’impression",
         "Large": "Grand",
         "Last completed": "Dernière réalisation",
         "Last reading: {seconds} s ago": "Dernière mesure il y a {seconds} s",
@@ -9830,6 +10369,7 @@ TRANSLATIONS = {
         "Move sent to the printer.": "Déplacement envoyé à l'imprimante.",
         "Move up": "Monter",
         "Moving…": "Déménagement…",
+        "N": "Buse",
         "Name": "Nom",
         "Needs Attention": "a besoin d'attention",
         "Network discovery unavailable. Enter the printer address manually.": "Découverte du réseau indisponible. Saisissez manuellement l'adresse de l'imprimante.",
@@ -9841,7 +10381,7 @@ TRANSLATIONS = {
         "No idle printers.": "Aucune imprimante inactive.",
         "No loaded slot matches": "Aucune correspondance de slot chargée",
         "No matching files": "Aucun fichier correspondant",
-        "No matching jobs.": "Aucun emploi correspondant.",
+        "No matching jobs.": "Aucune tâche d’impression correspondante.",
         "No new printers found.": "Aucune nouvelle imprimante trouvée.",
         "No preview": "Aucun aperçu",
         "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.": "Aucun travail d'impression enregistré pour le moment. L'historique d'impression est enregistré lorsque OrcaSlicer est ouvert.",
@@ -9857,7 +10397,7 @@ TRANSLATIONS = {
         "Nozzle": "Buse",
         "Nozzle Target": "Consigne de la buse",
         "Nozzle T{tool}": "Buse T{tool}",
-        "Nozzle Z": "Buse Z",
+        "Nozzle Z": "Axe Z de la buse",
         "Nozzle {temperature} °C": "Buse {temperature} °C",
         "Nozzles": "Buses",
         "Nozzles: {count}": "Buses : {count}",
@@ -9878,11 +10418,11 @@ TRANSLATIONS = {
         "Orange": "Orange",
         "OrcaSlicer is sending a print job. Monitoring will resume when the transfer is complete.": "OrcaSlicer envoie un travail d'impression. La surveillance reprendra une fois le transfert terminé.",
         "OrcaSlicer is sending a print job. Try again when it finishes.": "OrcaSlicer envoie un travail d'impression. Réessayez une fois terminé.",
-        "Original sliced .3mf": ".3mf original en tranches",
+        "Original sliced .3mf": "Fichier .3mf d’origine déjà tranché",
         "Other nozzles": "Autres buses",
         "Page number": "Numéro de page",
-        "Part Cooling Fan": "Ventilateur de pièce",
-        "Part fan": "Ventilateur partiel",
+        "Part Cooling Fan": "Ventilateur de refroidissement de la pièce",
+        "Part fan": "Ventilateur de pièce",
         "Pause": "Pause",
         "Paused": "En pause",
         "Paused, disconnected or reporting a problem": "En pause, déconnecté ou signalement d'un problème",
@@ -9916,6 +10456,7 @@ TRANSLATIONS = {
         "Print speed": "Vitesse d'impression",
         "Print started · {file}": "Impression lancée · {file}",
         "Print stored file": "Imprimer le fichier stocké",
+        "Print success rate": "Taux de réussite",
         "Print time": "Temps d'impression",
         "Print time: {time}": "Temps d'impression : {time}",
         "Printer": "Imprimante",
@@ -9924,7 +10465,7 @@ TRANSLATIONS = {
         "Printer Readings": "Lectures de l'imprimante",
         "Printer accepted the command.": "L'imprimante a accepté la commande.",
         "Printer accepted the command. Axis limits could not be checked.": "L'imprimante a accepté la commande. Les limites de l'axe n'ont pas pu être vérifiées.",
-        "Printer camera feed": "Alimentation de la caméra de l'imprimante",
+        "Printer camera feed": "Vidéo de la caméra de l’imprimante",
         "Printer confirmed the nozzle target.": "L'imprimante a confirmé la cible de la buse.",
         "Printer confirmed the shutdown timer setting.": "L'imprimante a confirmé le réglage de la minuterie d'arrêt.",
         "Printer confirmed {command} · {state}": "Imprimante confirmée {command} · {state}",
@@ -9942,7 +10483,7 @@ TRANSLATIONS = {
         "Printer has not confirmed the nozzle target. Check Printer Readings.": "L'imprimante n'a pas confirmé la cible de la buse. Vérifiez les lectures de l'imprimante.",
         "Printer jobs": "Travaux d'impression",
         "Printer must be idle.": "L'imprimante doit être inactive.",
-        "Printer must be idle. Wait for movement or Home to finish.": "L'imprimante doit être inactive. Attendez que le mouvement ou Accueil soit terminé.",
+        "Printer must be idle. Wait for movement or Home to finish.": "L’imprimante doit être au repos. Attendez la fin du déplacement ou de la prise d’origine.",
         "Printer must be idle. {reason}": "L'imprimante doit être inactive. {reason}",
         "Printer rejected the selected file.": "L'imprimante a rejeté le fichier sélectionné.",
         "Printer rejected {command}.": "L'imprimante a rejeté {command}.",
@@ -9958,7 +10499,7 @@ TRANSLATIONS = {
         "Profile changed": "Profil modifié",
         "Purple": "Violet",
         "Range": "Portée",
-        "Reading materials…": "Matériel de lecture…",
+        "Reading materials…": "Lecture des données de matériaux…",
         "Reading printer status…": "Lecture de l'état de l'imprimante…",
         "Readings delayed": "Lectures retardées",
         "Readings unavailable": "Lectures indisponibles",
@@ -9969,9 +10510,9 @@ TRANSLATIONS = {
         "Refresh": "Actualiser",
         "Refresh the Creator printer's file list first.": "Actualisez d'abord la liste des fichiers de l'imprimante Creator.",
         "Refresh the file list and check the loaded materials.": "Actualisez la liste des fichiers et vérifiez les matériaux chargés.",
-        "Release motors": "Déverrouillage des moteurs",
+        "Release motors": "Déverrouiller les moteurs",
         "Remove": "Supprimer",
-        "Replace Printer tab": "Onglet Remplacer l'imprimante",
+        "Replace Printer tab": "Remplacer le contenu de l’onglet Imprimante",
         "Request failed.": "La demande a échoué.",
         "Restored the printer's original web page.": "Restauration de la page Web originale de l'imprimante.",
         "Result": "Résultat",
@@ -10009,9 +10550,10 @@ TRANSLATIONS = {
         "Serial": "Série",
         "Serial number": "Numéro de série",
         "Serial number (required for Creator 5 / 5 Pro)": "Numéro de série (obligatoire pour Creator 5 / 5 Pro)",
-        "Set target": "Définir l'objectif",
+        "Set temperature": "Régler la température",
+        "Heat": "Chauffer",
         "Set up your first printer": "Configurer votre première imprimante",
-        "Setting light…": "Réglage de la lumière…",
+        "Setting light…": "Commutation de l’éclairage…",
         "Settings": "Réglages",
         "Settings are unavailable.": "Les paramètres ne sont pas disponibles.",
         "Show file previews": "Afficher les aperçus des fichiers",
@@ -10029,8 +10571,8 @@ TRANSLATIONS = {
         "Stored files": "Fichiers stockés",
         "System theme": "Thème système",
         "Tab placement": "Placement des onglets",
-        "Tan": "Bronzage",
-        "Target": "Cible",
+        "Tan": "Beige foncé",
+        "Target": "Température cible",
         "Teal": "Sarcelle",
         "Temperature change over the last 5 minutes": "Changement de température au cours des 5 dernières minutes",
         "Temperatures": "Températures",
@@ -10070,7 +10612,7 @@ TRANSLATIONS = {
         "The printer must be idle.": "L'imprimante doit être inactive.",
         "The printer rejected the HTTP request (code {code}).": "L'imprimante a rejeté la demande HTTP (code {code}).",
         "The printer reported an active print. Check the printer before retrying.": "L'imprimante a signalé une impression active. Vérifiez l'imprimante avant de réessayer.",
-        "The printer requires homing before manual movement.": "L'imprimante nécessite une prise d'origine avant un mouvement manuel.",
+        "The printer requires homing before manual movement.": "Faites la prise d’origine avant de déplacer les axes manuellement.",
         "The printer response is too large": "La réponse de l'imprimante est trop importante",
         "The printer returned an invalid file list.": "L'imprimante a renvoyé une liste de fichiers non valide.",
         "The printer returned invalid HTTP data.": "L'imprimante a renvoyé des données HTTP non valides.",
@@ -10089,8 +10631,8 @@ TRANSLATIONS = {
         "Timer {minutes} min": "Minuterie {minutes} min.",
         "Total pages: {count}": "Nombre total de pages : {count}",
         "Totals": "Totaux",
-        "Transport: {transport}": "Transport : {transport}",
-        "Travel limit": "Limite de déplacement",
+        "Transport: {transport}": "Protocole : {transport}",
+        "Travel limit": "Limite de course de l’axe",
         "Trend unavailable": "Tendance indisponible",
         "Unavailable": "Indisponible",
         "Unexpected response from the printer": "Réponse inattendue de l'imprimante",
@@ -10119,7 +10661,7 @@ TRANSLATIONS = {
         "Waiting for Home to finish…": "Prise d’origine en cours…",
         "Waiting for job status": "En attente du statut du travail",
         "Waiting for printer…": "En attente de l'imprimante…",
-        "Waiting for readings": "En attente des lectures",
+        "Waiting for readings": "En attente des mesures",
         "Waiting for temperature readings": "En attente des relevés de température",
         "Waiting for the printer to confirm calibration.": "Attendre que l'imprimante confirme l'étalonnage.",
         "Waiting for the printer…": "En attente de l'imprimante…",
@@ -10135,6 +10677,15 @@ TRANSLATIONS = {
         "{time} left": "Reste {time}",
     },
     "hu": {
+        "While this tab is open": "Amíg ez a lap nyitva van",
+        "Only during an active print": "Csak aktív nyomtatás közben",
+        "Waiting for part removal": "Az alkatrész eltávolítására vár",
+        "Wait for part removal": "Várakozás az alkatrész eltávolítására",
+        "Bed is clear": "Az asztal szabad",
+        "Chart layout": "Diagram elrendezése",
+        "Shared scale": "Közös skála",
+        "Separate scales": "Külön skálák",
+        "Select at least one temperature line.": "Válasszon legalább egy hőmérsékletgörbét.",
         " · Total print time: {time}": " · Teljes nyomtatási idő: {time}",
         "0 min": "0 perc",
         "1 mm": "1 mm",
@@ -10156,23 +10707,24 @@ TRANSLATIONS = {
         "Allow access to the printer, then reload the plugin.": "Engedélyezze a hozzáférést a nyomtatóhoz, majd töltse be újra a bővítményt.",
         "Another print source is being read.": "Egy másik nyomtatási forrás olvasása folyamatban van.",
         "Appearance": "Megjelenés",
-        "Apply": "Jelentkezés",
+        "Apply": "Alkalmaz",
         "Attention": "Figyelem",
         "Authenticated readings: {availability}": "Hiteles leolvasások: {availability}",
         "Auto shutdown": "Automatikus kikapcsolás",
         "Axes": "Tengelyek",
         "Axes busy": "A tengelyek foglaltak",
         "Axis movement step": "Tengelymozgás lépés",
+        "B": "Aszt.",
         "Basic readings received. CheckCode could not be verified.": "Alapvető értékek érkeztek. A CheckCode nem ellenőrizhető.",
         "Bed": "Asztal",
-        "Bed Target": "Ágycél",
-        "Bed Z": "Ágy Z",
+        "Bed Target": "Asztal célhőmérséklete",
+        "Bed Z": "Asztal Z tengelye",
         "Bed leveling": "Asztalszintezés",
         "Black": "Fekete",
         "Blue": "Kék",
         "Brown": "Barna",
         "Browse files": "Fájlok böngészése",
-        "Build volume": "Build kötet",
+        "Build volume": "Nyomtatási térfogat",
         "Busy": "Elfoglalt",
         "Calibrating": "Kalibrálás",
         "Calibration": "Kalibrálás",
@@ -10188,10 +10740,10 @@ TRANSLATIONS = {
         "Cancel": "Mégse",
         "Cancel print?": "Megszakítja a nyomtatást?",
         "Canceled": "Törölve",
-        "Canceling": "Törlés",
+        "Canceling": "Megszakítás folyamatban",
         "Card size": "Kártyaméret",
-        "Chamber": "Kamra",
-        "Chamber light": "Kamravilágítás",
+        "Chamber": "Nyomtatókamra",
+        "Chamber light": "Nyomtatókamra világítása",
         "Chart nozzle": "Grafikonfúvóka",
         "Chart of actual and target temperatures for the nozzle and bed": "A fúvóka és az ágy tényleges és célhőmérsékleteinek táblázata",
         "Check connection": "Ellenőrizze a csatlakozást",
@@ -10215,12 +10767,12 @@ TRANSLATIONS = {
         "Choose a material and color supported by this printer.": "Válassza ki a nyomtató által támogatott anyagot és színt.",
         "Choose a nonempty print file no larger than 128 MB.": "Válasszon egy 128 MB-nál nem nagyobb, üres nyomtatási fájlt.",
         "Choose a print file no larger than 128 MB.": "Válasszon egy 128 MB-nál nem nagyobb nyomtatási fájlt.",
-        "Choose a sliced .3mf with one plate and filament information.": "Válasszon egy szeletelt .3mf-t egy lemezzel és izzószál-információkkal.",
-        "Choose a sliced .3mf with one plate.": "Válasszon egy tányérral szeletelt .3mf-t.",
+        "Choose a sliced .3mf with one plate and filament information.": "Válassz ki egy .3mf fájlt egyetlen szeletelt tálcával és filamentadatokkal.",
+        "Choose a sliced .3mf with one plate.": "Válassz ki egy .3mf fájlt, amely egyetlen szeletelt tálcát tartalmaz.",
         "Choose a text .gcode file or a sliced .3mf.": "Válasszon ki egy szöveges .gcode fájlt vagy egy szeletelt .3mf fájlt.",
         "Choose delay…": "Válasszon késleltetést…",
         "Choose material": "Válasszon anyagot",
-        "Choose the original .3mf with one sliced plate and the same file name.": "Válassza ki az eredeti .3mf-t egy szeletelt lemezzel és ugyanazzal a fájlnévvel.",
+        "Choose the original .3mf with one sliced plate and the same file name.": "Válaszd ki az azonos nevű eredeti .3mf fájlt, amely egyetlen szeletelt tálcát tartalmaz.",
         "Choose the original sliced .3mf for this Creator file.": "Válassza ki az eredeti szeletelt .3mf-t ehhez a Creator fájlhoz.",
         "Choose the original sliced .3mf.": "Válassza ki az eredeti szeletelt .3mf-t.",
         "Choose the sliced .3mf that matches the stored file name.": "Válassza ki a szeletelt .3mf-t, amely megegyezik a tárolt fájlnévvel.",
@@ -10228,7 +10780,7 @@ TRANSLATIONS = {
         "Clear filters": "Tiszta szűrők",
         "Close": "Bezárás",
         "Closed": "Zárva",
-        "Collecting readings…": "Olvasmányok gyűjtése…",
+        "Collecting readings…": "Mérési adatok gyűjtése…",
         "Color": "Szín",
         "Color differs": "A szín eltérő",
         "Command accepted. The printer has not confirmed the change.": "Parancs elfogadva. A nyomtató nem erősítette meg a változtatást.",
@@ -10297,7 +10849,7 @@ TRANSLATIONS = {
         "Empty camera stream": "Üres kameraadatfolyam",
         "Enable LAN-only mode on the printer.": "Engedélyezze a csak LAN módot a nyomtatón.",
         "Ended: {time}": "Vége: {time}",
-        "Endstops: {state}": "Végállások: {state}",
+        "Endstops: {state}": "Végálláskapcsolók: {state}",
         "Enlarge camera": "Kamera nagyítása",
         "Enter a local IPv4 address for the printer.": "Adja meg a nyomtató helyi IPv4-címét.",
         "Enter a page number": "Írjon be egy oldalszámot",
@@ -10325,7 +10877,6 @@ TRANSLATIONS = {
         "Find printers": "Nyomtatók keresése",
         "Finish": "Befejezés",
         "Finish ≈ {time}": "Befejezés ≈ {time}",
-        "Finished cleanly": "Tisztán elkészült",
         "Finished. Printer ready.": "Kész. Nyomtató készen áll.",
         "Firmware": "Firmware",
         "FlashForge Device Tab is shutting down.": "A FlashForge Device Tab leáll.",
@@ -10335,13 +10886,13 @@ TRANSLATIONS = {
         "Heat nozzle to 180 °C": "Melegítse fel a fúvókát 180 °C-ra",
         "Heat off": "Fűtés kikapcsolása",
         "Heat the nozzle to at least 180 °C.": "Melegítse fel a fúvókát legalább 180 °C-ra.",
-        "Heating": "Fűtés",
-        "Heating nozzles: {count}": "Fűtőfúvókák: {count}",
+        "Heating": "Felfűtés",
+        "Heating nozzles: {count}": "Melegedő fúvókák: {count}",
         "History": "Előzmények",
         "Home": "Alaphelyzet",
         "Home all axes": "Minden tengely alaphelyzetbe állítása",
         "Home required": "Alaphelyzetbe állítás szükséges",
-        "Home sent. Waiting for the printer to confirm completion.": "Haza küldve. Várakozás, amíg a nyomtató megerősíti a befejezést.",
+        "Home sent. Waiting for the printer to confirm completion.": "Az alaphelyzetbe állítás parancsa elküldve. Várakozás a nyomtató visszaigazolására.",
         "Homing…": "Homing…",
         "Host notifications": "Gazdaértesítések",
         "IPv4 address": "IPv4 cím",
@@ -10364,9 +10915,9 @@ TRANSLATIONS = {
         "Invalid printer list.": "Érvénytelen nyomtatólista.",
         "Invalid request.": "Érvénytelen kérés.",
         "Invalid slice information.": "Érvénytelen szeletinformáció.",
-        "Job details": "Az állás részletei",
-        "Job status unavailable": "A munka állapota nem érhető el",
-        "Jobs": "Állások",
+        "Job details": "Nyomtatási feladat részletei",
+        "Job status unavailable": "A nyomtatási feladat állapota nem érhető el",
+        "Jobs": "Nyomtatási feladatok",
         "Large": "Nagy",
         "Last completed": "Utoljára befejezve",
         "Last reading: {seconds} s ago": "Utolsó mérés: {seconds} mp-e",
@@ -10410,6 +10961,7 @@ TRANSLATIONS = {
         "Move sent to the printer.": "Áthelyezés elküldve a nyomtatóra.",
         "Move up": "Lépés felfelé",
         "Moving…": "Költözés…",
+        "N": "Fúv.",
         "Name": "Név",
         "Needs Attention": "Figyelmet igényel",
         "Network discovery unavailable. Enter the printer address manually.": "A hálózatfelderítés nem érhető el. Írja be kézzel a nyomtató címét.",
@@ -10421,7 +10973,7 @@ TRANSLATIONS = {
         "No idle printers.": "Nincsenek üresjárati nyomtatók.",
         "No loaded slot matches": "Nincsenek betöltött helyek",
         "No matching files": "Nincs egyező fájl",
-        "No matching jobs.": "Nincs megfelelő állás.",
+        "No matching jobs.": "Nincs a keresésnek megfelelő nyomtatási feladat.",
         "No new printers found.": "Nem található új nyomtató.",
         "No preview": "Nincs előnézet",
         "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.": "Még nem rögzítettek nyomtatási feladatokat. A nyomtatási előzmények rögzítésre kerülnek, amíg a OrcaSlicer nyitva van.",
@@ -10435,9 +10987,9 @@ TRANSLATIONS = {
         "Not recorded": "Nincs rögzítve",
         "Notifications": "Értesítések",
         "Nozzle": "Fúvóka",
-        "Nozzle Target": "Fúvókacél",
+        "Nozzle Target": "Fúvóka célhőmérséklete",
         "Nozzle T{tool}": "T{tool} fúvóka",
-        "Nozzle Z": "Z fúvóka",
+        "Nozzle Z": "Fúvóka Z tengelye",
         "Nozzle {temperature} °C": "Fúvóka {temperature} °C",
         "Nozzles": "Fúvókák",
         "Nozzles: {count}": "Fúvókák: {count}",
@@ -10458,11 +11010,11 @@ TRANSLATIONS = {
         "Orange": "Narancs",
         "OrcaSlicer is sending a print job. Monitoring will resume when the transfer is complete.": "A OrcaSlicer nyomtatási feladatot küld. A figyelés az átvitel befejezésekor folytatódik.",
         "OrcaSlicer is sending a print job. Try again when it finishes.": "A OrcaSlicer nyomtatási feladatot küld. Próbálja újra, ha befejezte.",
-        "Original sliced .3mf": "Eredeti szeletelt .3mf",
+        "Original sliced .3mf": "Eredeti szeletelt .3mf fájl",
         "Other nozzles": "Egyéb fúvókák",
         "Page number": "Oldalszám",
-        "Part Cooling Fan": "Alkatrész hűtőventilátor",
-        "Part fan": "Részleges ventilátor",
+        "Part Cooling Fan": "Tárgyhűtő ventilátor",
+        "Part fan": "Tárgyhűtő ventilátor",
         "Pause": "Szünet",
         "Paused": "Szünet",
         "Paused, disconnected or reporting a problem": "Szüneteltetve, megszakadt a kapcsolat, vagy problémát jelent",
@@ -10496,6 +11048,7 @@ TRANSLATIONS = {
         "Print speed": "Nyomtatási sebesség",
         "Print started · {file}": "Nyomtatás megkezdődött · {file}",
         "Print stored file": "Tárolt fájl nyomtatása",
+        "Print success rate": "Sikerességi arány",
         "Print time": "Nyomtatási idő",
         "Print time: {time}": "Nyomtatási idő: {time}",
         "Printer": "Nyomtató",
@@ -10504,7 +11057,7 @@ TRANSLATIONS = {
         "Printer Readings": "Nyomtató leolvasása",
         "Printer accepted the command.": "A nyomtató elfogadta a parancsot.",
         "Printer accepted the command. Axis limits could not be checked.": "A nyomtató elfogadta a parancsot. A tengelyhatárokat nem lehetett ellenőrizni.",
-        "Printer camera feed": "Nyomtató kamera adagolása",
+        "Printer camera feed": "A nyomtató kameraképe",
         "Printer confirmed the nozzle target.": "A nyomtató megerősítette a fúvóka célját.",
         "Printer confirmed the shutdown timer setting.": "A nyomtató megerősítette a leállítási időzítő beállítását.",
         "Printer confirmed {command} · {state}": "A nyomtató megerősítette {command} · {state}",
@@ -10522,7 +11075,7 @@ TRANSLATIONS = {
         "Printer has not confirmed the nozzle target. Check Printer Readings.": "A nyomtató nem erősítette meg a fúvóka célját. Ellenőrizze a nyomtató leolvasásait.",
         "Printer jobs": "Nyomtatói feladatok",
         "Printer must be idle.": "A nyomtatónak tétlennek kell lennie.",
-        "Printer must be idle. Wait for movement or Home to finish.": "A nyomtatónak tétlennek kell lennie. Várja meg, amíg a mozgás vagy a Kezdőlap befejeződik.",
+        "Printer must be idle. Wait for movement or Home to finish.": "A nyomtatónak tétlennek kell lennie. Várd meg a mozgás vagy az alaphelyzetbe állítás végét.",
         "Printer must be idle. {reason}": "A nyomtatónak tétlennek kell lennie. {reason}",
         "Printer rejected the selected file.": "A nyomtató elutasította a kiválasztott fájlt.",
         "Printer rejected {command}.": "A nyomtató elutasította a {command}-t.",
@@ -10538,7 +11091,7 @@ TRANSLATIONS = {
         "Profile changed": "Profil megváltozott",
         "Purple": "Lila",
         "Range": "Tartomány",
-        "Reading materials…": "Olvasmányok…",
+        "Reading materials…": "Anyagadatok beolvasása…",
         "Reading printer status…": "Nyomtató állapotának olvasása…",
         "Readings delayed": "Leolvasás késik",
         "Readings unavailable": "Az adatok nem érhetők el",
@@ -10549,9 +11102,9 @@ TRANSLATIONS = {
         "Refresh": "Frissítés",
         "Refresh the Creator printer's file list first.": "Először frissítse a Creator nyomtató fájllistáját.",
         "Refresh the file list and check the loaded materials.": "Frissítse a fájllistát és ellenőrizze a betöltött anyagokat.",
-        "Release motors": "Engedje ki a motorokat",
+        "Release motors": "Motorok kioldása",
         "Remove": "Távolítsa el",
-        "Replace Printer tab": "Cserélje ki a Nyomtató fület",
+        "Replace Printer tab": "A Nyomtató lap tartalmának cseréje",
         "Request failed.": "A kérés sikertelen.",
         "Restored the printer's original web page.": "Visszaállította a nyomtató eredeti weboldalát.",
         "Result": "Eredmény",
@@ -10589,9 +11142,10 @@ TRANSLATIONS = {
         "Serial": "Sorozat",
         "Serial number": "Sorozatszám",
         "Serial number (required for Creator 5 / 5 Pro)": "Sorozatszám (szükséges a Creator 5 / 5 Pro-hez)",
-        "Set target": "Cél beállítása",
+        "Set temperature": "Hőmérséklet beállítása",
+        "Heat": "Fűtés",
         "Set up your first printer": "Állítsa be első nyomtatóját",
-        "Setting light…": "Fény beállítása…",
+        "Setting light…": "Világítás kapcsolása…",
         "Settings": "Beállítások",
         "Settings are unavailable.": "A beállítások nem érhetők el.",
         "Show file previews": "Fájl-előnézetek megjelenítése",
@@ -10609,8 +11163,8 @@ TRANSLATIONS = {
         "Stored files": "Tárolt fájlok",
         "System theme": "Rendszertéma",
         "Tab placement": "Lap elhelyezése",
-        "Tan": "Barna",
-        "Target": "Cél",
+        "Tan": "Világosbarna",
+        "Target": "Célhőmérséklet",
         "Teal": "Kékeszöld",
         "Temperature change over the last 5 minutes": "Hőmérsékletváltozás az elmúlt 5 percben",
         "Temperatures": "Hőmérséklet",
@@ -10650,7 +11204,7 @@ TRANSLATIONS = {
         "The printer must be idle.": "A nyomtatónak tétlennek kell lennie.",
         "The printer rejected the HTTP request (code {code}).": "A nyomtató elutasította a HTTP kérést (kód: {code}).",
         "The printer reported an active print. Check the printer before retrying.": "A nyomtató aktív nyomtatást jelentett. Mielőtt újra próbálkozna, ellenőrizze a nyomtatót.",
-        "The printer requires homing before manual movement.": "A nyomtatót a kézi mozgatáshoz be kell helyezni.",
+        "The printer requires homing before manual movement.": "Kézi mozgatás előtt állítsd alaphelyzetbe a tengelyeket.",
         "The printer response is too large": "A nyomtató válasza túl nagy",
         "The printer returned an invalid file list.": "A nyomtató érvénytelen fájllistát adott vissza.",
         "The printer returned invalid HTTP data.": "A nyomtató érvénytelen HTTP adatokat adott vissza.",
@@ -10669,8 +11223,8 @@ TRANSLATIONS = {
         "Timer {minutes} min": "Időzítő {minutes} min",
         "Total pages: {count}": "Oldalak száma összesen: {count}",
         "Totals": "Összesen",
-        "Transport: {transport}": "Szállítás: {transport}",
-        "Travel limit": "Utazási korlát",
+        "Transport: {transport}": "Protokoll: {transport}",
+        "Travel limit": "Tengely mozgáshatára",
         "Trend unavailable": "A Trend nem érhető el",
         "Unavailable": "Nem elérhető",
         "Unexpected response from the printer": "Váratlan válasz a nyomtatótól",
@@ -10699,7 +11253,7 @@ TRANSLATIONS = {
         "Waiting for Home to finish…": "Várakozás az alaphelyzetbe állításra…",
         "Waiting for job status": "Várakozás a munka állapotára",
         "Waiting for printer…": "Várakozás a nyomtatóra…",
-        "Waiting for readings": "Várakozás a leolvasásokra",
+        "Waiting for readings": "Várakozás a mérési adatokra",
         "Waiting for temperature readings": "Várakozás a hőmérsékleti értékekre",
         "Waiting for the printer to confirm calibration.": "Várakozás, amíg a nyomtató megerősíti a kalibrálást.",
         "Waiting for the printer…": "Várakozás a nyomtatóra…",
@@ -10715,6 +11269,15 @@ TRANSLATIONS = {
         "{time} left": "Hátralévő idő: {time}",
     },
     "it": {
+        "While this tab is open": "Finché questa scheda è aperta",
+        "Only during an active print": "Solo con una stampa attiva",
+        "Waiting for part removal": "In attesa della rimozione del pezzo",
+        "Wait for part removal": "Attendi la rimozione del pezzo",
+        "Bed is clear": "Piatto libero",
+        "Chart layout": "Disposizione del grafico",
+        "Shared scale": "Scala comune",
+        "Separate scales": "Scale separate",
+        "Select at least one temperature line.": "Seleziona almeno una curva di temperatura.",
         " · Total print time: {time}": " · Tempo di stampa totale: {time}",
         "0 min": "0 min",
         "1 mm": "1mm",
@@ -10743,16 +11306,17 @@ TRANSLATIONS = {
         "Axes": "Assi",
         "Axes busy": "Assi occupati",
         "Axis movement step": "Passo di movimento dell'asse",
+        "B": "Piatto",
         "Basic readings received. CheckCode could not be verified.": "Letture di base ricevute. Impossibile verificare CheckCode.",
         "Bed": "Piatto",
-        "Bed Target": "Obiettivo letto",
-        "Bed Z": "Letto Z",
+        "Bed Target": "Temperatura obiettivo del piatto",
+        "Bed Z": "Asse Z del piatto",
         "Bed leveling": "Livellamento del piatto",
         "Black": "Nero",
         "Blue": "Blu",
         "Brown": "Marrone",
         "Browse files": "Sfoglia i file",
-        "Build volume": "Costruisci volume",
+        "Build volume": "Volume di stampa",
         "Busy": "Occupato",
         "Calibrating": "Calibrazione",
         "Calibration": "Calibrazione",
@@ -10768,10 +11332,10 @@ TRANSLATIONS = {
         "Cancel": "Annulla",
         "Cancel print?": "Annullare la stampa?",
         "Canceled": "Annullato",
-        "Canceling": "Annullamento",
+        "Canceling": "Annullamento in corso",
         "Card size": "Formato della carta",
-        "Chamber": "Camera",
-        "Chamber light": "Luce camera",
+        "Chamber": "Camera di stampa",
+        "Chamber light": "Luce della camera di stampa",
         "Chart nozzle": "Ugello carta",
         "Chart of actual and target temperatures for the nozzle and bed": "Grafico delle temperature effettive e target per l'ugello e il letto",
         "Check connection": "Controllare la connessione",
@@ -10795,12 +11359,12 @@ TRANSLATIONS = {
         "Choose a material and color supported by this printer.": "Scegli un materiale e un colore supportati da questa stampante.",
         "Choose a nonempty print file no larger than 128 MB.": "Scegli un file di stampa non vuoto non più grande di 128 MB.",
         "Choose a print file no larger than 128 MB.": "Scegli un file di stampa non più grande di 128 MB.",
-        "Choose a sliced .3mf with one plate and filament information.": "Scegli uno .3mf affettato con una piastra e informazioni sul filamento.",
-        "Choose a sliced .3mf with one plate.": "Scegli uno .3mf a fette con un piatto.",
+        "Choose a sliced .3mf with one plate and filament information.": "Scegli un file .3mf con un solo piatto affettato e i dati dei filamenti.",
+        "Choose a sliced .3mf with one plate.": "Scegli un file .3mf con un solo piatto già affettato.",
         "Choose a text .gcode file or a sliced .3mf.": "Scegli un file di testo .gcode o uno .3mf suddiviso in sezioni.",
         "Choose delay…": "Scegli ritardo...",
         "Choose material": "Scegli il materiale",
-        "Choose the original .3mf with one sliced plate and the same file name.": "Scegli l'originale .3mf con un piatto affettato e lo stesso nome file.",
+        "Choose the original .3mf with one sliced plate and the same file name.": "Scegli il file .3mf originale con un solo piatto già affettato e lo stesso nome.",
         "Choose the original sliced .3mf for this Creator file.": "Scegli lo .3mf affettato originale per questo file Creator.",
         "Choose the original sliced .3mf.": "Scegli l'originale .3mf a fette.",
         "Choose the sliced .3mf that matches the stored file name.": "Scegli lo .3mf affettato che corrisponde al nome del file memorizzato.",
@@ -10808,7 +11372,7 @@ TRANSLATIONS = {
         "Clear filters": "Cancella filtri",
         "Close": "Chiudi",
         "Closed": "Chiuso",
-        "Collecting readings…": "Raccolta letture…",
+        "Collecting readings…": "Raccolta delle misurazioni…",
         "Color": "Colore",
         "Color differs": "Il colore è diverso",
         "Command accepted. The printer has not confirmed the change.": "Comando accettato. La stampante non ha confermato la modifica.",
@@ -10905,7 +11469,6 @@ TRANSLATIONS = {
         "Find printers": "Trova stampanti",
         "Finish": "Fine",
         "Finish ≈ {time}": "Finitura ≈ {time}",
-        "Finished cleanly": "Finito in modo pulito",
         "Finished. Printer ready.": "Finito. Stampante pronta.",
         "Firmware": "Firmware",
         "FlashForge Device Tab is shutting down.": "FlashForge Device Tab si sta spegnendo.",
@@ -10916,12 +11479,12 @@ TRANSLATIONS = {
         "Heat off": "Riscaldamento spento",
         "Heat the nozzle to at least 180 °C.": "Riscaldare l'ugello ad almeno 180 °C.",
         "Heating": "Riscaldamento",
-        "Heating nozzles: {count}": "Ugelli riscaldanti: {count}",
+        "Heating nozzles: {count}": "Ugelli in riscaldamento: {count}",
         "History": "Cronologia",
         "Home": "Azzera assi",
         "Home all axes": "Porta tutti gli assi all’origine",
         "Home required": "Azzeramento degli assi richiesto",
-        "Home sent. Waiting for the printer to confirm completion.": "Inviato a casa. In attesa che la stampante confermi il completamento.",
+        "Home sent. Waiting for the printer to confirm completion.": "Comando di azzeramento degli assi inviato. In attesa della conferma della stampante.",
         "Homing…": "Homing...",
         "Host notifications": "Notifiche dell'host",
         "IPv4 address": "Indirizzo IPv4",
@@ -10944,9 +11507,9 @@ TRANSLATIONS = {
         "Invalid printer list.": "Elenco stampanti non valido.",
         "Invalid request.": "Richiesta non valida.",
         "Invalid slice information.": "Informazioni sulla sezione non valide.",
-        "Job details": "Dettagli lavoro",
-        "Job status unavailable": "Stato lavoro non disponibile",
-        "Jobs": "Lavori",
+        "Job details": "Dettagli del lavoro di stampa",
+        "Job status unavailable": "Stato del lavoro di stampa non disponibile",
+        "Jobs": "Lavori di stampa",
         "Large": "Grande",
         "Last completed": "Ultimo completato",
         "Last reading: {seconds} s ago": "Ultima lettura: {seconds} s fa",
@@ -10990,6 +11553,7 @@ TRANSLATIONS = {
         "Move sent to the printer.": "Spostamento inviato alla stampante.",
         "Move up": "Sposta in alto",
         "Moving…": "Spostamento…",
+        "N": "Ugello",
         "Name": "Nome",
         "Needs Attention": "Richiede attenzione",
         "Network discovery unavailable. Enter the printer address manually.": "Individuazione della rete non disponibile. Immettere manualmente l'indirizzo della stampante.",
@@ -11001,7 +11565,7 @@ TRANSLATIONS = {
         "No idle printers.": "Nessuna stampante inattiva.",
         "No loaded slot matches": "Nessuna corrispondenza di slot caricata",
         "No matching files": "Nessun file corrispondente",
-        "No matching jobs.": "Nessun lavoro corrispondente.",
+        "No matching jobs.": "Nessun lavoro di stampa corrispondente.",
         "No new printers found.": "Nessuna nuova stampante trovata.",
         "No preview": "Nessuna anteprima",
         "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.": "Nessun lavoro di stampa ancora registrato. La cronologia di stampa viene registrata mentre OrcaSlicer è aperto.",
@@ -11015,9 +11579,9 @@ TRANSLATIONS = {
         "Not recorded": "Non registrato",
         "Notifications": "Notifiche",
         "Nozzle": "Ugello",
-        "Nozzle Target": "Bersaglio ugello",
+        "Nozzle Target": "Temperatura obiettivo dell’ugello",
         "Nozzle T{tool}": "Ugello T{tool}",
-        "Nozzle Z": "Ugello Z",
+        "Nozzle Z": "Asse Z dell’ugello",
         "Nozzle {temperature} °C": "Ugello {temperature} °C",
         "Nozzles": "Ugelli",
         "Nozzles: {count}": "Ugelli: {count}",
@@ -11025,7 +11589,7 @@ TRANSLATIONS = {
         "Offline for at least one minute": "Offline per almeno un minuto",
         "On": "Acceso",
         "One printer per line: address | CheckCode | name | serial number": "Una stampante per riga: indirizzo | CheckCode | nome | numero di serie",
-        "Open": "Apri",
+        "Open": "Aperto",
         "Open FlashForge": "Apri FlashForge",
         "Open FlashForge Device Tab for a FlashForge printer profile from Speed Dial.": "Aprire FlashForge Device Tab per un profilo stampante FlashForge da Selezione rapida.",
         "Open FlashForge Device Tab for the current printer profile from Speed Dial.": "Aprire FlashForge Device Tab per il profilo stampante corrente da Selezione rapida.",
@@ -11038,11 +11602,11 @@ TRANSLATIONS = {
         "Orange": "Arancione",
         "OrcaSlicer is sending a print job. Monitoring will resume when the transfer is complete.": "OrcaSlicer sta inviando un lavoro di stampa. Il monitoraggio riprenderà al termine del trasferimento.",
         "OrcaSlicer is sending a print job. Try again when it finishes.": "OrcaSlicer sta inviando un lavoro di stampa. Riprovare al termine.",
-        "Original sliced .3mf": "A fette originali .3mf",
+        "Original sliced .3mf": "File .3mf originale già affettato",
         "Other nozzles": "Altri ugelli",
         "Page number": "Numero di pagina",
-        "Part Cooling Fan": "Ventola di raffreddamento parziale",
-        "Part fan": "Ventilatore parziale",
+        "Part Cooling Fan": "Ventola di raffreddamento del pezzo",
+        "Part fan": "Ventola del pezzo",
         "Pause": "Pausa",
         "Paused": "In pausa",
         "Paused, disconnected or reporting a problem": "In pausa, disconnesso o segnalazione di un problema",
@@ -11076,6 +11640,7 @@ TRANSLATIONS = {
         "Print speed": "Velocità di stampa",
         "Print started · {file}": "Stampa avviata · {file}",
         "Print stored file": "Stampa il file memorizzato",
+        "Print success rate": "Tasso di riuscita",
         "Print time": "Orario di stampa",
         "Print time: {time}": "Orario di stampa: {time}",
         "Printer": "Stampante",
@@ -11084,7 +11649,7 @@ TRANSLATIONS = {
         "Printer Readings": "Letture stampante",
         "Printer accepted the command.": "La stampante ha accettato il comando.",
         "Printer accepted the command. Axis limits could not be checked.": "La stampante ha accettato il comando. Non è stato possibile controllare i limiti dell'asse.",
-        "Printer camera feed": "Avanzamento fotocamera della stampante",
+        "Printer camera feed": "Video della fotocamera della stampante",
         "Printer confirmed the nozzle target.": "La stampante ha confermato il target dell'ugello.",
         "Printer confirmed the shutdown timer setting.": "La stampante ha confermato l'impostazione del timer di spegnimento.",
         "Printer confirmed {command} · {state}": "Stampante confermata {command} · {state}",
@@ -11102,7 +11667,7 @@ TRANSLATIONS = {
         "Printer has not confirmed the nozzle target. Check Printer Readings.": "La stampante non ha confermato il target dell'ugello. Controllare le letture della stampante.",
         "Printer jobs": "Lavori della stampante",
         "Printer must be idle.": "La stampante deve essere inattiva.",
-        "Printer must be idle. Wait for movement or Home to finish.": "La stampante deve essere inattiva. Attendi il completamento del movimento o della casa.",
+        "Printer must be idle. Wait for movement or Home to finish.": "La stampante deve essere inattiva. Attendi il termine del movimento o dell’azzeramento.",
         "Printer must be idle. {reason}": "La stampante deve essere inattiva. {reason}",
         "Printer rejected the selected file.": "La stampante ha rifiutato il file selezionato.",
         "Printer rejected {command}.": "Stampante rifiutata {command}.",
@@ -11118,7 +11683,7 @@ TRANSLATIONS = {
         "Profile changed": "Profilo cambiato",
         "Purple": "Viola",
         "Range": "Intervallo",
-        "Reading materials…": "Materiali di lettura…",
+        "Reading materials…": "Lettura dei dati dei materiali…",
         "Reading printer status…": "Lettura dello stato della stampante…",
         "Readings delayed": "Letture ritardate",
         "Readings unavailable": "Letture non disponibili",
@@ -11129,9 +11694,9 @@ TRANSLATIONS = {
         "Refresh": "Aggiorna",
         "Refresh the Creator printer's file list first.": "Aggiornare prima l'elenco dei file della stampante Creator.",
         "Refresh the file list and check the loaded materials.": "Aggiorna l'elenco dei file e controlla i materiali caricati.",
-        "Release motors": "Sblocco motori",
+        "Release motors": "Sblocca i motori",
         "Remove": "Rimuovi",
-        "Replace Printer tab": "Scheda Sostituisci stampante",
+        "Replace Printer tab": "Sostituisci il contenuto della scheda Stampante",
         "Request failed.": "Richiesta fallita.",
         "Restored the printer's original web page.": "Ripristinata la pagina web originale della stampante.",
         "Result": "Risultato",
@@ -11169,9 +11734,10 @@ TRANSLATIONS = {
         "Serial": "Seriale",
         "Serial number": "Numero di serie",
         "Serial number (required for Creator 5 / 5 Pro)": "Numero di serie (richiesto per Creator 5 / 5 Pro)",
-        "Set target": "Imposta obiettivo",
+        "Set temperature": "Imposta temperatura",
+        "Heat": "Scalda",
         "Set up your first printer": "Configura la tua prima stampante",
-        "Setting light…": "Impostazione della luce...",
+        "Setting light…": "Commutazione della luce…",
         "Settings": "Impostazioni",
         "Settings are unavailable.": "Le impostazioni non sono disponibili.",
         "Show file previews": "Mostra le anteprime dei file",
@@ -11189,8 +11755,8 @@ TRANSLATIONS = {
         "Stored files": "File memorizzati",
         "System theme": "Tema del sistema",
         "Tab placement": "Posizionamento delle schede",
-        "Tan": "Abbronzatura",
-        "Target": "Obiettivo",
+        "Tan": "Beige scuro",
+        "Target": "Temperatura obiettivo",
         "Teal": "Verde acqua",
         "Temperature change over the last 5 minutes": "Variazione della temperatura negli ultimi 5 minuti",
         "Temperatures": "Temperature",
@@ -11230,7 +11796,7 @@ TRANSLATIONS = {
         "The printer must be idle.": "La stampante deve essere inattiva.",
         "The printer rejected the HTTP request (code {code}).": "La stampante ha rifiutato la richiesta HTTP (codice {code}).",
         "The printer reported an active print. Check the printer before retrying.": "La stampante ha segnalato una stampa attiva. Controllare la stampante prima di riprovare.",
-        "The printer requires homing before manual movement.": "La stampante richiede l'homing prima del movimento manuale.",
+        "The printer requires homing before manual movement.": "Azzera gli assi prima di spostarli manualmente.",
         "The printer response is too large": "La risposta della stampante è troppo ampia",
         "The printer returned an invalid file list.": "La stampante ha restituito un elenco di file non valido.",
         "The printer returned invalid HTTP data.": "La stampante ha restituito dati HTTP non validi.",
@@ -11249,8 +11815,8 @@ TRANSLATIONS = {
         "Timer {minutes} min": "Temporizzatore {minutes} min",
         "Total pages: {count}": "Pagine totali: {count}",
         "Totals": "Totali",
-        "Transport: {transport}": "Trasporto: {transport}",
-        "Travel limit": "Limite di viaggio",
+        "Transport: {transport}": "Protocollo: {transport}",
+        "Travel limit": "Limite di corsa dell’asse",
         "Trend unavailable": "Tendenza non disponibile",
         "Unavailable": "Non disponibile",
         "Unexpected response from the printer": "Risposta imprevista dalla stampante",
@@ -11279,7 +11845,7 @@ TRANSLATIONS = {
         "Waiting for Home to finish…": "Azzeramento degli assi in corso…",
         "Waiting for job status": "In attesa dello stato del lavoro",
         "Waiting for printer…": "In attesa della stampante…",
-        "Waiting for readings": "In attesa delle letture",
+        "Waiting for readings": "In attesa delle misurazioni",
         "Waiting for temperature readings": "In attesa delle letture della temperatura",
         "Waiting for the printer to confirm calibration.": "In attesa che la stampante confermi la calibrazione.",
         "Waiting for the printer…": "In attesa della stampante…",
@@ -11295,6 +11861,15 @@ TRANSLATIONS = {
         "{time} left": "Tempo rimasto: {time}",
     },
     "ja": {
+        "While this tab is open": "このタブを開いている間",
+        "Only during an active print": "印刷ジョブが進行中のときのみ",
+        "Waiting for part removal": "造形物の取り外し待ち",
+        "Wait for part removal": "造形物の取り外しを待つ",
+        "Bed is clear": "ベッドを空にした",
+        "Chart layout": "グラフの配置",
+        "Shared scale": "共通スケール",
+        "Separate scales": "個別スケール",
+        "Select at least one temperature line.": "温度の線を少なくとも1つ選択してください。",
         " · Total print time: {time}": " ・総印刷時間：{time}",
         "0 min": "0分",
         "1 mm": "1mm",
@@ -11316,23 +11891,24 @@ TRANSLATIONS = {
         "Allow access to the printer, then reload the plugin.": "プリンターへのアクセスを許可してからプラグインを再読み込みしてください。",
         "Another print source is being read.": "別の印刷ソースを読み取っています。",
         "Appearance": "外観",
-        "Apply": "申し込む",
+        "Apply": "適用",
         "Attention": "注意",
         "Authenticated readings: {availability}": "認証済み読み取り値: {availability}",
         "Auto shutdown": "自動シャットダウン",
         "Axes": "軸",
         "Axes busy": "軸がビジーです",
         "Axis movement step": "軸移動ステップ",
+        "B": "ベッド",
         "Basic readings received. CheckCode could not be verified.": "基本的な測定値を受信しました。 CheckCodeは確認できませんでした。",
         "Bed": "ベッド",
         "Bed Target": "ベッド目標温度",
-        "Bed Z": "ベッドZ",
+        "Bed Z": "ベッドのZ軸",
         "Bed leveling": "ベッドレベリング",
         "Black": "ブラック",
         "Blue": "ブルー",
         "Brown": "ブラウン",
         "Browse files": "ファイルを参照する",
-        "Build volume": "ビルドボリューム",
+        "Build volume": "造形サイズ",
         "Busy": "忙しい",
         "Calibrating": "校正する",
         "Calibration": "校正",
@@ -11348,10 +11924,10 @@ TRANSLATIONS = {
         "Cancel": "取消し",
         "Cancel print?": "印刷を中止しますか？",
         "Canceled": "中止",
-        "Canceling": "キャンセルする場合",
+        "Canceling": "キャンセル中",
         "Card size": "カードサイズ",
-        "Chamber": "チャンバー",
-        "Chamber light": "チャンバーライト",
+        "Chamber": "造形チャンバー",
+        "Chamber light": "チャンバー照明",
         "Chart nozzle": "チャートノズル",
         "Chart of actual and target temperatures for the nozzle and bed": "ノズルとベッドの実際温度と目標温度のグラフ",
         "Check connection": "接続を確認してください",
@@ -11375,20 +11951,20 @@ TRANSLATIONS = {
         "Choose a material and color supported by this printer.": "このプリンターがサポートしている素材と色を選択してください。",
         "Choose a nonempty print file no larger than 128 MB.": "128 MB 以下の空でない印刷ファイルを選択してください。",
         "Choose a print file no larger than 128 MB.": "印刷ファイルは 128 MB 以下のものを選択してください。",
-        "Choose a sliced .3mf with one plate and filament information.": "1 つのプレートとフィラメント情報を含むスライスされた .3mf を選択します。",
-        "Choose a sliced .3mf with one plate.": "スライス.3mfをワンプレートでお選びください。",
+        "Choose a sliced .3mf with one plate and filament information.": "スライス済みプレート1枚とフィラメント情報を含む .3mf ファイルを選択してください。",
+        "Choose a sliced .3mf with one plate.": "スライス済みプレートを1枚だけ含む .3mf ファイルを選択してください。",
         "Choose a text .gcode file or a sliced .3mf.": "テキスト .gcode ファイルまたはスライスされた .3mf ファイルを選択します。",
         "Choose delay…": "遅延を選択してください…",
         "Choose material": "素材を選ぶ",
-        "Choose the original .3mf with one sliced plate and the same file name.": "スライスしたプレートが 1 枚あり、同じファイル名を持つオリジナルの .3mf を選択してください。",
+        "Choose the original .3mf with one sliced plate and the same file name.": "同じファイル名で、スライス済みプレートを1枚だけ含む元の .3mf ファイルを選択してください。",
         "Choose the original sliced .3mf for this Creator file.": "この Creator ファイルには、スライスされたオリジナルの .3mf を選択します。",
         "Choose the original sliced .3mf.": "オリジナルスライス.3mfをお選びください。",
         "Choose the sliced .3mf that matches the stored file name.": "保存されているファイル名と一致するスライスされた.3mfを選択します。",
         "Clear error": "エラー解除",
         "Clear filters": "フィルターをクリアする",
         "Close": "閉じる",
-        "Closed": "閉店",
-        "Collecting readings…": "読み物を集めています…",
+        "Closed": "閉",
+        "Collecting readings…": "測定値を取得中…",
         "Color": "カラー",
         "Color differs": "色が異なります",
         "Command accepted. The printer has not confirmed the change.": "コマンドを受け付けました。プリンターは変更を確認していません。",
@@ -11457,7 +12033,7 @@ TRANSLATIONS = {
         "Empty camera stream": "空のカメラストリーム",
         "Enable LAN-only mode on the printer.": "プリンターでLAN専用モードを有効にします。",
         "Ended: {time}": "終了：{time}",
-        "Endstops: {state}": "エンドストップ: {state}",
+        "Endstops: {state}": "リミットスイッチ：{state}",
         "Enlarge camera": "カメラを拡大する",
         "Enter a local IPv4 address for the printer.": "プリンターのローカル IPv4 アドレスを入力します。",
         "Enter a page number": "ページ番号を入力してください",
@@ -11485,7 +12061,6 @@ TRANSLATIONS = {
         "Find printers": "プリンターを探す",
         "Finish": "仕上げ",
         "Finish ≈ {time}": "仕上げ ≈ {time}",
-        "Finished cleanly": "きれいに仕上がります",
         "Finished. Printer ready.": "終了しました。プリンターの準備ができました。",
         "Firmware": "ファームウェア",
         "FlashForge Device Tab is shutting down.": "FlashForge Device Tabはシャットダウン中です。",
@@ -11495,13 +12070,13 @@ TRANSLATIONS = {
         "Heat nozzle to 180 °C": "ノズルを180℃に加熱する",
         "Heat off": "ヒートオフ",
         "Heat the nozzle to at least 180 °C.": "ノズルを180℃以上に加熱します。",
-        "Heating": "暖房",
-        "Heating nozzles: {count}": "加熱ノズル：{count}",
+        "Heating": "加熱中",
+        "Heating nozzles: {count}": "加熱中のノズル：{count}",
         "History": "履歴",
         "Home": "原点復帰",
         "Home all axes": "全軸を原点復帰",
         "Home required": "原点復帰が必要",
-        "Home sent. Waiting for the printer to confirm completion.": "自宅に送りました。プリンターが完了を確認するのを待っています。",
+        "Home sent. Waiting for the printer to confirm completion.": "原点復帰コマンドを送信しました。プリンターが完了を報告するまでお待ちください。",
         "Homing…": "ホーミング…",
         "Host notifications": "ホスト通知",
         "IPv4 address": "IPv4アドレス",
@@ -11524,9 +12099,9 @@ TRANSLATIONS = {
         "Invalid printer list.": "プリンターリストが無効です。",
         "Invalid request.": "リクエストが無効です。",
         "Invalid slice information.": "スライス情報が不正です。",
-        "Job details": "仕事内容",
-        "Job status unavailable": "ジョブステータスが利用できません",
-        "Jobs": "仕事",
+        "Job details": "造形ジョブの詳細",
+        "Job status unavailable": "造形ジョブの状況を取得できません",
+        "Jobs": "造形ジョブ",
         "Large": "大",
         "Last completed": "最後に完了しました",
         "Last reading: {seconds} s ago": "最終更新：{seconds} 秒前",
@@ -11570,6 +12145,7 @@ TRANSLATIONS = {
         "Move sent to the printer.": "プリンターに移動を送信します。",
         "Move up": "上に移動",
         "Moving…": "引越し…",
+        "N": "ノズル",
         "Name": "名前",
         "Needs Attention": "注意が必要です",
         "Network discovery unavailable. Enter the printer address manually.": "ネットワーク探索が利用できません。プリンターのアドレスを手動で入力します。",
@@ -11581,7 +12157,7 @@ TRANSLATIONS = {
         "No idle printers.": "アイドル状態のプリンターはありません。",
         "No loaded slot matches": "ロードされたスロットが一致しません",
         "No matching files": "一致するファイルがありません",
-        "No matching jobs.": "該当する求人はありません。",
+        "No matching jobs.": "一致する造形ジョブがありません。",
         "No new printers found.": "新しいプリンターは見つかりませんでした。",
         "No preview": "プレビューなし",
         "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.": "印刷ジョブはまだ記録されていません。印刷履歴はOrcaSlicerを開いている間に記録されます。",
@@ -11597,7 +12173,7 @@ TRANSLATIONS = {
         "Nozzle": "ノズル",
         "Nozzle Target": "ノズル目標温度",
         "Nozzle T{tool}": "ノズル T{tool}",
-        "Nozzle Z": "ノズルZ",
+        "Nozzle Z": "ノズルのZ軸",
         "Nozzle {temperature} °C": "ノズル {temperature} ℃",
         "Nozzles": "ノズル",
         "Nozzles: {count}": "ノズル: {count}",
@@ -11605,7 +12181,7 @@ TRANSLATIONS = {
         "Offline for at least one minute": "1分以上オフライン",
         "On": "オン",
         "One printer per line: address | CheckCode | name | serial number": "1 行に 1 台：アドレス | CheckCode | 名前 | シリアル番号",
-        "Open": "開く",
+        "Open": "開",
         "Open FlashForge": "FlashForgeを開く",
         "Open FlashForge Device Tab for a FlashForge printer profile from Speed Dial.": "スピード ダイヤルから FlashForge プリンター プロファイルの FlashForge Device Tab を開きます。",
         "Open FlashForge Device Tab for the current printer profile from Speed Dial.": "スピード ダイヤルから現在のプリンター プロファイルの FlashForge Device Tab を開きます。",
@@ -11618,11 +12194,11 @@ TRANSLATIONS = {
         "Orange": "オレンジ",
         "OrcaSlicer is sending a print job. Monitoring will resume when the transfer is complete.": "OrcaSlicer が印刷ジョブを送信しています。転送が完了すると監視が再開されます。",
         "OrcaSlicer is sending a print job. Try again when it finishes.": "OrcaSlicer が印刷ジョブを送信しています。終了したらもう一度試してください。",
-        "Original sliced .3mf": "オリジナルスライス.3mf",
+        "Original sliced .3mf": "スライス済みの元の .3mf ファイル",
         "Other nozzles": "その他のノズル",
         "Page number": "ページ数",
         "Part Cooling Fan": "造形物冷却ファン",
-        "Part fan": "パートファン",
+        "Part fan": "造形物冷却ファン",
         "Pause": "一時停止",
         "Paused": "一時停止中",
         "Paused, disconnected or reporting a problem": "一時停止、切断、または問題の報告",
@@ -11656,6 +12232,7 @@ TRANSLATIONS = {
         "Print speed": "印刷速度",
         "Print started · {file}": "印刷開始・{file}",
         "Print stored file": "保存したファイルを印刷する",
+        "Print success rate": "造形成功率",
         "Print time": "印刷時間",
         "Print time: {time}": "印刷時間: {time}",
         "Printer": "プリンター",
@@ -11664,7 +12241,7 @@ TRANSLATIONS = {
         "Printer Readings": "プリンターの測定値",
         "Printer accepted the command.": "プリンターがコマンドを受け付けました。",
         "Printer accepted the command. Axis limits could not be checked.": "プリンターがコマンドを受け付けました。軸の制限をチェックできませんでした。",
-        "Printer camera feed": "プリンターカメラフィード",
+        "Printer camera feed": "プリンターのカメラ映像",
         "Printer confirmed the nozzle target.": "プリンターはノズルターゲットを確認しました。",
         "Printer confirmed the shutdown timer setting.": "プリンターはシャットダウンタイマー設定を確認しました。",
         "Printer confirmed {command} · {state}": "プリンター確認済み {command}・{state}",
@@ -11682,7 +12259,7 @@ TRANSLATIONS = {
         "Printer has not confirmed the nozzle target. Check Printer Readings.": "プリンターがノズルターゲットを確認していません。プリンターの測定値を確認します。",
         "Printer jobs": "プリンタージョブ",
         "Printer must be idle.": "プリンターはアイドル状態でなければなりません。",
-        "Printer must be idle. Wait for movement or Home to finish.": "プリンターはアイドル状態である必要があります。移動またはホームが完了するまで待ちます。",
+        "Printer must be idle. Wait for movement or Home to finish.": "プリンターは待機状態である必要があります。移動または原点復帰が終わるまでお待ちください。",
         "Printer must be idle. {reason}": "プリンターはアイドル状態である必要があります。 {reason}",
         "Printer rejected the selected file.": "選択したファイルをプリンタが拒否しました。",
         "Printer rejected {command}.": "プリンターが{command}を拒否しました。",
@@ -11698,7 +12275,7 @@ TRANSLATIONS = {
         "Profile changed": "プロフィール変更しました",
         "Purple": "パープル",
         "Range": "範囲",
-        "Reading materials…": "読み物…",
+        "Reading materials…": "材料データを読み込み中…",
         "Reading printer status…": "プリンターステータスを読み取り中…",
         "Readings delayed": "測定値の遅れ",
         "Readings unavailable": "測定値がありません",
@@ -11709,9 +12286,9 @@ TRANSLATIONS = {
         "Refresh": "リフレッシュ",
         "Refresh the Creator printer's file list first.": "まずCreatorプリンターのファイルリストを更新してください。",
         "Refresh the file list and check the loaded materials.": "ファイルリストを更新し、読み込んだ素材を確認します。",
-        "Release motors": "レリーズモーター",
+        "Release motors": "モーターを解放",
         "Remove": "削除",
-        "Replace Printer tab": "プリンターの置換タブ",
+        "Replace Printer tab": "プリンタータブの内容を置き換える",
         "Request failed.": "リクエストが失敗しました。",
         "Restored the printer's original web page.": "プリンターの元のWebページを復元しました。",
         "Result": "結果",
@@ -11749,9 +12326,10 @@ TRANSLATIONS = {
         "Serial": "シリアル",
         "Serial number": "シリアルナンバー",
         "Serial number (required for Creator 5 / 5 Pro)": "シリアル番号（Creator 5 / 5 Proに必要）",
-        "Set target": "目標を設定する",
+        "Set temperature": "目標温度を設定",
+        "Heat": "加熱",
         "Set up your first printer": "初めてのプリンターをセットアップする",
-        "Setting light…": "ライトの設定…",
+        "Setting light…": "照明を切り替え中…",
         "Settings": "設定",
         "Settings are unavailable.": "設定ができません。",
         "Show file previews": "ファイルのプレビューを表示する",
@@ -11769,8 +12347,8 @@ TRANSLATIONS = {
         "Stored files": "保存ファイル",
         "System theme": "システムテーマ",
         "Tab placement": "タブの配置",
-        "Tan": "タン",
-        "Target": "ターゲット",
+        "Tan": "タン（淡褐色）",
+        "Target": "目標温度",
         "Teal": "ティール",
         "Temperature change over the last 5 minutes": "過去5分間の気温変化",
         "Temperatures": "気温",
@@ -11810,7 +12388,7 @@ TRANSLATIONS = {
         "The printer must be idle.": "プリンターはアイドル状態である必要があります。",
         "The printer rejected the HTTP request (code {code}).": "プリンターは HTTP 要求 (コード {code}) を拒否しました。",
         "The printer reported an active print. Check the printer before retrying.": "プリンターはアクティブな印刷を報告しました。再試行する前にプリンターを確認してください。",
-        "The printer requires homing before manual movement.": "プリンタは手動で移動する前にホーミングが必要です。",
+        "The printer requires homing before manual movement.": "手動で軸を移動する前に原点復帰が必要です。",
         "The printer response is too large": "プリンターの応答が大きすぎます",
         "The printer returned an invalid file list.": "プリンターが無効なファイルリストを返しました。",
         "The printer returned invalid HTTP data.": "プリンターが無効な HTTP データを返しました。",
@@ -11829,8 +12407,8 @@ TRANSLATIONS = {
         "Timer {minutes} min": "タイマー {minutes} 分",
         "Total pages: {count}": "総ページ数：{count}",
         "Totals": "合計",
-        "Transport: {transport}": "トランスポート：{transport}",
-        "Travel limit": "渡航制限",
+        "Transport: {transport}": "プロトコル：{transport}",
+        "Travel limit": "軸の移動限界",
         "Trend unavailable": "トレンドが利用できません",
         "Unavailable": "なし",
         "Unexpected response from the printer": "プリンターからの予期せぬ応答",
@@ -11859,7 +12437,7 @@ TRANSLATIONS = {
         "Waiting for Home to finish…": "原点復帰の完了を待っています…",
         "Waiting for job status": "ジョブ待ち状態",
         "Waiting for printer…": "プリンターを待っています…",
-        "Waiting for readings": "読み取り待ち",
+        "Waiting for readings": "測定値を待機中",
         "Waiting for temperature readings": "検温待ち",
         "Waiting for the printer to confirm calibration.": "プリンターがキャリブレーションを確認するのを待っています。",
         "Waiting for the printer…": "プリンターを待っています…",
@@ -11875,6 +12453,15 @@ TRANSLATIONS = {
         "{time} left": "残り {time}",
     },
     "ko": {
+        "While this tab is open": "이 탭이 열려 있는 동안",
+        "Only during an active print": "인쇄 작업이 진행 중일 때만",
+        "Waiting for part removal": "출력물 제거 대기 중",
+        "Wait for part removal": "출력물 제거 대기",
+        "Bed is clear": "베드 비움 확인",
+        "Chart layout": "그래프 레이아웃",
+        "Shared scale": "공통 눈금",
+        "Separate scales": "개별 눈금",
+        "Select at least one temperature line.": "온도 곡선을 하나 이상 선택하세요.",
         " · Total print time: {time}": " · 총 인쇄 시간: {time}",
         "0 min": "0분",
         "1 mm": "1mm",
@@ -11896,23 +12483,24 @@ TRANSLATIONS = {
         "Allow access to the printer, then reload the plugin.": "프린터 접근을 허용한 후 플러그인을 다시 로드하세요.",
         "Another print source is being read.": "다른 인쇄 소스를 읽는 중입니다.",
         "Appearance": "외관",
-        "Apply": "응모하다",
+        "Apply": "적용",
         "Attention": "주의",
         "Authenticated readings: {availability}": "인증 수치: {availability}",
         "Auto shutdown": "자동 종료",
         "Axes": "축",
         "Axes busy": "축 사용 중",
         "Axis movement step": "축 이동 단계",
+        "B": "베드",
         "Basic readings received. CheckCode could not be verified.": "기본 판독값이 수신되었습니다. CheckCode를 확인할 수 없습니다.",
         "Bed": "베드",
-        "Bed Target": "침대 타겟",
-        "Bed Z": "침대Z",
+        "Bed Target": "베드 목표 온도",
+        "Bed Z": "베드 Z축",
         "Bed leveling": "베드 레벨링",
         "Black": "블랙",
         "Blue": "블루",
         "Brown": "브라운",
         "Browse files": "파일 찾아보기",
-        "Build volume": "빌드 볼륨",
+        "Build volume": "출력 가능 부피",
         "Busy": "바쁨",
         "Calibrating": "교정 중",
         "Calibration": "교정",
@@ -11930,8 +12518,8 @@ TRANSLATIONS = {
         "Canceled": "취소됨",
         "Canceling": "취소 중",
         "Card size": "카드 사이즈",
-        "Chamber": "챔버",
-        "Chamber light": "챔버 라이트",
+        "Chamber": "출력 챔버",
+        "Chamber light": "출력 챔버 조명",
         "Chart nozzle": "차트 노즐",
         "Chart of actual and target temperatures for the nozzle and bed": "노즐과 베드의 실제온도와 목표온도 차트",
         "Check connection": "연결 확인",
@@ -11955,20 +12543,20 @@ TRANSLATIONS = {
         "Choose a material and color supported by this printer.": "이 프린터가 지원하는 재질과 색상을 선택하세요.",
         "Choose a nonempty print file no larger than 128 MB.": "128MB 이하의 비어 있지 않은 인쇄 파일을 선택하세요.",
         "Choose a print file no larger than 128 MB.": "128MB 이하의 인쇄 파일을 선택하세요.",
-        "Choose a sliced .3mf with one plate and filament information.": "플레이트와 필라멘트 정보가 1개 있는 슬라이스 .3mf를 선택하세요.",
-        "Choose a sliced .3mf with one plate.": "슬라이스 .3mf를 접시 하나로 선택하세요.",
+        "Choose a sliced .3mf with one plate and filament information.": "슬라이스를 완료한 플레이트 하나와 필라멘트 정보가 들어 있는 .3mf 파일을 선택하세요.",
+        "Choose a sliced .3mf with one plate.": "슬라이스를 완료한 플레이트가 하나만 들어 있는 .3mf 파일을 선택하세요.",
         "Choose a text .gcode file or a sliced .3mf.": "텍스트 .gcode 파일이나 슬라이스 .3mf를 선택하세요.",
         "Choose delay…": "지연을 선택하세요…",
         "Choose material": "소재를 선택하세요",
-        "Choose the original .3mf with one sliced plate and the same file name.": "슬라이스 플레이트 1개와 파일 이름이 동일한 원본 .3mf를 선택하세요.",
+        "Choose the original .3mf with one sliced plate and the same file name.": "파일 이름이 같고 슬라이스를 완료한 플레이트가 하나만 들어 있는 원본 .3mf 파일을 선택하세요.",
         "Choose the original sliced .3mf for this Creator file.": "이 Creator 파일에 대해 슬라이스된 원본 .3mf를 선택하십시오.",
         "Choose the original sliced .3mf.": "오리지널 슬라이스 .3mf를 선택하세요.",
         "Choose the sliced .3mf that matches the stored file name.": "저장된 파일 이름과 일치하는 슬라이스 .3mf를 선택하십시오.",
         "Clear error": "클리어 에러",
         "Clear filters": "필터 지우기",
         "Close": "닫기",
-        "Closed": "휴무",
-        "Collecting readings…": "판독값 수집…",
+        "Closed": "닫힘",
+        "Collecting readings…": "측정값을 수집하는 중…",
         "Color": "컬러",
         "Color differs": "색상이 다릅니다",
         "Command accepted. The printer has not confirmed the change.": "명령이 승인되었습니다. 프린터에서 변경 사항을 확인하지 않았습니다.",
@@ -12037,7 +12625,7 @@ TRANSLATIONS = {
         "Empty camera stream": "빈 카메라 스트림",
         "Enable LAN-only mode on the printer.": "프린터에서 LAN 전용 모드를 활성화합니다.",
         "Ended: {time}": "종료됨: {time}",
-        "Endstops: {state}": "엔드스톱: {state}",
+        "Endstops: {state}": "리미트 스위치: {state}",
         "Enlarge camera": "카메라 확대",
         "Enter a local IPv4 address for the printer.": "프린터의 로컬 IPv4 주소를 입력하세요.",
         "Enter a page number": "페이지 번호를 입력하세요",
@@ -12065,7 +12653,6 @@ TRANSLATIONS = {
         "Find printers": "프린터 찾기",
         "Finish": "마무리",
         "Finish ≈ {time}": "마무리 ≒ {time}",
-        "Finished cleanly": "깔끔하게 마무리",
         "Finished. Printer ready.": "끝났습니다. 프린터가 준비되었습니다.",
         "Firmware": "펌웨어",
         "FlashForge Device Tab is shutting down.": "FlashForge Device Tab가 종료됩니다.",
@@ -12075,13 +12662,13 @@ TRANSLATIONS = {
         "Heat nozzle to 180 °C": "노즐을 180°C로 가열",
         "Heat off": "난방 끄기",
         "Heat the nozzle to at least 180 °C.": "노즐을 최소 180°C로 가열하세요.",
-        "Heating": "난방",
-        "Heating nozzles: {count}": "가열 노즐: {count}",
+        "Heating": "가열 중",
+        "Heating nozzles: {count}": "가열 중인 노즐: {count}",
         "History": "기록",
         "Home": "원점 복귀",
         "Home all axes": "모든 축 원점 복귀",
         "Home required": "원점 복귀 필요",
-        "Home sent. Waiting for the printer to confirm completion.": "집으로 보냈습니다. 프린터가 완료를 확인할 때까지 기다리고 있습니다.",
+        "Home sent. Waiting for the printer to confirm completion.": "원점 복귀 명령을 보냈습니다. 프린터의 완료 확인을 기다리는 중입니다.",
         "Homing…": "호밍…",
         "Host notifications": "호스트 알림",
         "IPv4 address": "IPv4 주소",
@@ -12104,9 +12691,9 @@ TRANSLATIONS = {
         "Invalid printer list.": "잘못된 프린터 목록입니다.",
         "Invalid request.": "요청이 잘못되었습니다.",
         "Invalid slice information.": "잘못된 슬라이스 정보입니다.",
-        "Job details": "채용 내용",
-        "Job status unavailable": "작업 상태를 확인할 수 없습니다.",
-        "Jobs": "채용정보",
+        "Job details": "출력 작업 상세 정보",
+        "Job status unavailable": "출력 작업 상태를 확인할 수 없음",
+        "Jobs": "출력 작업",
         "Large": "대",
         "Last completed": "마지막 완료",
         "Last reading: {seconds} s ago": "마지막 측정: {seconds}초 전",
@@ -12150,6 +12737,7 @@ TRANSLATIONS = {
         "Move sent to the printer.": "프린터로 이동이 전송되었습니다.",
         "Move up": "위로 이동",
         "Moving…": "이사…",
+        "N": "노즐",
         "Name": "이름",
         "Needs Attention": "주의가 필요함",
         "Network discovery unavailable. Enter the printer address manually.": "네트워크 검색을 사용할 수 없습니다. 프린터 주소를 수동으로 입력하세요.",
@@ -12161,7 +12749,7 @@ TRANSLATIONS = {
         "No idle printers.": "유휴 프린터가 없습니다.",
         "No loaded slot matches": "로드된 슬롯이 일치하지 않습니다.",
         "No matching files": "일치하는 파일 없음",
-        "No matching jobs.": "일치하는 작업이 없습니다.",
+        "No matching jobs.": "일치하는 출력 작업이 없습니다.",
         "No new printers found.": "새 프린터를 찾을 수 없습니다.",
         "No preview": "미리보기 없음",
         "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.": "아직 기록된 인쇄 작업이 없습니다. OrcaSlicer가 열려 있는 동안 인쇄 기록이 기록됩니다.",
@@ -12175,9 +12763,9 @@ TRANSLATIONS = {
         "Not recorded": "녹음되지 않음",
         "Notifications": "알림",
         "Nozzle": "노즐",
-        "Nozzle Target": "노즐타겟",
+        "Nozzle Target": "노즐 목표 온도",
         "Nozzle T{tool}": "노즐 T{tool}",
-        "Nozzle Z": "노즐 Z",
+        "Nozzle Z": "노즐 Z축",
         "Nozzle {temperature} °C": "노즐 {temperature} °C",
         "Nozzles": "노즐",
         "Nozzles: {count}": "노즐: {count}",
@@ -12185,7 +12773,7 @@ TRANSLATIONS = {
         "Offline for at least one minute": "1분 이상 오프라인",
         "On": "온",
         "One printer per line: address | CheckCode | name | serial number": "한 줄에 하나의 프린터: 주소 | CheckCode | 이름 | 일련번호",
-        "Open": "오픈",
+        "Open": "열림",
         "Open FlashForge": "FlashForge 열기",
         "Open FlashForge Device Tab for a FlashForge printer profile from Speed Dial.": "단축 다이얼에서 FlashForge 프린터 프로필에 대한 FlashForge Device Tab를 엽니다.",
         "Open FlashForge Device Tab for the current printer profile from Speed Dial.": "단축 다이얼에서 현재 프린터 프로필에 대한 FlashForge Device Tab를 엽니다.",
@@ -12198,11 +12786,11 @@ TRANSLATIONS = {
         "Orange": "오렌지",
         "OrcaSlicer is sending a print job. Monitoring will resume when the transfer is complete.": "OrcaSlicer가 인쇄 작업을 보내는 중입니다. 전송이 완료되면 모니터링이 재개됩니다.",
         "OrcaSlicer is sending a print job. Try again when it finishes.": "OrcaSlicer가 인쇄 작업을 보내는 중입니다. 완료되면 다시 시도하세요.",
-        "Original sliced .3mf": "오리지널 슬라이스 .3mf",
+        "Original sliced .3mf": "슬라이스를 완료한 원본 .3mf 파일",
         "Other nozzles": "기타 노즐",
         "Page number": "페이지 번호",
-        "Part Cooling Fan": "부분 냉각팬",
-        "Part fan": "부분 팬",
+        "Part Cooling Fan": "출력물 냉각 팬",
+        "Part fan": "출력물 냉각 팬",
         "Pause": "일시정지",
         "Paused": "일시중지됨",
         "Paused, disconnected or reporting a problem": "일시 중지, 연결 끊김 또는 문제 보고",
@@ -12236,6 +12824,7 @@ TRANSLATIONS = {
         "Print speed": "인쇄 속도",
         "Print started · {file}": "인쇄 시작됨 · {file}",
         "Print stored file": "저장 파일 인쇄",
+        "Print success rate": "출력 성공률",
         "Print time": "인쇄 시간",
         "Print time: {time}": "인쇄 시간: {time}",
         "Printer": "프린터",
@@ -12244,7 +12833,7 @@ TRANSLATIONS = {
         "Printer Readings": "프린터 판독값",
         "Printer accepted the command.": "프린터가 명령을 수락했습니다.",
         "Printer accepted the command. Axis limits could not be checked.": "프린터가 명령을 수락했습니다. 축 제한을 확인할 수 없습니다.",
-        "Printer camera feed": "프린터 카메라 피드",
+        "Printer camera feed": "프린터 카메라 영상",
         "Printer confirmed the nozzle target.": "프린터가 노즐 대상을 확인했습니다.",
         "Printer confirmed the shutdown timer setting.": "프린터가 종료 타이머 설정을 확인했습니다.",
         "Printer confirmed {command} · {state}": "프린터 확인 {command} · {state}",
@@ -12262,7 +12851,7 @@ TRANSLATIONS = {
         "Printer has not confirmed the nozzle target. Check Printer Readings.": "프린터가 노즐 대상을 확인하지 않았습니다. 프린터 판독값을 확인하세요.",
         "Printer jobs": "프린터 작업",
         "Printer must be idle.": "프린터가 유휴 상태여야 합니다.",
-        "Printer must be idle. Wait for movement or Home to finish.": "프린터가 유휴 상태여야 합니다. 이동이나 홈이 완료될 때까지 기다립니다.",
+        "Printer must be idle. Wait for movement or Home to finish.": "프린터가 대기 상태여야 합니다. 이동 또는 원점 복귀가 끝날 때까지 기다리세요.",
         "Printer must be idle. {reason}": "프린터가 유휴 상태여야 합니다. {reason}",
         "Printer rejected the selected file.": "프린터가 선택한 파일을 거부했습니다.",
         "Printer rejected {command}.": "프린터가 {command}를 거부했습니다.",
@@ -12278,7 +12867,7 @@ TRANSLATIONS = {
         "Profile changed": "프로필이 변경되었습니다",
         "Purple": "퍼플",
         "Range": "범위",
-        "Reading materials…": "독서 자료…",
+        "Reading materials…": "재료 정보 읽는 중…",
         "Reading printer status…": "프린터 상태를 읽는 중…",
         "Readings delayed": "판독 지연",
         "Readings unavailable": "열람 불가",
@@ -12289,9 +12878,9 @@ TRANSLATIONS = {
         "Refresh": "리프레시",
         "Refresh the Creator printer's file list first.": "먼저 Creator 프린터의 파일 목록을 새로 고치세요.",
         "Refresh the file list and check the loaded materials.": "파일 목록을 새로 고치고 로드된 소재를 확인하세요.",
-        "Release motors": "릴리즈 모터",
+        "Release motors": "모터 잠금 해제",
         "Remove": "삭제",
-        "Replace Printer tab": "프린터 교체 탭",
+        "Replace Printer tab": "프린터 탭의 콘텐츠 바꾸기",
         "Request failed.": "요청이 실패했습니다.",
         "Restored the printer's original web page.": "프린터의 원래 웹 페이지를 복원했습니다.",
         "Result": "결과",
@@ -12329,9 +12918,10 @@ TRANSLATIONS = {
         "Serial": "연재",
         "Serial number": "일련번호",
         "Serial number (required for Creator 5 / 5 Pro)": "일련번호(Creator 5 / 5 Pro에 필요)",
-        "Set target": "목표 설정",
+        "Set temperature": "목표 온도 설정",
+        "Heat": "가열",
         "Set up your first printer": "첫 번째 프린터 설정",
-        "Setting light…": "세팅라이트…",
+        "Setting light…": "조명 전환 중…",
         "Settings": "설정",
         "Settings are unavailable.": "설정이 불가능합니다.",
         "Show file previews": "파일 미리보기 표시",
@@ -12349,8 +12939,8 @@ TRANSLATIONS = {
         "Stored files": "저장 파일",
         "System theme": "시스템 테마",
         "Tab placement": "탭 배치",
-        "Tan": "탄",
-        "Target": "대상",
+        "Tan": "황갈색",
+        "Target": "목표 온도",
         "Teal": "틸",
         "Temperature change over the last 5 minutes": "지난 5분간의 온도 변화",
         "Temperatures": "기온",
@@ -12390,7 +12980,7 @@ TRANSLATIONS = {
         "The printer must be idle.": "프린터가 유휴 상태여야 합니다.",
         "The printer rejected the HTTP request (code {code}).": "프린터가 HTTP 요청(코드 {code})을 거부했습니다.",
         "The printer reported an active print. Check the printer before retrying.": "프린터에서 활성 인쇄를 보고했습니다. 다시 시도하기 전에 프린터를 확인하십시오.",
-        "The printer requires homing before manual movement.": "프린터를 수동으로 이동하기 전에 원점복귀가 필요합니다.",
+        "The printer requires homing before manual movement.": "축을 수동으로 이동하기 전에 원점 복귀를 실행하세요.",
         "The printer response is too large": "프린터 응답이 너무 큼",
         "The printer returned an invalid file list.": "프린터가 잘못된 파일 목록을 반환했습니다.",
         "The printer returned invalid HTTP data.": "프린터가 잘못된 HTTP 데이터를 반환했습니다.",
@@ -12409,8 +12999,8 @@ TRANSLATIONS = {
         "Timer {minutes} min": "타이머 {minutes} 분",
         "Total pages: {count}": "총 페이지 수: {count}",
         "Totals": "합계",
-        "Transport: {transport}": "이동수단: {transport}",
-        "Travel limit": "여행 제한",
+        "Transport: {transport}": "프로토콜: {transport}",
+        "Travel limit": "축 이동 한계",
         "Trend unavailable": "트렌드 확인 불가",
         "Unavailable": "이용 불가",
         "Unexpected response from the printer": "프린터에서 예상치 못한 응답이 발생했습니다.",
@@ -12439,7 +13029,7 @@ TRANSLATIONS = {
         "Waiting for Home to finish…": "원점 복귀가 완료되기를 기다리는 중…",
         "Waiting for job status": "작업 상태 대기 중",
         "Waiting for printer…": "프린터를 기다리는 중…",
-        "Waiting for readings": "판독 대기 중",
+        "Waiting for readings": "측정값 대기 중",
         "Waiting for temperature readings": "온도 판독 대기 중",
         "Waiting for the printer to confirm calibration.": "프린터가 교정을 확인하기를 기다리는 중입니다.",
         "Waiting for the printer…": "프린터를 기다리는 중…",
@@ -12455,6 +13045,15 @@ TRANSLATIONS = {
         "{time} left": "남은 시간: {time}",
     },
     "lt": {
+        "While this tab is open": "Kol šis skirtukas atvertas",
+        "Only during an active print": "Tik vykstant spausdinimui",
+        "Waiting for part removal": "Laukiama, kol bus nuimta detalė",
+        "Wait for part removal": "Laukti, kol bus nuimta detalė",
+        "Bed is clear": "Stalas laisvas",
+        "Chart layout": "Diagramos išdėstymas",
+        "Shared scale": "Bendra skalė",
+        "Separate scales": "Atskiros skalės",
+        "Select at least one temperature line.": "Pasirinkite bent vieną temperatūros kreivę.",
         " · Total print time: {time}": " · Bendras spausdinimo laikas: {time}",
         "0 min": "0 min",
         "1 mm": "1 mm",
@@ -12483,16 +13082,17 @@ TRANSLATIONS = {
         "Axes": "Ašys",
         "Axes busy": "Ašys užimtos",
         "Axis movement step": "Ašies judėjimo žingsnis",
+        "B": "Pagr.",
         "Basic readings received. CheckCode could not be verified.": "Gauti pagrindiniai rodmenys. Nepavyko patikrinti CheckCode.",
         "Bed": "Pagrindas",
-        "Bed Target": "Lovos taikinys",
-        "Bed Z": "Lova Z",
+        "Bed Target": "Tikslinė pagrindo temperatūra",
+        "Bed Z": "Pagrindo Z ašis",
         "Bed leveling": "Spausdinimo pagrindo išlyginimas",
         "Black": "Juoda",
         "Blue": "Mėlyna",
         "Brown": "Ruda",
         "Browse files": "Naršyti failus",
-        "Build volume": "Sukūrimo apimtis",
+        "Build volume": "Spausdinimo tūris",
         "Busy": "Užimtas",
         "Calibrating": "Kalibravimas",
         "Calibration": "Kalibravimas",
@@ -12508,10 +13108,10 @@ TRANSLATIONS = {
         "Cancel": "Atšaukti",
         "Cancel print?": "Atšaukti spausdinimą?",
         "Canceled": "Atšaukta",
-        "Canceling": "Atšaukiamas",
+        "Canceling": "Atšaukiama",
         "Card size": "Kortelės dydis",
-        "Chamber": "Kameros",
-        "Chamber light": "Kamerinis apšvietimas",
+        "Chamber": "Spausdinimo kamera",
+        "Chamber light": "Spausdinimo kameros apšvietimas",
         "Chart nozzle": "Diagramos antgalis",
         "Chart of actual and target temperatures for the nozzle and bed": "Antgalio ir pagrindo faktinių ir tikslinių temperatūrų diagrama",
         "Check connection": "Patikrinkite jungtį",
@@ -12535,12 +13135,12 @@ TRANSLATIONS = {
         "Choose a material and color supported by this printer.": "Pasirinkite medžiagą ir spalvą, kurią palaiko šis spausdintuvas.",
         "Choose a nonempty print file no larger than 128 MB.": "Pasirinkite tuščią spausdinimo failą, ne didesnį nei 128 MB.",
         "Choose a print file no larger than 128 MB.": "Pasirinkite ne didesnį nei 128 MB spausdinimo failą.",
-        "Choose a sliced .3mf with one plate and filament information.": "Pasirinkite supjaustytą .3mf su viena plokštele ir kaitinamojo siūlelio informacija.",
-        "Choose a sliced .3mf with one plate.": "Pasirinkite pjaustytą .3mf su viena lėkšte.",
+        "Choose a sliced .3mf with one plate and filament information.": "Pasirinkite .3mf failą su viena sluoksniais suskaidyta plokšte ir gijų duomenimis.",
+        "Choose a sliced .3mf with one plate.": "Pasirinkite .3mf failą su viena sluoksniais suskaidyta spausdinimo plokšte.",
         "Choose a text .gcode file or a sliced .3mf.": "Pasirinkite tekstinį .gcode failą arba supjaustytą .3mf.",
         "Choose delay…": "Pasirinkite delsą…",
         "Choose material": "Pasirinkite medžiagą",
-        "Choose the original .3mf with one sliced plate and the same file name.": "Pasirinkite originalų .3mf su viena plokšte ir tuo pačiu failo pavadinimu.",
+        "Choose the original .3mf with one sliced plate and the same file name.": "Pasirinkite to paties pavadinimo originalų .3mf failą su viena sluoksniais suskaidyta plokšte.",
         "Choose the original sliced .3mf for this Creator file.": "Šiam Kūrėjo failui pasirinkite originalų supjaustytą .3mf.",
         "Choose the original sliced .3mf.": "Pasirinkite originalų supjaustytą .3mf.",
         "Choose the sliced .3mf that matches the stored file name.": "Pasirinkite supjaustytą .3mf, atitinkančią saugomo failo pavadinimą.",
@@ -12617,7 +13217,7 @@ TRANSLATIONS = {
         "Empty camera stream": "Tuščias kameros srautas",
         "Enable LAN-only mode on the printer.": "Įjunkite spausdintuvo tik LAN režimą.",
         "Ended: {time}": "Baigta: {time}",
-        "Endstops: {state}": "Galinės ribos: {state}",
+        "Endstops: {state}": "Galiniai jungikliai: {state}",
         "Enlarge camera": "Padidinti fotoaparatą",
         "Enter a local IPv4 address for the printer.": "Įveskite vietinį spausdintuvo IPv4 adresą.",
         "Enter a page number": "Įveskite puslapio numerį",
@@ -12645,7 +13245,6 @@ TRANSLATIONS = {
         "Find printers": "Raskite spausdintuvus",
         "Finish": "Baigti",
         "Finish ≈ {time}": "Apdaila ≈ {time}",
-        "Finished cleanly": "Baigta švariai",
         "Finished. Printer ready.": "Baigta. Spausdintuvas paruoštas.",
         "Firmware": "Firmware",
         "FlashForge Device Tab is shutting down.": "FlashForge Device Tab išsijungia.",
@@ -12655,13 +13254,13 @@ TRANSLATIONS = {
         "Heat nozzle to 180 °C": "Antgalį pašildykite iki 180 °C",
         "Heat off": "Šildymas išjungtas",
         "Heat the nozzle to at least 180 °C.": "Įkaitinkite antgalį bent iki 180 °C.",
-        "Heating": "Šildymas",
-        "Heating nozzles: {count}": "Šildymo antgaliai: {count}",
+        "Heating": "Kaitinimas",
+        "Heating nozzles: {count}": "Kaistantys purkštukai: {count}",
         "History": "Istorija",
         "Home": "Nustatyti pradinę padėtį",
         "Home all axes": "Nustatyti visų ašių pradinę padėtį",
         "Home required": "Reikia nustatyti pradinę padėtį",
-        "Home sent. Waiting for the printer to confirm completion.": "Namai išsiųsti. Laukiama, kol spausdintuvas patvirtins baigimą.",
+        "Home sent. Waiting for the printer to confirm completion.": "Išsiųsta pradinės padėties nustatymo komanda. Laukiama, kol spausdintuvas patvirtins pabaigą.",
         "Homing…": "Patalpos...",
         "Host notifications": "Pagrindinio kompiuterio pranešimai",
         "IPv4 address": "IPv4 adresas",
@@ -12684,9 +13283,9 @@ TRANSLATIONS = {
         "Invalid printer list.": "Neteisingas spausdintuvų sąrašas.",
         "Invalid request.": "Neteisinga užklausa.",
         "Invalid slice information.": "Neteisinga skilties informacija.",
-        "Job details": "Informacija apie darbą",
-        "Job status unavailable": "Darbo būsena nepasiekiama",
-        "Jobs": "Darbai",
+        "Job details": "Spausdinimo užduoties informacija",
+        "Job status unavailable": "Spausdinimo užduoties būsena nepasiekiama",
+        "Jobs": "Spausdinimo užduotys",
         "Large": "Didelis",
         "Last completed": "Paskutinį kartą baigta",
         "Last reading: {seconds} s ago": "Paskutinis rodmuo prieš {seconds} s",
@@ -12730,6 +13329,7 @@ TRANSLATIONS = {
         "Move sent to the printer.": "Perkelti, išsiųsta į spausdintuvą.",
         "Move up": "Perkelti aukštyn",
         "Moving…": "Perkeliama…",
+        "N": "Purkšt.",
         "Name": "Vardas",
         "Needs Attention": "Reikia dėmesio",
         "Network discovery unavailable. Enter the printer address manually.": "Tinklo aptikimas nepasiekiamas. Įveskite spausdintuvo adresą rankiniu būdu.",
@@ -12741,7 +13341,7 @@ TRANSLATIONS = {
         "No idle printers.": "Nėra neveikiančių spausdintuvų.",
         "No loaded slot matches": "Nėra įkeltų lizdų atitikčių",
         "No matching files": "Atitinkančių failų nėra",
-        "No matching jobs.": "Atitinkamų darbų nėra.",
+        "No matching jobs.": "Atitinkančių spausdinimo užduočių nėra.",
         "No new printers found.": "Naujų spausdintuvų nerasta.",
         "No preview": "Nėra peržiūros",
         "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.": "Dar neužregistruota jokių spausdinimo užduočių. Kai OrcaSlicer atidarytas, spausdinimo istorija įrašoma.",
@@ -12755,9 +13355,9 @@ TRANSLATIONS = {
         "Not recorded": "Neįrašyta",
         "Notifications": "Pranešimai",
         "Nozzle": "Purkštukas",
-        "Nozzle Target": "Purkštuko taikinys",
+        "Nozzle Target": "Tikslinė purkštuko temperatūra",
         "Nozzle T{tool}": "Antgalis T{tool}",
-        "Nozzle Z": "Antgalis Z",
+        "Nozzle Z": "Purkštuko Z ašis",
         "Nozzle {temperature} °C": "Antgalis {temperature} °C",
         "Nozzles": "Purkštukai",
         "Nozzles: {count}": "Purkštukai: {count}",
@@ -12765,7 +13365,7 @@ TRANSLATIONS = {
         "Offline for at least one minute": "Neprisijungęs bent vieną minutę",
         "On": "Įjungta",
         "One printer per line: address | CheckCode | name | serial number": "Vienas spausdintuvas eilutėje: adresas | CheckCode | vardas | serijos numeris",
-        "Open": "Atidaryti",
+        "Open": "Atidaryta",
         "Open FlashForge": "Atidarykite FlashForge",
         "Open FlashForge Device Tab for a FlashForge printer profile from Speed Dial.": "Atidarykite FlashForge Device Tab FlashForge spausdintuvo profiliui iš sparčiojo rinkimo.",
         "Open FlashForge Device Tab for the current printer profile from Speed Dial.": "Atidarykite FlashForge Device Tab esamam spausdintuvo profiliui iš sparčiojo rinkimo.",
@@ -12778,11 +13378,11 @@ TRANSLATIONS = {
         "Orange": "Oranžinė",
         "OrcaSlicer is sending a print job. Monitoring will resume when the transfer is complete.": "OrcaSlicer siunčia spausdinimo užduotį. Stebėjimas bus atnaujintas, kai perkėlimas bus baigtas.",
         "OrcaSlicer is sending a print job. Try again when it finishes.": "OrcaSlicer siunčia spausdinimo užduotį. Bandykite dar kartą, kai baigsis.",
-        "Original sliced .3mf": "Originalus supjaustytas .3mf",
+        "Original sliced .3mf": "Originalus supjaustytas .3mf failas",
         "Other nozzles": "Kiti purkštukai",
         "Page number": "Puslapio numeris",
-        "Part Cooling Fan": "Dalies aušinimo ventiliatorius",
-        "Part fan": "Dalinis ventiliatorius",
+        "Part Cooling Fan": "Detalės aušinimo ventiliatorius",
+        "Part fan": "Detalės aušinimas",
         "Pause": "Pauzė",
         "Paused": "Pristabdyta",
         "Paused, disconnected or reporting a problem": "Pristabdytas, atjungtas arba pranešama apie problemą",
@@ -12816,6 +13416,7 @@ TRANSLATIONS = {
         "Print speed": "Spausdinimo greitis",
         "Print started · {file}": "Spausdinimas pradėtas · {file}",
         "Print stored file": "Spausdinti išsaugotą failą",
+        "Print success rate": "Sėkmingų spaudinių dalis",
         "Print time": "Spausdinimo laikas",
         "Print time: {time}": "Spausdinimo laikas: {time}",
         "Printer": "Spausdintuvas",
@@ -12824,7 +13425,7 @@ TRANSLATIONS = {
         "Printer Readings": "Spausdintuvo rodmenys",
         "Printer accepted the command.": "Spausdintuvas priėmė komandą.",
         "Printer accepted the command. Axis limits could not be checked.": "Spausdintuvas priėmė komandą. Nepavyko patikrinti ašies ribų.",
-        "Printer camera feed": "Spausdintuvo kameros tiekimas",
+        "Printer camera feed": "Spausdintuvo kameros vaizdas",
         "Printer confirmed the nozzle target.": "Spausdintuvas patvirtino purkštuko tikslą.",
         "Printer confirmed the shutdown timer setting.": "Spausdintuvas patvirtino išjungimo laikmačio nustatymą.",
         "Printer confirmed {command} · {state}": "Spausdintuvas patvirtintas {command} · {state}",
@@ -12842,7 +13443,7 @@ TRANSLATIONS = {
         "Printer has not confirmed the nozzle target. Check Printer Readings.": "Spausdintuvas nepatvirtino purkštuko tikslo. Patikrinkite spausdintuvo rodmenis.",
         "Printer jobs": "Spausdintuvo užduotys",
         "Printer must be idle.": "Spausdintuvas turi neveikti.",
-        "Printer must be idle. Wait for movement or Home to finish.": "Spausdintuvas turi neveikti. Palaukite, kol baigsis judėjimas arba Namai.",
+        "Printer must be idle. Wait for movement or Home to finish.": "Spausdintuvas turi būti laisvas. Palaukite, kol baigsis judėjimas arba pradinės padėties nustatymas.",
         "Printer must be idle. {reason}": "Spausdintuvas turi neveikti. {reason}",
         "Printer rejected the selected file.": "Spausdintuvas atmetė pasirinktą failą.",
         "Printer rejected {command}.": "Spausdintuvas atmestas {command}.",
@@ -12858,7 +13459,7 @@ TRANSLATIONS = {
         "Profile changed": "Profilis pakeistas",
         "Purple": "Violetinė",
         "Range": "Diapazonas",
-        "Reading materials…": "Skaitymo medžiaga…",
+        "Reading materials…": "Skaitomi medžiagų duomenys…",
         "Reading printer status…": "Skaitoma spausdintuvo būsena…",
         "Readings delayed": "Skaitymai vėluoja",
         "Readings unavailable": "Rodmenys nepasiekiami",
@@ -12869,9 +13470,9 @@ TRANSLATIONS = {
         "Refresh": "Atnaujinti",
         "Refresh the Creator printer's file list first.": "Pirmiausia atnaujinkite Creator spausdintuvo failų sąrašą.",
         "Refresh the file list and check the loaded materials.": "Atnaujinkite failų sąrašą ir patikrinkite įkeltas medžiagas.",
-        "Release motors": "Atleiskite variklius",
+        "Release motors": "Atlaisvinti variklius",
         "Remove": "Pašalinti",
-        "Replace Printer tab": "Pakeisti spausdintuvo skirtuką",
+        "Replace Printer tab": "Pakeisti spausdintuvo skirtuko turinį",
         "Request failed.": "Užklausa nepavyko.",
         "Restored the printer's original web page.": "Atkurtas originalus spausdintuvo tinklalapis.",
         "Result": "Rezultatas",
@@ -12909,9 +13510,10 @@ TRANSLATIONS = {
         "Serial": "Serijos",
         "Serial number": "Serijos numeris",
         "Serial number (required for Creator 5 / 5 Pro)": "Serijos numeris (reikalingas Creator 5 / 5 Pro)",
-        "Set target": "Nustatykite tikslą",
+        "Set temperature": "Nustatyti temperatūrą",
+        "Heat": "Šildyti",
         "Set up your first printer": "Nustatykite pirmąjį spausdintuvą",
-        "Setting light…": "Nustatoma šviesa…",
+        "Setting light…": "Perjungiamas apšvietimas…",
         "Settings": "Parametrai",
         "Settings are unavailable.": "Nustatymai nepasiekiami.",
         "Show file previews": "Rodyti failų peržiūras",
@@ -12929,8 +13531,8 @@ TRANSLATIONS = {
         "Stored files": "Išsaugoti failai",
         "System theme": "Sistemos tema",
         "Tab placement": "Skirtuko vieta",
-        "Tan": "Įdegis",
-        "Target": "Tikslas",
+        "Tan": "Šviesiai ruda",
+        "Target": "Tikslinė temperatūra",
         "Teal": "žalsvai mėlyna",
         "Temperature change over the last 5 minutes": "Temperatūros pokytis per paskutines 5 minutes",
         "Temperatures": "Temperatūra",
@@ -12970,7 +13572,7 @@ TRANSLATIONS = {
         "The printer must be idle.": "Spausdintuvas turi neveikti.",
         "The printer rejected the HTTP request (code {code}).": "Spausdintuvas atmetė HTTP užklausą (kodas {code}).",
         "The printer reported an active print. Check the printer before retrying.": "Spausdintuvas pranešė apie aktyvų spausdinimą. Prieš bandydami dar kartą patikrinkite spausdintuvą.",
-        "The printer requires homing before manual movement.": "Prieš pajudinant spausdintuvą rankiniu būdu, jį reikia nustatyti.",
+        "The printer requires homing before manual movement.": "Prieš judindami ašis rankiniu būdu nustatykite pradinę padėtį.",
         "The printer response is too large": "Spausdintuvo atsakas per didelis",
         "The printer returned an invalid file list.": "Spausdintuvas pateikė neteisingą failų sąrašą.",
         "The printer returned invalid HTTP data.": "Spausdintuvas pateikė neteisingus HTTP duomenis.",
@@ -12989,8 +13591,8 @@ TRANSLATIONS = {
         "Timer {minutes} min": "Laikmatis {minutes} min",
         "Total pages: {count}": "Puslapių iš viso: {count}",
         "Totals": "Iš viso",
-        "Transport: {transport}": "Transportas: {transport}",
-        "Travel limit": "Kelionės limitas",
+        "Transport: {transport}": "Protokolas: {transport}",
+        "Travel limit": "Ašies eigos riba",
         "Trend unavailable": "Tendencija nepasiekiama",
         "Unavailable": "Nepasiekiama",
         "Unexpected response from the printer": "Netikėtas atsakymas iš spausdintuvo",
@@ -13035,6 +13637,15 @@ TRANSLATIONS = {
         "{time} left": "Liko {time}",
     },
     "nl": {
+        "While this tab is open": "Zolang dit tabblad open is",
+        "Only during an active print": "Alleen bij een actieve afdruktaak",
+        "Waiting for part removal": "Wacht op verwijderen van het onderdeel",
+        "Wait for part removal": "Wachten op verwijdering van het onderdeel",
+        "Bed is clear": "Printbed is vrij",
+        "Chart layout": "Grafiekindeling",
+        "Shared scale": "Gedeelde schaal",
+        "Separate scales": "Afzonderlijke schalen",
+        "Select at least one temperature line.": "Selecteer minstens één temperatuurlijn.",
         " · Total print time: {time}": " · Totale afdruktijd: {time}",
         "0 min": "0 min",
         "1 mm": "1 mm",
@@ -13063,10 +13674,11 @@ TRANSLATIONS = {
         "Axes": "Assen",
         "Axes busy": "Assen bezet",
         "Axis movement step": "Asbewegingsstap",
+        "B": "Printbed",
         "Basic readings received. CheckCode could not be verified.": "Basismetingen ontvangen. CheckCode kon niet worden geverifieerd.",
         "Bed": "Printbed",
-        "Bed Target": "Beddoel",
-        "Bed Z": "Bed Z",
+        "Bed Target": "Doeltemperatuur printbed",
+        "Bed Z": "Z-as van het printbed",
         "Bed leveling": "Bednivellering",
         "Black": "Zwart",
         "Blue": "Blauw",
@@ -13088,10 +13700,10 @@ TRANSLATIONS = {
         "Cancel": "Annuleren",
         "Cancel print?": "Afdrukken annuleren?",
         "Canceled": "Geannuleerd",
-        "Canceling": "Annuleren",
+        "Canceling": "Wordt geannuleerd",
         "Card size": "Kaartformaat",
-        "Chamber": "Kamer",
-        "Chamber light": "Kamerverlichting",
+        "Chamber": "Printkamer",
+        "Chamber light": "Verlichting van de printkamer",
         "Chart nozzle": "Kaartmondstuk",
         "Chart of actual and target temperatures for the nozzle and bed": "Grafiek van werkelijke en beoogde temperaturen voor het mondstuk en het bed",
         "Check connection": "Controleer de aansluiting",
@@ -13115,12 +13727,12 @@ TRANSLATIONS = {
         "Choose a material and color supported by this printer.": "Kies een materiaal en kleur die door deze printer worden ondersteund.",
         "Choose a nonempty print file no larger than 128 MB.": "Kies een niet-leeg afdrukbestand dat niet groter is dan 128 MB.",
         "Choose a print file no larger than 128 MB.": "Kies een printbestand dat niet groter is dan 128 MB.",
-        "Choose a sliced .3mf with one plate and filament information.": "Kies een gesneden .3mf met één plaat en filamentinformatie.",
-        "Choose a sliced .3mf with one plate.": "Kies een gesneden .3mf met één bord.",
+        "Choose a sliced .3mf with one plate and filament information.": "Kies een .3mf-bestand met één geslicete bouwplaat en filamentgegevens.",
+        "Choose a sliced .3mf with one plate.": "Kies een .3mf-bestand met één geslicete bouwplaat.",
         "Choose a text .gcode file or a sliced .3mf.": "Kies een tekst-.gcode-bestand of een gesneden .3mf.",
         "Choose delay…": "Kies vertraging…",
         "Choose material": "Kies materiaal",
-        "Choose the original .3mf with one sliced plate and the same file name.": "Kies de originele .3mf met één gesneden plaat en dezelfde bestandsnaam.",
+        "Choose the original .3mf with one sliced plate and the same file name.": "Kies het oorspronkelijke .3mf-bestand met één geslicete bouwplaat en dezelfde bestandsnaam.",
         "Choose the original sliced .3mf for this Creator file.": "Kies de originele gesneden .3mf voor dit Creator-bestand.",
         "Choose the original sliced .3mf.": "Kies de origineel gesneden .3mf.",
         "Choose the sliced .3mf that matches the stored file name.": "Kies de gesegmenteerde .3mf die overeenkomt met de opgeslagen bestandsnaam.",
@@ -13128,7 +13740,7 @@ TRANSLATIONS = {
         "Clear filters": "Filters wissen",
         "Close": "Sluiten",
         "Closed": "Gesloten",
-        "Collecting readings…": "Meetwaarden verzamelen…",
+        "Collecting readings…": "Meetwaarden worden verzameld…",
         "Color": "Kleur",
         "Color differs": "Kleur verschilt",
         "Command accepted. The printer has not confirmed the change.": "Commando geaccepteerd. De printer heeft de wijziging niet bevestigd.",
@@ -13197,7 +13809,7 @@ TRANSLATIONS = {
         "Empty camera stream": "Lege camerastream",
         "Enable LAN-only mode on the printer.": "Schakel de modus Alleen LAN in op de printer.",
         "Ended: {time}": "Einde: {time}",
-        "Endstops: {state}": "Eindstops: {state}",
+        "Endstops: {state}": "Eindschakelaars: {state}",
         "Enlarge camera": "Camera vergroten",
         "Enter a local IPv4 address for the printer.": "Voer een lokaal IPv4-adres voor de printer in.",
         "Enter a page number": "Voer een paginanummer in",
@@ -13225,7 +13837,6 @@ TRANSLATIONS = {
         "Find printers": "Zoek printers",
         "Finish": "Voltooien",
         "Finish ≈ {time}": "Afwerking ≈ {time}",
-        "Finished cleanly": "Netjes afgewerkt",
         "Finished. Printer ready.": "Klaar. Printer gereed.",
         "Firmware": "Firmware",
         "FlashForge Device Tab is shutting down.": "FlashForge Device Tab wordt afgesloten.",
@@ -13235,13 +13846,13 @@ TRANSLATIONS = {
         "Heat nozzle to 180 °C": "Verwarm het mondstuk tot 180 °C",
         "Heat off": "Verwarming uit",
         "Heat the nozzle to at least 180 °C.": "Verwarm het mondstuk tot minimaal 180 °C.",
-        "Heating": "Verwarming",
-        "Heating nozzles: {count}": "Verwarmingssproeiers: {count}",
+        "Heating": "Opwarmen",
+        "Heating nozzles: {count}": "Opwarmende mondstukken: {count}",
         "History": "Geschiedenis",
         "Home": "Naar nulpunt",
         "Home all axes": "Alle assen naar het nulpunt",
         "Home required": "Nulpunt instellen vereist",
-        "Home sent. Waiting for the printer to confirm completion.": "Thuis gestuurd. Wachten tot de printer de voltooiing bevestigt.",
+        "Home sent. Waiting for the printer to confirm completion.": "Opdracht om naar het nulpunt te gaan verzonden. Wachten op bevestiging van de printer.",
         "Homing…": "Op weg…",
         "Host notifications": "Hostmeldingen",
         "IPv4 address": "IPv4-adres",
@@ -13264,9 +13875,9 @@ TRANSLATIONS = {
         "Invalid printer list.": "Ongeldige printerlijst.",
         "Invalid request.": "Ongeldig verzoek.",
         "Invalid slice information.": "Ongeldige segmentinformatie.",
-        "Job details": "Taakdetails",
-        "Job status unavailable": "Taakstatus niet beschikbaar",
-        "Jobs": "Banen",
+        "Job details": "Details van printtaak",
+        "Job status unavailable": "Status van printtaak niet beschikbaar",
+        "Jobs": "Printtaken",
         "Large": "Groot",
         "Last completed": "Laatst voltooid",
         "Last reading: {seconds} s ago": "Laatste meting: {seconds} s geleden",
@@ -13310,6 +13921,7 @@ TRANSLATIONS = {
         "Move sent to the printer.": "Verplaatsing verzonden naar de printer.",
         "Move up": "Ga omhoog",
         "Moving…": "Verhuizen…",
+        "N": "Mondst.",
         "Name": "Naam",
         "Needs Attention": "Heeft aandacht nodig",
         "Network discovery unavailable. Enter the printer address manually.": "Netwerkdetectie niet beschikbaar. Voer het printeradres handmatig in.",
@@ -13321,7 +13933,7 @@ TRANSLATIONS = {
         "No idle printers.": "Geen inactieve printers.",
         "No loaded slot matches": "Geen geladen slotovereenkomsten",
         "No matching files": "Geen overeenkomende bestanden",
-        "No matching jobs.": "Geen overeenkomende vacatures.",
+        "No matching jobs.": "Geen overeenkomende printtaken.",
         "No new printers found.": "Geen nieuwe printers gevonden.",
         "No preview": "Geen voorbeeld",
         "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.": "Nog geen printopdrachten geregistreerd. De afdrukgeschiedenis wordt vastgelegd terwijl OrcaSlicer geopend is.",
@@ -13335,9 +13947,9 @@ TRANSLATIONS = {
         "Not recorded": "Niet opgenomen",
         "Notifications": "Meldingen",
         "Nozzle": "Mondstuk",
-        "Nozzle Target": "Spuitmonddoel",
+        "Nozzle Target": "Doeltemperatuur mondstuk",
         "Nozzle T{tool}": "Mondstuk T{tool}",
-        "Nozzle Z": "Mondstuk Z",
+        "Nozzle Z": "Z-as van het mondstuk",
         "Nozzle {temperature} °C": "Mondstuk {temperature} °C",
         "Nozzles": "Mondstukken",
         "Nozzles: {count}": "Mondstukken: {count}",
@@ -13345,7 +13957,7 @@ TRANSLATIONS = {
         "Offline for at least one minute": "Minimaal één minuut offline",
         "On": "Aan",
         "One printer per line: address | CheckCode | name | serial number": "Eén printer per regel: adres | CheckCode | naam | serienummer",
-        "Open": "Openen",
+        "Open": "Open",
         "Open FlashForge": "FlashForge openen",
         "Open FlashForge Device Tab for a FlashForge printer profile from Speed Dial.": "Open FlashForge Device Tab voor een FlashForge-printerprofiel vanuit Snelkiezen.",
         "Open FlashForge Device Tab for the current printer profile from Speed Dial.": "Open FlashForge Device Tab voor het huidige printerprofiel via Snelkiezen.",
@@ -13358,11 +13970,11 @@ TRANSLATIONS = {
         "Orange": "Oranje",
         "OrcaSlicer is sending a print job. Monitoring will resume when the transfer is complete.": "OrcaSlicer verzendt een afdruktaak. De bewaking wordt hervat zodra de overdracht is voltooid.",
         "OrcaSlicer is sending a print job. Try again when it finishes.": "OrcaSlicer verzendt een afdruktaak. Probeer het opnieuw als het klaar is.",
-        "Original sliced .3mf": "Origineel gesneden .3mf",
+        "Original sliced .3mf": "Oorspronkelijk geslicet .3mf-bestand",
         "Other nozzles": "Andere mondstukken",
         "Page number": "Paginanummer",
-        "Part Cooling Fan": "Onderdeel koelventilator",
-        "Part fan": "Gedeeltelijke ventilator",
+        "Part Cooling Fan": "Ventilator voor printkoeling",
+        "Part fan": "Printkoeling",
         "Pause": "Pauze",
         "Paused": "Gepauzeerd",
         "Paused, disconnected or reporting a problem": "Onderbroken, verbinding verbroken of melding van een probleem",
@@ -13396,6 +14008,7 @@ TRANSLATIONS = {
         "Print speed": "Afdruksnelheid",
         "Print started · {file}": "Afdrukken gestart · {file}",
         "Print stored file": "Opgeslagen bestand afdrukken",
+        "Print success rate": "Succespercentage",
         "Print time": "Afdruktijd",
         "Print time: {time}": "Afdruktijd: {time}",
         "Printer": "Printer",
@@ -13404,7 +14017,7 @@ TRANSLATIONS = {
         "Printer Readings": "Printerwaarden",
         "Printer accepted the command.": "Printer accepteerde de opdracht.",
         "Printer accepted the command. Axis limits could not be checked.": "Printer accepteerde de opdracht. Aslimieten konden niet worden gecontroleerd.",
-        "Printer camera feed": "Printercamerafeed",
+        "Printer camera feed": "Beeld van de printercamera",
         "Printer confirmed the nozzle target.": "De printer heeft het spuitmonddoel bevestigd.",
         "Printer confirmed the shutdown timer setting.": "De printer heeft de instelling voor de uitschakeltimer bevestigd.",
         "Printer confirmed {command} · {state}": "Printer bevestigd {command} · {state}",
@@ -13422,7 +14035,7 @@ TRANSLATIONS = {
         "Printer has not confirmed the nozzle target. Check Printer Readings.": "De printer heeft het spuitmonddoel niet bevestigd. Controleer de printerwaarden.",
         "Printer jobs": "Printertaken",
         "Printer must be idle.": "Printer moet inactief zijn.",
-        "Printer must be idle. Wait for movement or Home to finish.": "Printer moet inactief zijn. Wacht tot de beweging of Home is voltooid.",
+        "Printer must be idle. Wait for movement or Home to finish.": "De printer moet inactief zijn. Wacht tot de assen stilstaan of het nulpunt hebben bereikt.",
         "Printer must be idle. {reason}": "Printer moet inactief zijn. {reason}",
         "Printer rejected the selected file.": "De printer heeft het geselecteerde bestand afgewezen.",
         "Printer rejected {command}.": "Printer heeft {command} afgewezen.",
@@ -13438,7 +14051,7 @@ TRANSLATIONS = {
         "Profile changed": "Profiel gewijzigd",
         "Purple": "Paars",
         "Range": "Bereik",
-        "Reading materials…": "Leesmateriaal…",
+        "Reading materials…": "Materiaalgegevens lezen…",
         "Reading printer status…": "Printerstatus lezen…",
         "Readings delayed": "Metingen vertraagd",
         "Readings unavailable": "Metingen niet beschikbaar",
@@ -13449,9 +14062,9 @@ TRANSLATIONS = {
         "Refresh": "Vernieuwen",
         "Refresh the Creator printer's file list first.": "Vernieuw eerst de bestandenlijst van de Creator-printer.",
         "Refresh the file list and check the loaded materials.": "Ververs de bestandslijst en controleer de geladen materialen.",
-        "Release motors": "Motoren loslaten",
+        "Release motors": "Motoren ontgrendelen",
         "Remove": "Verwijderen",
-        "Replace Printer tab": "Vervang het tabblad Printer",
+        "Replace Printer tab": "Inhoud van het tabblad Printer vervangen",
         "Request failed.": "Verzoek mislukt.",
         "Restored the printer's original web page.": "De originele webpagina van de printer hersteld.",
         "Result": "Resultaat",
@@ -13489,9 +14102,10 @@ TRANSLATIONS = {
         "Serial": "Serieel",
         "Serial number": "Serienummer",
         "Serial number (required for Creator 5 / 5 Pro)": "Serienummer (vereist voor Creator 5 / 5 Pro)",
-        "Set target": "Doel instellen",
+        "Set temperature": "Temperatuur instellen",
+        "Heat": "Verwarmen",
         "Set up your first printer": "Uw eerste printer instellen",
-        "Setting light…": "Licht instellen…",
+        "Setting light…": "Verlichting schakelen…",
         "Settings": "Instellingen",
         "Settings are unavailable.": "Instellingen zijn niet beschikbaar.",
         "Show file previews": "Bestandsvoorbeelden weergeven",
@@ -13510,7 +14124,7 @@ TRANSLATIONS = {
         "System theme": "Systeemthema",
         "Tab placement": "Tabbladplaatsing",
         "Tan": "Geelbruin",
-        "Target": "Doel",
+        "Target": "Doeltemperatuur",
         "Teal": "Wintertaling",
         "Temperature change over the last 5 minutes": "Temperatuurverandering gedurende de afgelopen 5 minuten",
         "Temperatures": "Temperaturen",
@@ -13550,7 +14164,7 @@ TRANSLATIONS = {
         "The printer must be idle.": "De printer moet inactief zijn.",
         "The printer rejected the HTTP request (code {code}).": "De printer heeft het HTTP-verzoek (code {code}) afgewezen.",
         "The printer reported an active print. Check the printer before retrying.": "De printer meldde een actieve afdruk. Controleer de printer voordat u het opnieuw probeert.",
-        "The printer requires homing before manual movement.": "De printer moet eerst worden verplaatst voordat deze handmatig wordt verplaatst.",
+        "The printer requires homing before manual movement.": "Ga naar het nulpunt voordat je de assen handmatig beweegt.",
         "The printer response is too large": "De printerrespons is te groot",
         "The printer returned an invalid file list.": "De printer heeft een lijst met ongeldige bestanden geretourneerd.",
         "The printer returned invalid HTTP data.": "De printer heeft ongeldige HTTP-gegevens geretourneerd.",
@@ -13569,8 +14183,8 @@ TRANSLATIONS = {
         "Timer {minutes} min": "Timer {minutes} min",
         "Total pages: {count}": "Totaal aantal pagina's: {count}",
         "Totals": "Totalen",
-        "Transport: {transport}": "Transport: {transport}",
-        "Travel limit": "Reislimiet",
+        "Transport: {transport}": "Protocol: {transport}",
+        "Travel limit": "Bewegingslimiet van de as",
         "Trend unavailable": "Trend niet beschikbaar",
         "Unavailable": "Niet beschikbaar",
         "Unexpected response from the printer": "Onverwachte reactie van de printer",
@@ -13599,7 +14213,7 @@ TRANSLATIONS = {
         "Waiting for Home to finish…": "Wachten tot de assen het nulpunt bereiken…",
         "Waiting for job status": "Wachten op taakstatus",
         "Waiting for printer…": "Wachten op printer…",
-        "Waiting for readings": "Wachten op metingen",
+        "Waiting for readings": "Wachten op meetwaarden",
         "Waiting for temperature readings": "Wachten op temperatuurmetingen",
         "Waiting for the printer to confirm calibration.": "Wachten tot de printer de kalibratie bevestigt.",
         "Waiting for the printer…": "Wachten op de printer…",
@@ -13615,6 +14229,15 @@ TRANSLATIONS = {
         "{time} left": "Nog {time}",
     },
     "pl": {
+        "While this tab is open": "Gdy ta karta jest otwarta",
+        "Only during an active print": "Tylko podczas aktywnego drukowania",
+        "Waiting for part removal": "Czeka na zdjęcie wydruku",
+        "Wait for part removal": "Czekaj na zdjęcie wydruku",
+        "Bed is clear": "Stół jest wolny",
+        "Chart layout": "Układ wykresu",
+        "Shared scale": "Wspólna skala",
+        "Separate scales": "Osobne skale",
+        "Select at least one temperature line.": "Wybierz co najmniej jedną linię temperatury.",
         " · Total print time: {time}": " · Całkowity czas drukowania: {time}",
         "0 min": "0 min",
         "1 mm": "1 mm",
@@ -13643,16 +14266,17 @@ TRANSLATIONS = {
         "Axes": "Osie",
         "Axes busy": "Osie zajęte",
         "Axis movement step": "Krok ruchu osi",
+        "B": "Stół",
         "Basic readings received. CheckCode could not be verified.": "Otrzymano podstawowe odczyty. Nie można zweryfikować CheckCode.",
         "Bed": "Stół",
-        "Bed Target": "Cel łóżka",
-        "Bed Z": "Łóżko Z",
+        "Bed Target": "Temperatura docelowa stołu",
+        "Bed Z": "Oś Z stołu",
         "Bed leveling": "Poziomowanie stołu",
         "Black": "Czarny",
         "Blue": "Niebieski",
         "Brown": "Brązowy",
         "Browse files": "Przeglądaj pliki",
-        "Build volume": "Buduj głośność",
+        "Build volume": "Objętość robocza",
         "Busy": "Zajęty",
         "Calibrating": "Kalibracja",
         "Calibration": "Kalibracja",
@@ -13668,10 +14292,10 @@ TRANSLATIONS = {
         "Cancel": "Anuluj",
         "Cancel print?": "Anulować drukowanie?",
         "Canceled": "Anulowano",
-        "Canceling": "Anulowanie",
+        "Canceling": "Anulowanie w toku",
         "Card size": "Rozmiar karty",
-        "Chamber": "Komnata",
-        "Chamber light": "Światło w komorze",
+        "Chamber": "Komora druku",
+        "Chamber light": "Oświetlenie komory druku",
         "Chart nozzle": "Dysza wykresowa",
         "Chart of actual and target temperatures for the nozzle and bed": "Wykres rzeczywistych i docelowych temperatur dyszy i złoża",
         "Check connection": "Sprawdź połączenie",
@@ -13695,12 +14319,12 @@ TRANSLATIONS = {
         "Choose a material and color supported by this printer.": "Wybierz materiał i kolor obsługiwany przez tę drukarkę.",
         "Choose a nonempty print file no larger than 128 MB.": "Wybierz niepusty plik wydruku o rozmiarze nie większym niż 128 MB.",
         "Choose a print file no larger than 128 MB.": "Wybierz plik wydruku o rozmiarze nie większym niż 128 MB.",
-        "Choose a sliced .3mf with one plate and filament information.": "Wybierz pocięty .3mf z jedną płytką i informacjami o żarniku.",
-        "Choose a sliced .3mf with one plate.": "Wybierz pokrojony .3mf z jedną płytką.",
+        "Choose a sliced .3mf with one plate and filament information.": "Wybierz plik .3mf zawierający jedną pociętą płytę roboczą i dane filamentów.",
+        "Choose a sliced .3mf with one plate.": "Wybierz plik .3mf zawierający jedną pociętą płytę roboczą.",
         "Choose a text .gcode file or a sliced .3mf.": "Wybierz plik tekstowy .gcode lub pokrojony plik .3mf.",
         "Choose delay…": "Wybierz opóźnienie…",
         "Choose material": "Wybierz materiał",
-        "Choose the original .3mf with one sliced plate and the same file name.": "Wybierz oryginalny plik .3mf z jedną pokrojoną płytką i tą samą nazwą pliku.",
+        "Choose the original .3mf with one sliced plate and the same file name.": "Wybierz oryginalny plik .3mf z jedną pociętą płytą roboczą i tą samą nazwą.",
         "Choose the original sliced .3mf for this Creator file.": "Wybierz oryginalny pokrojony plik .3mf dla tego pliku kreatora.",
         "Choose the original sliced .3mf.": "Wybierz oryginalny pokrojony plik .3mf.",
         "Choose the sliced .3mf that matches the stored file name.": "Wybierz pokrojony plik .3mf odpowiadający nazwie zapisanego pliku.",
@@ -13777,7 +14401,7 @@ TRANSLATIONS = {
         "Empty camera stream": "Pusty strumień kamery",
         "Enable LAN-only mode on the printer.": "Włącz tryb tylko LAN w drukarce.",
         "Ended: {time}": "Zakończono: {time}",
-        "Endstops: {state}": "Ograniczniki: {state}",
+        "Endstops: {state}": "Krańcówki: {state}",
         "Enlarge camera": "Powiększ kamerę",
         "Enter a local IPv4 address for the printer.": "Wprowadź lokalny adres IPv4 drukarki.",
         "Enter a page number": "Wprowadź numer strony",
@@ -13805,7 +14429,6 @@ TRANSLATIONS = {
         "Find printers": "Znajdź drukarki",
         "Finish": "Zakończ",
         "Finish ≈ {time}": "Zakończenie ≈ {time}",
-        "Finished cleanly": "Zakończono czysto",
         "Finished. Printer ready.": "Zakończono. Drukarka gotowa.",
         "Firmware": "Oprogramowanie sprzętowe",
         "FlashForge Device Tab is shutting down.": "FlashForge Device Tab zamyka się.",
@@ -13815,13 +14438,13 @@ TRANSLATIONS = {
         "Heat nozzle to 180 °C": "Podgrzej dyszę do 180°C",
         "Heat off": "Wyłącz ogrzewanie",
         "Heat the nozzle to at least 180 °C.": "Rozgrzej dyszę do temperatury co najmniej 180 °C.",
-        "Heating": "Ogrzewanie",
-        "Heating nozzles: {count}": "Dysze grzewcze: {count}",
+        "Heating": "Nagrzewanie",
+        "Heating nozzles: {count}": "Nagrzewające się dysze: {count}",
         "History": "Historia",
         "Home": "Bazuj osie",
         "Home all axes": "Bazuj wszystkie osie",
         "Home required": "Wymagane bazowanie",
-        "Home sent. Waiting for the printer to confirm completion.": "Do domu wysłano. Czekam, aż drukarka potwierdzi zakończenie.",
+        "Home sent. Waiting for the printer to confirm completion.": "Wysłano polecenie bazowania osi. Oczekiwanie na potwierdzenie zakończenia przez drukarkę.",
         "Homing…": "Powrót do bazy…",
         "Host notifications": "Powiadomienia hosta",
         "IPv4 address": "Adres IPv4",
@@ -13844,9 +14467,9 @@ TRANSLATIONS = {
         "Invalid printer list.": "Nieprawidłowa lista drukarek.",
         "Invalid request.": "Nieprawidłowe żądanie.",
         "Invalid slice information.": "Nieprawidłowe informacje o plasterku.",
-        "Job details": "Szczegóły pracy",
-        "Job status unavailable": "Stan zadania niedostępny",
-        "Jobs": "Praca",
+        "Job details": "Szczegóły zadania drukowania",
+        "Job status unavailable": "Stan zadania drukowania niedostępny",
+        "Jobs": "Zadania drukowania",
         "Large": "Duży",
         "Last completed": "Ostatnio ukończono",
         "Last reading: {seconds} s ago": "Ostatni odczyt: {seconds} s temu",
@@ -13890,6 +14513,7 @@ TRANSLATIONS = {
         "Move sent to the printer.": "Przenieś wysłany do drukarki.",
         "Move up": "Przejdź w górę",
         "Moving…": "Przenoszenie…",
+        "N": "Dysza",
         "Name": "Imię",
         "Needs Attention": "Wymaga uwagi",
         "Network discovery unavailable. Enter the printer address manually.": "Wykrywanie sieci niedostępne. Wprowadź adres drukarki ręcznie.",
@@ -13901,7 +14525,7 @@ TRANSLATIONS = {
         "No idle printers.": "Brak bezczynnych drukarek.",
         "No loaded slot matches": "Brak załadowanych dopasowań do slotów",
         "No matching files": "Brak pasujących plików",
-        "No matching jobs.": "Brak pasujących zadań.",
+        "No matching jobs.": "Brak pasujących zadań drukowania.",
         "No new printers found.": "Nie znaleziono nowych drukarek.",
         "No preview": "Brak podglądu",
         "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.": "Nie zarejestrowano jeszcze żadnych zadań drukowania. Historia drukowania jest zapisywana, gdy OrcaSlicer jest otwarty.",
@@ -13915,9 +14539,9 @@ TRANSLATIONS = {
         "Not recorded": "Nie nagrano",
         "Notifications": "Powiadomienia",
         "Nozzle": "Dysza",
-        "Nozzle Target": "Cel dyszy",
+        "Nozzle Target": "Temperatura docelowa dyszy",
         "Nozzle T{tool}": "Dysza T{tool}",
-        "Nozzle Z": "Dysza Z",
+        "Nozzle Z": "Oś Z dyszy",
         "Nozzle {temperature} °C": "Dysza {temperature} °C",
         "Nozzles": "Dysze",
         "Nozzles: {count}": "Dysze: {count}",
@@ -13925,7 +14549,7 @@ TRANSLATIONS = {
         "Offline for at least one minute": "Offline przez co najmniej jedną minutę",
         "On": "Włączone",
         "One printer per line: address | CheckCode | name | serial number": "Jedna drukarka w wierszu: adres | CheckCode | imię | numer seryjny",
-        "Open": "Otwórz",
+        "Open": "Otwarte",
         "Open FlashForge": "Otwórz FlashForge",
         "Open FlashForge Device Tab for a FlashForge printer profile from Speed Dial.": "Otwórz FlashForge Device Tab, aby wyświetlić profil drukarki FlashForge z szybkiego wybierania.",
         "Open FlashForge Device Tab for the current printer profile from Speed Dial.": "Otwórz FlashForge Device Tab dla bieżącego profilu drukarki z szybkiego wybierania.",
@@ -13938,11 +14562,11 @@ TRANSLATIONS = {
         "Orange": "Pomarańczowy",
         "OrcaSlicer is sending a print job. Monitoring will resume when the transfer is complete.": "OrcaSlicer wysyła zadanie drukowania. Monitorowanie zostanie wznowione po zakończeniu przesyłania.",
         "OrcaSlicer is sending a print job. Try again when it finishes.": "OrcaSlicer wysyła zadanie drukowania. Spróbuj ponownie po zakończeniu.",
-        "Original sliced .3mf": "Oryginalny pokrojony .3mf",
+        "Original sliced .3mf": "Oryginalny plik .3mf po cięciu",
         "Other nozzles": "Inne dysze",
         "Page number": "Numer strony",
-        "Part Cooling Fan": "Częściowy wentylator chłodzący",
-        "Part fan": "Częściowy wentylator",
+        "Part Cooling Fan": "Wentylator chłodzenia wydruku",
+        "Part fan": "Chłodzenie wydruku",
         "Pause": "Pauza",
         "Paused": "Wstrzymano",
         "Paused, disconnected or reporting a problem": "Wstrzymano, rozłączono lub zgłaszano problem",
@@ -13976,6 +14600,7 @@ TRANSLATIONS = {
         "Print speed": "Szybkość drukowania",
         "Print started · {file}": "Rozpoczęto drukowanie · {file}",
         "Print stored file": "Wydrukuj zapisany plik",
+        "Print success rate": "Odsetek udanych wydruków",
         "Print time": "Czas drukowania",
         "Print time: {time}": "Czas wydruku: {time}",
         "Printer": "Drukarka",
@@ -13984,7 +14609,7 @@ TRANSLATIONS = {
         "Printer Readings": "Odczyty drukarki",
         "Printer accepted the command.": "Drukarka zaakceptowała polecenie.",
         "Printer accepted the command. Axis limits could not be checked.": "Drukarka zaakceptowała polecenie. Nie można sprawdzić granic osi.",
-        "Printer camera feed": "Dane z kamery drukarki",
+        "Printer camera feed": "Obraz z kamery drukarki",
         "Printer confirmed the nozzle target.": "Drukarka potwierdziła cel dyszy.",
         "Printer confirmed the shutdown timer setting.": "Drukarka potwierdziła ustawienie licznika czasu wyłączania.",
         "Printer confirmed {command} · {state}": "Drukarka potwierdzona {command} · {state}",
@@ -14002,7 +14627,7 @@ TRANSLATIONS = {
         "Printer has not confirmed the nozzle target. Check Printer Readings.": "Drukarka nie potwierdziła docelowej dyszy. Sprawdź odczyty drukarki.",
         "Printer jobs": "Zadania drukarki",
         "Printer must be idle.": "Drukarka musi być bezczynna.",
-        "Printer must be idle. Wait for movement or Home to finish.": "Drukarka musi być bezczynna. Poczekaj na zakończenie ruchu lub powrotu do domu.",
+        "Printer must be idle. Wait for movement or Home to finish.": "Drukarka musi być bezczynna. Poczekaj na zakończenie ruchu lub bazowania.",
         "Printer must be idle. {reason}": "Drukarka musi być bezczynna. {reason}",
         "Printer rejected the selected file.": "Drukarka odrzuciła wybrany plik.",
         "Printer rejected {command}.": "Drukarka odrzuciła {command}.",
@@ -14018,7 +14643,7 @@ TRANSLATIONS = {
         "Profile changed": "Profil został zmieniony",
         "Purple": "Fioletowy",
         "Range": "Zasięg",
-        "Reading materials…": "Materiały do czytania…",
+        "Reading materials…": "Odczytywanie danych materiałów…",
         "Reading printer status…": "Odczytywanie stanu drukarki…",
         "Readings delayed": "Odczyty opóźnione",
         "Readings unavailable": "Odczyty niedostępne",
@@ -14029,9 +14654,9 @@ TRANSLATIONS = {
         "Refresh": "Odśwież",
         "Refresh the Creator printer's file list first.": "Najpierw odśwież listę plików drukarki w kreatorze.",
         "Refresh the file list and check the loaded materials.": "Odśwież listę plików i sprawdź załadowane materiały.",
-        "Release motors": "Zwolnij silniki",
+        "Release motors": "Odblokuj silniki",
         "Remove": "Usuń",
-        "Replace Printer tab": "Karta Zamień drukarkę",
+        "Replace Printer tab": "Zastąp zawartość karty Drukarka",
         "Request failed.": "Żądanie nie powiodło się.",
         "Restored the printer's original web page.": "Przywrócono oryginalną stronę internetową drukarki.",
         "Result": "Wynik",
@@ -14069,9 +14694,10 @@ TRANSLATIONS = {
         "Serial": "Numer seryjny",
         "Serial number": "Numer seryjny",
         "Serial number (required for Creator 5 / 5 Pro)": "Numer seryjny (wymagany dla Creator 5 / 5 Pro)",
-        "Set target": "Ustaw cel",
+        "Set temperature": "Ustaw temperaturę",
+        "Heat": "Grzej",
         "Set up your first printer": "Skonfiguruj swoją pierwszą drukarkę",
-        "Setting light…": "Ustawianie światła…",
+        "Setting light…": "Przełączanie oświetlenia…",
         "Settings": "Ustawienia",
         "Settings are unavailable.": "Ustawienia są niedostępne.",
         "Show file previews": "Wyświetl podgląd plików",
@@ -14089,8 +14715,8 @@ TRANSLATIONS = {
         "Stored files": "Zapisane pliki",
         "System theme": "Motyw systemowy",
         "Tab placement": "Umieszczenie tabulatorów",
-        "Tan": "Opalony",
-        "Target": "Cel",
+        "Tan": "Jasnobrązowy",
+        "Target": "Temperatura docelowa",
         "Teal": "Turkusowy",
         "Temperature change over the last 5 minutes": "Zmiana temperatury w ciągu ostatnich 5 minut",
         "Temperatures": "Temperatury",
@@ -14130,7 +14756,7 @@ TRANSLATIONS = {
         "The printer must be idle.": "Drukarka musi być bezczynna.",
         "The printer rejected the HTTP request (code {code}).": "Drukarka odrzuciła żądanie HTTP (kod {code}).",
         "The printer reported an active print. Check the printer before retrying.": "Drukarka zgłosiła aktywny wydruk. Sprawdź drukarkę przed ponowną próbą.",
-        "The printer requires homing before manual movement.": "Drukarka wymaga bazowania przed ręcznym przesunięciem.",
+        "The printer requires homing before manual movement.": "Przed ręcznym ruchem wykonaj bazowanie osi.",
         "The printer response is too large": "Odpowiedź drukarki jest zbyt duża",
         "The printer returned an invalid file list.": "Drukarka zwróciła nieprawidłową listę plików.",
         "The printer returned invalid HTTP data.": "Drukarka zwróciła nieprawidłowe dane HTTP.",
@@ -14149,8 +14775,8 @@ TRANSLATIONS = {
         "Timer {minutes} min": "Zegar {minutes} min",
         "Total pages: {count}": "Całkowita liczba stron: {count}",
         "Totals": "Sumy",
-        "Transport: {transport}": "Transport: {transport}",
-        "Travel limit": "Limit podróży",
+        "Transport: {transport}": "Protokół: {transport}",
+        "Travel limit": "Granica zakresu ruchu osi",
         "Trend unavailable": "Trend niedostępny",
         "Unavailable": "Niedostępne",
         "Unexpected response from the printer": "Nieoczekiwana reakcja drukarki",
@@ -14195,6 +14821,15 @@ TRANSLATIONS = {
         "{time} left": "Pozostało {time}",
     },
     "pt-BR": {
+        "While this tab is open": "Enquanto esta aba estiver aberta",
+        "Only during an active print": "Somente durante uma impressão ativa",
+        "Waiting for part removal": "Aguardando a retirada da peça",
+        "Wait for part removal": "Aguardar a retirada da peça",
+        "Bed is clear": "Mesa livre",
+        "Chart layout": "Layout do gráfico",
+        "Shared scale": "Escala comum",
+        "Separate scales": "Escalas separadas",
+        "Select at least one temperature line.": "Selecione pelo menos uma curva de temperatura.",
         " · Total print time: {time}": " · Tempo total de impressão: {time}",
         "0 min": "0 minutos",
         "1 mm": "1 mm",
@@ -14223,16 +14858,17 @@ TRANSLATIONS = {
         "Axes": "Eixos",
         "Axes busy": "Eixos ocupados",
         "Axis movement step": "Etapa de movimento do eixo",
+        "B": "Mesa",
         "Basic readings received. CheckCode could not be verified.": "Leituras básicas recebidas. CheckCode não pôde ser verificado.",
         "Bed": "Mesa",
-        "Bed Target": "Cama alvo",
-        "Bed Z": "Cama Z",
+        "Bed Target": "Temperatura alvo da mesa",
+        "Bed Z": "Eixo Z da mesa",
         "Bed leveling": "Nivelamento da mesa",
         "Black": "Preto",
         "Blue": "Azul",
         "Brown": "Marrom",
         "Browse files": "Procurar arquivos",
-        "Build volume": "Aumentar o volume",
+        "Build volume": "Volume de impressão",
         "Busy": "Ocupado",
         "Calibrating": "Calibrando",
         "Calibration": "Calibração",
@@ -14250,8 +14886,8 @@ TRANSLATIONS = {
         "Canceled": "Cancelado",
         "Canceling": "Cancelando",
         "Card size": "Tamanho do cartão",
-        "Chamber": "Câmara",
-        "Chamber light": "Luz da câmara",
+        "Chamber": "Câmara de impressão",
+        "Chamber light": "Luz da câmara de impressão",
         "Chart nozzle": "Bico gráfico",
         "Chart of actual and target temperatures for the nozzle and bed": "Gráfico de temperaturas reais e alvo para o bico e leito",
         "Check connection": "Verifique a conexão",
@@ -14275,12 +14911,12 @@ TRANSLATIONS = {
         "Choose a material and color supported by this printer.": "Escolha um material e uma cor suportados por esta impressora.",
         "Choose a nonempty print file no larger than 128 MB.": "Escolha um arquivo de impressão não vazio com tamanho máximo de 128 MB.",
         "Choose a print file no larger than 128 MB.": "Escolha um arquivo de impressão com tamanho máximo de 128 MB.",
-        "Choose a sliced .3mf with one plate and filament information.": "Escolha um .3mf fatiado com uma placa e informações de filamento.",
-        "Choose a sliced .3mf with one plate.": "Escolha um .3mf fatiado com um prato.",
+        "Choose a sliced .3mf with one plate and filament information.": "Escolha um arquivo .3mf com uma única placa fatiada e informações dos filamentos.",
+        "Choose a sliced .3mf with one plate.": "Escolha um arquivo .3mf com apenas uma placa de impressão fatiada.",
         "Choose a text .gcode file or a sliced .3mf.": "Escolha um arquivo de texto .gcode ou um .3mf fatiado.",
         "Choose delay…": "Escolha o atraso…",
         "Choose material": "Escolha o material",
-        "Choose the original .3mf with one sliced plate and the same file name.": "Escolha o .3mf original com uma placa fatiada e o mesmo nome de arquivo.",
+        "Choose the original .3mf with one sliced plate and the same file name.": "Escolha o arquivo .3mf original com uma única placa fatiada e o mesmo nome.",
         "Choose the original sliced .3mf for this Creator file.": "Escolha o .3mf fatiado original para este arquivo Creator.",
         "Choose the original sliced .3mf.": "Escolha o .3mf fatiado original.",
         "Choose the sliced .3mf that matches the stored file name.": "Escolha o .3mf fatiado que corresponda ao nome do arquivo armazenado.",
@@ -14288,7 +14924,7 @@ TRANSLATIONS = {
         "Clear filters": "Limpar filtros",
         "Close": "Fechar",
         "Closed": "Fechado",
-        "Collecting readings…": "Coletando leituras…",
+        "Collecting readings…": "Coletando medições…",
         "Color": "Cor",
         "Color differs": "A cor é diferente",
         "Command accepted. The printer has not confirmed the change.": "Comando aceito. A impressora não confirmou a alteração.",
@@ -14357,7 +14993,7 @@ TRANSLATIONS = {
         "Empty camera stream": "Fluxo de câmera vazio",
         "Enable LAN-only mode on the printer.": "Ative o modo somente LAN na impressora.",
         "Ended: {time}": "Finalizado: {time}",
-        "Endstops: {state}": "Paradas finais: {state}",
+        "Endstops: {state}": "Sensores de fim de curso: {state}",
         "Enlarge camera": "Ampliar câmera",
         "Enter a local IPv4 address for the printer.": "Insira um endereço IPv4 local para a impressora.",
         "Enter a page number": "Insira um número de página",
@@ -14385,7 +15021,6 @@ TRANSLATIONS = {
         "Find printers": "Encontrar impressoras",
         "Finish": "Concluir",
         "Finish ≈ {time}": "Concluir ≈ {time}",
-        "Finished cleanly": "Terminou de forma limpa",
         "Finished. Printer ready.": "Concluído. Impressora pronta.",
         "Firmware": "Firmware",
         "FlashForge Device Tab is shutting down.": "FlashForge Device Tab está desligando.",
@@ -14395,13 +15030,13 @@ TRANSLATIONS = {
         "Heat nozzle to 180 °C": "Aquecer o bico a 180 °C",
         "Heat off": "Aquecimento desligado",
         "Heat the nozzle to at least 180 °C.": "Aqueça o bico a pelo menos 180 °C.",
-        "Heating": "Aquecimento",
-        "Heating nozzles: {count}": "Bicos de aquecimento: {count}",
+        "Heating": "Aquecendo",
+        "Heating nozzles: {count}": "Bicos em aquecimento: {count}",
         "History": "Histórico",
         "Home": "Ir à origem",
         "Home all axes": "Levar todos os eixos à origem",
         "Home required": "É necessário voltar à origem",
-        "Home sent. Waiting for the printer to confirm completion.": "Enviado para casa. Aguardando a impressora confirmar a conclusão.",
+        "Home sent. Waiting for the printer to confirm completion.": "Comando de retorno à origem enviado. Aguardando a confirmação da impressora.",
         "Homing…": "Retorno…",
         "Host notifications": "Notificações do anfitrião",
         "IPv4 address": "Endereço IPv4",
@@ -14424,9 +15059,9 @@ TRANSLATIONS = {
         "Invalid printer list.": "Lista de impressoras inválidas.",
         "Invalid request.": "Solicitação inválida.",
         "Invalid slice information.": "Informações de fatia inválidas.",
-        "Job details": "Detalhes do trabalho",
-        "Job status unavailable": "Status do trabalho indisponível",
-        "Jobs": "Empregos",
+        "Job details": "Detalhes da tarefa de impressão",
+        "Job status unavailable": "Status da tarefa de impressão indisponível",
+        "Jobs": "Tarefas de impressão",
         "Large": "Grande",
         "Last completed": "Última conclusão",
         "Last reading: {seconds} s ago": "Última leitura: há {seconds} s",
@@ -14470,6 +15105,7 @@ TRANSLATIONS = {
         "Move sent to the printer.": "Movimentação enviada para a impressora.",
         "Move up": "Subir",
         "Moving…": "Mudança…",
+        "N": "Bico",
         "Name": "Nome",
         "Needs Attention": "Precisa de Atenção",
         "Network discovery unavailable. Enter the printer address manually.": "Descoberta de rede indisponível. Insira o endereço da impressora manualmente.",
@@ -14481,7 +15117,7 @@ TRANSLATIONS = {
         "No idle printers.": "Nenhuma impressora ociosa.",
         "No loaded slot matches": "Nenhum slot carregado corresponde",
         "No matching files": "Nenhum arquivo encontrado",
-        "No matching jobs.": "Nenhum trabalho correspondente.",
+        "No matching jobs.": "Nenhuma tarefa de impressão correspondente.",
         "No new printers found.": "Nenhuma impressora nova encontrada.",
         "No preview": "Sem visualização",
         "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.": "Nenhum trabalho de impressão registrado ainda. O histórico de impressão é registrado enquanto o OrcaSlicer está aberto.",
@@ -14495,9 +15131,9 @@ TRANSLATIONS = {
         "Not recorded": "Não registrado",
         "Notifications": "Notificações",
         "Nozzle": "Bico",
-        "Nozzle Target": "Alvo do Bocal",
+        "Nozzle Target": "Temperatura alvo do bico",
         "Nozzle T{tool}": "Bocal T{tool}",
-        "Nozzle Z": "Bocal Z",
+        "Nozzle Z": "Eixo Z do bico",
         "Nozzle {temperature} °C": "Bico {temperature} °C",
         "Nozzles": "Bicos",
         "Nozzles: {count}": "Bicos: {count}",
@@ -14505,7 +15141,7 @@ TRANSLATIONS = {
         "Offline for at least one minute": "Off-line por pelo menos um minuto",
         "On": "Ligado",
         "One printer per line: address | CheckCode | name | serial number": "Uma impressora por linha: endereço | CheckCode | nome | número de série",
-        "Open": "Abrir",
+        "Open": "Aberto",
         "Open FlashForge": "Abra FlashForge",
         "Open FlashForge Device Tab for a FlashForge printer profile from Speed Dial.": "Abra FlashForge Device Tab para um perfil de impressora FlashForge no Speed Dial.",
         "Open FlashForge Device Tab for the current printer profile from Speed Dial.": "Abra FlashForge Device Tab para o perfil de impressora atual na Discagem Rápida.",
@@ -14518,11 +15154,11 @@ TRANSLATIONS = {
         "Orange": "Laranja",
         "OrcaSlicer is sending a print job. Monitoring will resume when the transfer is complete.": "OrcaSlicer está enviando um trabalho de impressão. O monitoramento será retomado quando a transferência for concluída.",
         "OrcaSlicer is sending a print job. Try again when it finishes.": "OrcaSlicer está enviando um trabalho de impressão. Tente novamente quando terminar.",
-        "Original sliced .3mf": ".3mf fatiado original",
+        "Original sliced .3mf": "Arquivo .3mf fatiado original",
         "Other nozzles": "Outros bicos",
         "Page number": "Número da página",
-        "Part Cooling Fan": "Ventilador de resfriamento de peças",
-        "Part fan": "Ventilador parcial",
+        "Part Cooling Fan": "Ventoinha de resfriamento da peça",
+        "Part fan": "Ventoinha da peça",
         "Pause": "Pausa",
         "Paused": "Pausado",
         "Paused, disconnected or reporting a problem": "Pausado, desconectado ou relatando um problema",
@@ -14556,6 +15192,7 @@ TRANSLATIONS = {
         "Print speed": "Velocidade de impressão",
         "Print started · {file}": "Impressão iniciada · {file}",
         "Print stored file": "Imprimir arquivo armazenado",
+        "Print success rate": "Taxa de sucesso",
         "Print time": "Hora de impressão",
         "Print time: {time}": "Tempo de impressão: {time}",
         "Printer": "Impressora",
@@ -14564,7 +15201,7 @@ TRANSLATIONS = {
         "Printer Readings": "Leituras da impressora",
         "Printer accepted the command.": "A impressora aceitou o comando.",
         "Printer accepted the command. Axis limits could not be checked.": "A impressora aceitou o comando. Os limites do eixo não puderam ser verificados.",
-        "Printer camera feed": "Alimentação da câmera da impressora",
+        "Printer camera feed": "Vídeo da câmera da impressora",
         "Printer confirmed the nozzle target.": "A impressora confirmou o alvo do bico.",
         "Printer confirmed the shutdown timer setting.": "A impressora confirmou a configuração do temporizador de desligamento.",
         "Printer confirmed {command} · {state}": "Impressora confirmada {command} · {state}",
@@ -14582,7 +15219,7 @@ TRANSLATIONS = {
         "Printer has not confirmed the nozzle target. Check Printer Readings.": "A impressora não confirmou o alvo do bico. Verifique as leituras da impressora.",
         "Printer jobs": "Trabalhos de impressora",
         "Printer must be idle.": "A impressora deve estar ociosa.",
-        "Printer must be idle. Wait for movement or Home to finish.": "A impressora deve estar ociosa. Aguarde o movimento ou Home terminar.",
+        "Printer must be idle. Wait for movement or Home to finish.": "A impressora deve estar ociosa. Aguarde o fim do movimento ou do retorno à origem.",
         "Printer must be idle. {reason}": "A impressora deve estar ociosa. {reason}",
         "Printer rejected the selected file.": "A impressora rejeitou o arquivo selecionado.",
         "Printer rejected {command}.": "A impressora rejeitou {command}.",
@@ -14598,7 +15235,7 @@ TRANSLATIONS = {
         "Profile changed": "Perfil alterado",
         "Purple": "Roxo",
         "Range": "Alcance",
-        "Reading materials…": "Materiais de leitura…",
+        "Reading materials…": "Lendo dados dos materiais…",
         "Reading printer status…": "Lendo o status da impressora…",
         "Readings delayed": "Leituras atrasadas",
         "Readings unavailable": "Leituras indisponíveis",
@@ -14609,9 +15246,9 @@ TRANSLATIONS = {
         "Refresh": "Atualizar",
         "Refresh the Creator printer's file list first.": "Atualize primeiro a lista de arquivos da impressora Creator.",
         "Refresh the file list and check the loaded materials.": "Atualize a lista de arquivos e verifique os materiais carregados.",
-        "Release motors": "Liberar motores",
+        "Release motors": "Destravar motores",
         "Remove": "Remover",
-        "Replace Printer tab": "Guia Substituir Impressora",
+        "Replace Printer tab": "Substituir o conteúdo da aba Impressora",
         "Request failed.": "Falha na solicitação.",
         "Restored the printer's original web page.": "Restaurou a página da Web original da impressora.",
         "Result": "Resultado",
@@ -14649,9 +15286,10 @@ TRANSLATIONS = {
         "Serial": "Série",
         "Serial number": "Número de série",
         "Serial number (required for Creator 5 / 5 Pro)": "Número de série (obrigatório para Creator 5 / 5 Pro)",
-        "Set target": "Definir meta",
+        "Set temperature": "Definir temperatura",
+        "Heat": "Aquecer",
         "Set up your first printer": "Configure sua primeira impressora",
-        "Setting light…": "Ajustando a luz…",
+        "Setting light…": "Alternando a iluminação…",
         "Settings": "Configurações",
         "Settings are unavailable.": "As configurações não estão disponíveis.",
         "Show file previews": "Mostrar visualizações de arquivos",
@@ -14669,8 +15307,8 @@ TRANSLATIONS = {
         "Stored files": "Arquivos armazenados",
         "System theme": "Tema do sistema",
         "Tab placement": "Posicionamento das guias",
-        "Tan": "Bronzeado",
-        "Target": "Alvo",
+        "Tan": "Bege-escuro",
+        "Target": "Temperatura alvo",
         "Teal": "Azul-petróleo",
         "Temperature change over the last 5 minutes": "Mudança de temperatura nos últimos 5 minutos",
         "Temperatures": "Temperaturas",
@@ -14710,7 +15348,7 @@ TRANSLATIONS = {
         "The printer must be idle.": "A impressora deve estar ociosa.",
         "The printer rejected the HTTP request (code {code}).": "A impressora rejeitou a solicitação HTTP (código {code}).",
         "The printer reported an active print. Check the printer before retrying.": "A impressora relatou uma impressão ativa. Verifique a impressora antes de tentar novamente.",
-        "The printer requires homing before manual movement.": "A impressora requer retorno antes do movimento manual.",
+        "The printer requires homing before manual movement.": "Volte os eixos à origem antes de movê-los manualmente.",
         "The printer response is too large": "A resposta da impressora é muito grande",
         "The printer returned an invalid file list.": "A impressora retornou uma lista de arquivos inválida.",
         "The printer returned invalid HTTP data.": "A impressora retornou dados HTTP inválidos.",
@@ -14729,8 +15367,8 @@ TRANSLATIONS = {
         "Timer {minutes} min": "Temporizador {minutes} min",
         "Total pages: {count}": "Total de páginas: {count}",
         "Totals": "Totais",
-        "Transport: {transport}": "Transporte: {transport}",
-        "Travel limit": "Limite de viagem",
+        "Transport: {transport}": "Protocolo: {transport}",
+        "Travel limit": "Limite de curso do eixo",
         "Trend unavailable": "Tendência indisponível",
         "Unavailable": "Indisponível",
         "Unexpected response from the printer": "Resposta inesperada da impressora",
@@ -14759,7 +15397,7 @@ TRANSLATIONS = {
         "Waiting for Home to finish…": "Aguardando os eixos chegarem à origem…",
         "Waiting for job status": "Aguardando status do trabalho",
         "Waiting for printer…": "Aguardando impressora…",
-        "Waiting for readings": "Aguardando leituras",
+        "Waiting for readings": "Aguardando medições",
         "Waiting for temperature readings": "Aguardando leituras de temperatura",
         "Waiting for the printer to confirm calibration.": "Aguardando a impressora confirmar a calibração.",
         "Waiting for the printer…": "Aguardando a impressora…",
@@ -14775,6 +15413,15 @@ TRANSLATIONS = {
         "{time} left": "Tempo restante: {time}",
     },
     "ro": {
+        "While this tab is open": "Cât timp această filă este deschisă",
+        "Only during an active print": "Doar în timpul unei imprimări active",
+        "Waiting for part removal": "Așteaptă îndepărtarea piesei",
+        "Wait for part removal": "Așteaptă îndepărtarea piesei",
+        "Bed is clear": "Patul este liber",
+        "Chart layout": "Aspectul graficului",
+        "Shared scale": "Scară comună",
+        "Separate scales": "Scări separate",
+        "Select at least one temperature line.": "Selectați cel puțin o curbă de temperatură.",
         " · Total print time: {time}": " · Timp total de imprimare: {time}",
         "0 min": "0 min",
         "1 mm": "1 mm",
@@ -14796,23 +15443,24 @@ TRANSLATIONS = {
         "Allow access to the printer, then reload the plugin.": "Permiteți accesul la imprimantă, apoi reîncărcați pluginul.",
         "Another print source is being read.": "Se citește o altă sursă de imprimare.",
         "Appearance": "Aspect",
-        "Apply": "Aplicați",
+        "Apply": "Aplică",
         "Attention": "Atenție",
         "Authenticated readings: {availability}": "Citiri autentificate: {availability}",
         "Auto shutdown": "Oprire automată",
         "Axes": "Axe",
         "Axes busy": "Axele ocupate",
         "Axis movement step": "Pas de mișcare a axei",
+        "B": "Pat",
         "Basic readings received. CheckCode could not be verified.": "Citiri de bază primite. CheckCode nu a putut fi verificat.",
         "Bed": "Pat de imprimare",
-        "Bed Target": "Pat țintă",
-        "Bed Z": "Pat Z",
+        "Bed Target": "Temperatura țintă a patului",
+        "Bed Z": "Axa Z a patului",
         "Bed leveling": "Nivelarea patului",
         "Black": "Negru",
         "Blue": "Albastru",
         "Brown": "Maro",
         "Browse files": "Răsfoiți fișiere",
-        "Build volume": "Creați volum",
+        "Build volume": "Volum de imprimare",
         "Busy": "Ocupat",
         "Calibrating": "Calibrare",
         "Calibration": "Calibrare",
@@ -14828,10 +15476,10 @@ TRANSLATIONS = {
         "Cancel": "Anulați",
         "Cancel print?": "Anulați imprimarea?",
         "Canceled": "Anulat",
-        "Canceling": "Anulare",
+        "Canceling": "Se anulează",
         "Card size": "Dimensiunea cardului",
-        "Chamber": "Camera",
-        "Chamber light": "Lumină de cameră",
+        "Chamber": "Cameră de imprimare",
+        "Chamber light": "Iluminarea camerei de imprimare",
         "Chart nozzle": "Duză grafică",
         "Chart of actual and target temperatures for the nozzle and bed": "Diagramă cu temperaturile reale și țintă pentru duză și pat",
         "Check connection": "Verificați conexiunea",
@@ -14855,12 +15503,12 @@ TRANSLATIONS = {
         "Choose a material and color supported by this printer.": "Alegeți un material și o culoare acceptate de această imprimantă.",
         "Choose a nonempty print file no larger than 128 MB.": "Alegeți un fișier de imprimare nevid, care nu este mai mare de 128 MB.",
         "Choose a print file no larger than 128 MB.": "Alegeți un fișier de imprimare care nu este mai mare de 128 MB.",
-        "Choose a sliced .3mf with one plate and filament information.": "Alegeți un .3mf feliat cu o singură placă și informații despre filament.",
-        "Choose a sliced .3mf with one plate.": "Alegeți un .3mf feliat cu o farfurie.",
+        "Choose a sliced .3mf with one plate and filament information.": "Alege un fișier .3mf cu o singură placă feliată și informații despre filamente.",
+        "Choose a sliced .3mf with one plate.": "Alege un fișier .3mf care conține o singură placă de imprimare feliată.",
         "Choose a text .gcode file or a sliced .3mf.": "Alegeți un fișier text .gcode sau un .3mf felii.",
         "Choose delay…": "Alegeți întârziere...",
         "Choose material": "Alegeți materialul",
-        "Choose the original .3mf with one sliced plate and the same file name.": "Alegeți .3mf original cu o farfurie feliată și același nume de fișier.",
+        "Choose the original .3mf with one sliced plate and the same file name.": "Alege fișierul .3mf original cu o singură placă feliată și același nume.",
         "Choose the original sliced .3mf for this Creator file.": "Alegeți .3mf feliat original pentru acest fișier Creator.",
         "Choose the original sliced .3mf.": "Alegeți .3mf feliat original.",
         "Choose the sliced .3mf that matches the stored file name.": "Alegeți .3mf felii care se potrivește cu numele fișierului stocat.",
@@ -14868,7 +15516,7 @@ TRANSLATIONS = {
         "Clear filters": "Ștergeți filtrele",
         "Close": "Închide",
         "Closed": "Închis",
-        "Collecting readings…": "Colectarea citirilor...",
+        "Collecting readings…": "Se colectează măsurători…",
         "Color": "Culoare",
         "Color differs": "Culoarea diferă",
         "Command accepted. The printer has not confirmed the change.": "Comanda acceptată. Imprimanta nu a confirmat modificarea.",
@@ -14937,7 +15585,7 @@ TRANSLATIONS = {
         "Empty camera stream": "Fluxul camerei gol",
         "Enable LAN-only mode on the printer.": "Activați modul numai pentru LAN pe imprimantă.",
         "Ended: {time}": "Încheiat: {time}",
-        "Endstops: {state}": "Opritori: {state}",
+        "Endstops: {state}": "Senzori de capăt de cursă: {state}",
         "Enlarge camera": "Măriți camera",
         "Enter a local IPv4 address for the printer.": "Introduceți o adresă IPv4 locală pentru imprimantă.",
         "Enter a page number": "Introduceți un număr de pagină",
@@ -14965,7 +15613,6 @@ TRANSLATIONS = {
         "Find printers": "Găsiți imprimante",
         "Finish": "Terminare",
         "Finish ≈ {time}": "Finisare ≈ {time}",
-        "Finished cleanly": "Finisat curat",
         "Finished. Printer ready.": "Terminat. Imprimanta gata.",
         "Firmware": "Firmware",
         "FlashForge Device Tab is shutting down.": "FlashForge Device Tab se închide.",
@@ -14976,12 +15623,12 @@ TRANSLATIONS = {
         "Heat off": "Încălzire oprită",
         "Heat the nozzle to at least 180 °C.": "Încălziți duza la cel puțin 180 °C.",
         "Heating": "Încălzire",
-        "Heating nozzles: {count}": "Duze de încălzire: {count}",
+        "Heating nozzles: {count}": "Duze care se încălzesc: {count}",
         "History": "Istoric",
         "Home": "Mergi la origine",
         "Home all axes": "Du toate axele la origine",
         "Home required": "Revenire la origine necesară",
-        "Home sent. Waiting for the printer to confirm completion.": "Acasa trimis. Se așteaptă ca imprimanta să confirme finalizarea.",
+        "Home sent. Waiting for the printer to confirm completion.": "Comanda de revenire la origine a fost trimisă. Se așteaptă confirmarea imprimantei.",
         "Homing…": "Homing...",
         "Host notifications": "Notificări gazdă",
         "IPv4 address": "adresa IPv4",
@@ -15004,9 +15651,9 @@ TRANSLATIONS = {
         "Invalid printer list.": "Listă de imprimante nevalidă.",
         "Invalid request.": "Solicitare nevalidă.",
         "Invalid slice information.": "Informații nevalide ale secțiunii.",
-        "Job details": "Detalii despre post",
-        "Job status unavailable": "Starea jobului nu este disponibilă",
-        "Jobs": "Locuri de muncă",
+        "Job details": "Detaliile sarcinii de imprimare",
+        "Job status unavailable": "Starea sarcinii de imprimare nu este disponibilă",
+        "Jobs": "Sarcini de imprimare",
         "Large": "Mare",
         "Last completed": "Ultima finalizare",
         "Last reading: {seconds} s ago": "Ultima citire: acum {seconds} s",
@@ -15050,6 +15697,7 @@ TRANSLATIONS = {
         "Move sent to the printer.": "Mutare trimisă la imprimantă.",
         "Move up": "Deplasați-vă în sus",
         "Moving…": "Se mută...",
+        "N": "Duză",
         "Name": "Nume",
         "Needs Attention": "Are nevoie de atenție",
         "Network discovery unavailable. Enter the printer address manually.": "Descoperirea rețelei indisponibilă. Introduceți manual adresa imprimantei.",
@@ -15061,7 +15709,7 @@ TRANSLATIONS = {
         "No idle printers.": "Fără imprimante inactive.",
         "No loaded slot matches": "Nicio potrivire a sloturilor încărcate",
         "No matching files": "Niciun fișier găsit",
-        "No matching jobs.": "Nu există locuri de muncă potrivite.",
+        "No matching jobs.": "Nu există sarcini de imprimare care să corespundă.",
         "No new printers found.": "Nu s-au găsit imprimante noi.",
         "No preview": "Nicio previzualizare",
         "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.": "Nu au fost încă înregistrate lucrări de imprimare. Istoricul tipăririi este înregistrat în timp ce OrcaSlicer este deschis.",
@@ -15075,9 +15723,9 @@ TRANSLATIONS = {
         "Not recorded": "Neînregistrat",
         "Notifications": "Notificări",
         "Nozzle": "Duză",
-        "Nozzle Target": "Duză țintă",
+        "Nozzle Target": "Temperatura țintă a duzei",
         "Nozzle T{tool}": "Duză T{tool}",
-        "Nozzle Z": "Duza Z",
+        "Nozzle Z": "Axa Z a duzei",
         "Nozzle {temperature} °C": "Duză {temperature} °C",
         "Nozzles": "Duze",
         "Nozzles: {count}": "Duze: {count}",
@@ -15098,11 +15746,11 @@ TRANSLATIONS = {
         "Orange": "Portocaliu",
         "OrcaSlicer is sending a print job. Monitoring will resume when the transfer is complete.": "OrcaSlicer trimite o lucrare de imprimare. Monitorizarea va relua când transferul este finalizat.",
         "OrcaSlicer is sending a print job. Try again when it finishes.": "OrcaSlicer trimite o lucrare de imprimare. Încercați din nou când se termină.",
-        "Original sliced .3mf": ".3mf feliat original",
+        "Original sliced .3mf": "Fișier .3mf original cu felierea efectuată",
         "Other nozzles": "Alte duze",
         "Page number": "Numărul paginii",
-        "Part Cooling Fan": "Ventilator de răcire",
-        "Part fan": "Ventilator parțial",
+        "Part Cooling Fan": "Ventilatorul de răcire a piesei",
+        "Part fan": "Ventilatorul piesei",
         "Pause": "Pauză",
         "Paused": "Întrerupt",
         "Paused, disconnected or reporting a problem": "Întrerupt, deconectat sau raportarea unei probleme",
@@ -15136,6 +15784,7 @@ TRANSLATIONS = {
         "Print speed": "Viteza de imprimare",
         "Print started · {file}": "Imprimare a început · {file}",
         "Print stored file": "Imprimați fișierul stocat",
+        "Print success rate": "Rată de succes",
         "Print time": "Timp de imprimare",
         "Print time: {time}": "Timp de imprimare: {time}",
         "Printer": "Imprimantă",
@@ -15144,7 +15793,7 @@ TRANSLATIONS = {
         "Printer Readings": "Citirile imprimantă",
         "Printer accepted the command.": "Imprimanta a acceptat comanda.",
         "Printer accepted the command. Axis limits could not be checked.": "Imprimanta a acceptat comanda. Limitele axelor nu au putut fi verificate.",
-        "Printer camera feed": "Alimentarea camerei imprimantei",
+        "Printer camera feed": "Imaginea camerei imprimantei",
         "Printer confirmed the nozzle target.": "Imprimanta a confirmat ținta duzei.",
         "Printer confirmed the shutdown timer setting.": "Imprimanta a confirmat setarea temporizatorului de oprire.",
         "Printer confirmed {command} · {state}": "Imprimanta a confirmat {command} · {state}",
@@ -15162,7 +15811,7 @@ TRANSLATIONS = {
         "Printer has not confirmed the nozzle target. Check Printer Readings.": "Imprimanta nu a confirmat ținta duzei. Verificați citirile imprimantei.",
         "Printer jobs": "Lucrări de imprimantă",
         "Printer must be idle.": "Imprimanta trebuie să fie inactivă.",
-        "Printer must be idle. Wait for movement or Home to finish.": "Imprimanta trebuie să fie inactivă. Așteptați ca mișcarea sau Acasă să se termine.",
+        "Printer must be idle. Wait for movement or Home to finish.": "Imprimanta trebuie să fie inactivă. Așteaptă finalizarea deplasării sau a revenirii la origine.",
         "Printer must be idle. {reason}": "Imprimanta trebuie să fie inactivă. {reason}",
         "Printer rejected the selected file.": "Imprimanta a respins fișierul selectat.",
         "Printer rejected {command}.": "Imprimanta a respins {command}.",
@@ -15178,7 +15827,7 @@ TRANSLATIONS = {
         "Profile changed": "Profil schimbat",
         "Purple": "Mov",
         "Range": "Interval",
-        "Reading materials…": "Materiale de lectură…",
+        "Reading materials…": "Se citesc datele despre materiale…",
         "Reading printer status…": "Se citește starea imprimantei...",
         "Readings delayed": "Citirile întârziate",
         "Readings unavailable": "Citirile indisponibile",
@@ -15189,9 +15838,9 @@ TRANSLATIONS = {
         "Refresh": "Reîmprospătare",
         "Refresh the Creator printer's file list first.": "Reîmprospătați mai întâi lista de fișiere a imprimantei Creator.",
         "Refresh the file list and check the loaded materials.": "Reîmprospătați lista de fișiere și verificați materialele încărcate.",
-        "Release motors": "Eliberați motoarele",
+        "Release motors": "Deblochează motoarele",
         "Remove": "Îndepărtați",
-        "Replace Printer tab": "Fila Înlocuire imprimantă",
+        "Replace Printer tab": "Înlocuiește conținutul filei Imprimantă",
         "Request failed.": "Solicitarea a eșuat.",
         "Restored the printer's original web page.": "A fost restaurată pagina web originală a imprimantei.",
         "Result": "Rezultat",
@@ -15229,9 +15878,10 @@ TRANSLATIONS = {
         "Serial": "Serial",
         "Serial number": "Număr de serie",
         "Serial number (required for Creator 5 / 5 Pro)": "Număr de serie (necesar pentru Creator 5 / 5 Pro)",
-        "Set target": "Setați ținta",
+        "Set temperature": "Setează temperatura",
+        "Heat": "Încălzește",
         "Set up your first printer": "Configurați prima imprimantă",
-        "Setting light…": "Setarea luminii...",
+        "Setting light…": "Se comută iluminarea…",
         "Settings": "Setări",
         "Settings are unavailable.": "Setările nu sunt disponibile.",
         "Show file previews": "Afișează previzualizările fișierelor",
@@ -15249,8 +15899,8 @@ TRANSLATIONS = {
         "Stored files": "Fișiere stocate",
         "System theme": "Tema de sistem",
         "Tab placement": "Plasarea filelor",
-        "Tan": "Tan",
-        "Target": "Țintă",
+        "Tan": "Bej închis",
+        "Target": "Temperatură țintă",
         "Teal": "Teal",
         "Temperature change over the last 5 minutes": "Schimbarea temperaturii în ultimele 5 minute",
         "Temperatures": "Temperaturi",
@@ -15290,7 +15940,7 @@ TRANSLATIONS = {
         "The printer must be idle.": "Imprimanta trebuie să fie inactivă.",
         "The printer rejected the HTTP request (code {code}).": "Imprimanta a respins cererea HTTP (cod {code}).",
         "The printer reported an active print. Check the printer before retrying.": "Imprimanta a raportat o imprimare activă. Verificați imprimanta înainte de a încerca din nou.",
-        "The printer requires homing before manual movement.": "Imprimanta necesită orientare la punctul de plecare înainte de deplasarea manuală.",
+        "The printer requires homing before manual movement.": "Du axele la origine înainte de a le deplasa manual.",
         "The printer response is too large": "Răspunsul imprimantei este prea mare",
         "The printer returned an invalid file list.": "Imprimanta a returnat o listă de fișiere nevalidă.",
         "The printer returned invalid HTTP data.": "Imprimanta a returnat date HTTP nevalide.",
@@ -15309,8 +15959,8 @@ TRANSLATIONS = {
         "Timer {minutes} min": "Temporizator {minutes} min",
         "Total pages: {count}": "Total pagini: {count}",
         "Totals": "Totaluri",
-        "Transport: {transport}": "Transport: {transport}",
-        "Travel limit": "Limită de călătorie",
+        "Transport: {transport}": "Protocol: {transport}",
+        "Travel limit": "Limita cursei axei",
         "Trend unavailable": "Tendință indisponibilă",
         "Unavailable": "Indisponibil",
         "Unexpected response from the printer": "Răspuns neașteptat din partea imprimantei",
@@ -15339,7 +15989,7 @@ TRANSLATIONS = {
         "Waiting for Home to finish…": "Se așteaptă revenirea axelor la origine…",
         "Waiting for job status": "Se așteaptă starea locului de muncă",
         "Waiting for printer…": "Se așteaptă imprimanta...",
-        "Waiting for readings": "În așteptarea citirilor",
+        "Waiting for readings": "Se așteaptă măsurătorile",
         "Waiting for temperature readings": "Se așteaptă citirile de temperatură",
         "Waiting for the printer to confirm calibration.": "Se așteaptă ca imprimanta să confirme calibrarea.",
         "Waiting for the printer…": "Se așteaptă imprimanta...",
@@ -15355,6 +16005,15 @@ TRANSLATIONS = {
         "{time} left": "Timp rămas: {time}",
     },
     "ru": {
+        "While this tab is open": "Пока открыта эта вкладка",
+        "Only during an active print": "Только при активном задании",
+        "Waiting for part removal": "Ждёт снятия детали",
+        "Wait for part removal": "Ждать снятия детали",
+        "Bed is clear": "Стол свободен",
+        "Chart layout": "Вид графика",
+        "Shared scale": "Общая шкала",
+        "Separate scales": "Отдельные шкалы",
+        "Select at least one temperature line.": "Выберите хотя бы одну линию температуры.",
         " · Total print time: {time}": " · Общее время печати: {time}",
         "0 min": "0 мин.",
         "1 mm": "1 мм",
@@ -15366,54 +16025,55 @@ TRANSLATIONS = {
         "5 min": "5 мин.",
         "5 min · {readings}": "5 мин · {readings}",
         "60 min": "60 мин.",
-        "A JSON printer row needs four strings: address, CheckCode, name and serial.": "Для строки принтера JSON требуется четыре строки: адрес, CheckCode, имя и серийный номер.",
-        "Active print": "Активная печать",
+        "A JSON printer row needs four strings: address, CheckCode, name and serial.": "В записи принтера в формате JSON должно быть четыре строки: адрес, CheckCode, имя и серийный номер.",
+        "Active print": "Текущая печать",
         "Add at least one printer address.": "Добавьте хотя бы один адрес принтера.",
         "Add printer": "Добавить принтер",
         "All": "Все",
         "All printers": "Все принтеры",
-        "Allow OrcaSlicer to access your printer when prompted, then reload the plugin.": "Разрешите OrcaSlicer доступ к вашему принтеру при появлении соответствующего запроса, затем перезагрузите плагин.",
+        "Allow OrcaSlicer to access your printer when prompted, then reload the plugin.": "Когда OrcaSlicer запросит доступ к принтеру, разрешите его и перезагрузите плагин.",
         "Allow access to the printer, then reload the plugin.": "Разрешите доступ к принтеру, затем перезагрузите плагин.",
-        "Another print source is being read.": "Читается другой источник печати.",
+        "Another print source is being read.": "Уже считывается другой файл для печати.",
         "Appearance": "Внешний вид",
-        "Apply": "Подать заявку",
+        "Apply": "Применить",
         "Attention": "Внимание",
-        "Authenticated readings: {availability}": "Аутентифицированные показания: {availability}",
-        "Auto shutdown": "Автоматическое отключение",
+        "Authenticated readings: {availability}": "Данные с авторизацией: {availability}",
+        "Auto shutdown": "Автовыключение",
         "Axes": "Оси",
         "Axes busy": "Оси заняты",
-        "Axis movement step": "Шаг перемещения оси",
-        "Basic readings received. CheckCode could not be verified.": "Получены основные показания. CheckCode не удалось проверить.",
+        "Axis movement step": "Шаг перемещения осей",
+        "B": "Стол",
+        "Basic readings received. CheckCode could not be verified.": "Основные показания получены. Проверить CheckCode не удалось.",
         "Bed": "Стол",
         "Bed Target": "Целевая температура стола",
-        "Bed Z": "Стол по Z",
+        "Bed Z": "Ось Z стола",
         "Bed leveling": "Выравнивание стола",
         "Black": "Черный",
         "Blue": "Синий",
         "Brown": "Коричневый",
-        "Browse files": "Просмотр файлов",
-        "Build volume": "Объем сборки",
+        "Browse files": "Открыть файлы",
+        "Build volume": "Область печати",
         "Busy": "Занят",
         "Calibrating": "Калибровка",
         "Calibration": "Калибровка",
         "Calibration in progress": "Выполняется калибровка",
         "Camera": "Камера",
-        "Camera URL: {status}": "URL-адрес камеры: {status}.",
-        "Camera frame exceeds the size limit.": "Размер кадра камеры превышает предельный размер.",
-        "Camera is in use. Close the other view and reconnect.": "Камера используется. Закройте другое представление и снова подключитесь.",
-        "Camera is warming up": "Камера прогревается.",
-        "Camera stream ended. Reconnect to try again.": "Трансляция с камеры закончилась. Повторно подключитесь, чтобы повторить попытку.",
+        "Camera URL: {status}": "Адрес камеры: {status}",
+        "Camera frame exceeds the size limit.": "Кадр с камеры слишком большой.",
+        "Camera is in use. Close the other view and reconnect.": "Камера уже открыта. Закройте другой просмотр и подключитесь снова.",
+        "Camera is warming up": "Камера запускается",
+        "Camera stream ended. Reconnect to try again.": "Трансляция с камеры прервалась. Подключитесь снова.",
         "Camera unavailable.": "Камера недоступна.",
         "Cameras": "Камеры",
         "Cancel": "Отмена",
         "Cancel print?": "Отменить печать?",
         "Canceled": "Отменено",
-        "Canceling": "Отмена",
+        "Canceling": "Отменяется",
         "Card size": "Размер карточек",
-        "Chamber": "Палата",
-        "Chamber light": "Свет камеры",
+        "Chamber": "Камера печати",
+        "Chamber light": "Подсветка камеры печати",
         "Chart nozzle": "Сопло на графике",
-        "Chart of actual and target temperatures for the nozzle and bed": "График фактической и целевой температур сопла и станины",
+        "Chart of actual and target temperatures for the nozzle and bed": "График фактической и заданной температуры сопла и стола",
         "Check connection": "Проверить подключение",
         "Check the CheckCode in the plugin settings.": "Проверьте CheckCode в настройках плагина.",
         "Check the printer serial number and CheckCode.": "Проверьте серийный номер принтера и CheckCode.",
@@ -15421,30 +16081,30 @@ TRANSLATIONS = {
         "Check the printer serial number.": "Проверьте серийный номер принтера.",
         "Check the selected printer.": "Проверьте выбранный принтер.",
         "Check the serial number and CheckCode in the plugin settings.": "Проверьте серийный номер и CheckCode в настройках плагина.",
-        "Checking axis position…": "Проверка положения…",
+        "Checking axis position…": "Проверка положения осей…",
         "Checking connection…": "Проверка подключения…",
         "Checking position…": "Проверка положения…",
         "Checking printer status…": "Проверка состояния принтера…",
         "Checking printer…": "Проверка принтера…",
-        "Checking the result of {command}…": "Проверка результата {command}…",
-        "Checking the saved preview…": "Проверка сохраненного предварительного просмотра…",
+        "Checking the result of {command}…": "Проверка результата команды «{command}»…",
+        "Checking the saved preview…": "Проверка сохранённого эскиза…",
         "Choose Find printers or enter the address. The CheckCode is in the printer's network settings.": "Выберите «Найти принтеры» или введите адрес. CheckCode находится в сетевых настройках принтера.",
         "Choose a .3mf no larger than 512 MB.": "Выберите .3mf размером не более 512 МБ.",
         "Choose a color.": "Выберите цвет.",
-        "Choose a loaded slot": "Выбор загруженного слота",
+        "Choose a loaded slot": "Выберите слот с материалом",
         "Choose a material and color supported by this printer.": "Выберите материал и цвет, поддерживаемые этим принтером.",
         "Choose a nonempty print file no larger than 128 MB.": "Выберите непустой файл для печати размером не более 128 МБ.",
         "Choose a print file no larger than 128 MB.": "Выберите файл для печати размером не более 128 МБ.",
-        "Choose a sliced .3mf with one plate and filament information.": "Выберите нарезанный .3mf с одной пластиной и информацией о нити.",
-        "Choose a sliced .3mf with one plate.": "Выберите нарезанный .3mf одной тарелкой.",
-        "Choose a text .gcode file or a sliced .3mf.": "Выберите текстовый файл .gcode или фрагмент .3mf.",
+        "Choose a sliced .3mf with one plate and filament information.": "Выберите .3mf с одним нарезанным столом и данными о материалах.",
+        "Choose a sliced .3mf with one plate.": "Выберите .3mf с одним нарезанным столом.",
+        "Choose a text .gcode file or a sliced .3mf.": "Выберите текстовый файл .gcode или .3mf с подготовленной нарезкой.",
         "Choose delay…": "Выберите задержку…",
         "Choose material": "Выберите материал",
-        "Choose the original .3mf with one sliced plate and the same file name.": "Выберите исходный .3mf с одной нарезанной пластиной и тем же именем файла.",
-        "Choose the original sliced .3mf for this Creator file.": "Выберите исходный фрагмент .3mf для этого файла Creator.",
-        "Choose the original sliced .3mf.": "Выберите исходный нарезанный .3mf.",
-        "Choose the sliced .3mf that matches the stored file name.": "Выберите фрагмент .3mf, соответствующий имени сохраненного файла.",
-        "Clear error": "Удалить ошибку",
+        "Choose the original .3mf with one sliced plate and the same file name.": "Выберите исходный .3mf с одним нарезанным столом и тем же именем файла.",
+        "Choose the original sliced .3mf for this Creator file.": "Выберите исходный .3mf с нарезкой для этого файла Creator.",
+        "Choose the original sliced .3mf.": "Выберите исходный .3mf с нарезкой.",
+        "Choose the sliced .3mf that matches the stored file name.": "Выберите .3mf с нарезкой и тем же именем, что у файла на принтере.",
+        "Clear error": "Сбросить ошибку",
         "Clear filters": "Очистить фильтры",
         "Close": "Закрыть",
         "Closed": "Закрыто",
@@ -15452,15 +16112,15 @@ TRANSLATIONS = {
         "Color": "Цвет",
         "Color differs": "Цвет отличается",
         "Command accepted. The printer has not confirmed the change.": "Команда принята. Принтер не подтвердил изменение.",
-        "Command failed": "Команда не выполнена.",
+        "Command failed": "Команда не выполнена",
         "Command result unavailable.": "Результат команды недоступен.",
         "Command unavailable for the current printer state.": "Команда недоступна для текущего состояния принтера.",
-        "Compact": "Компактный",
+        "Compact": "Компактная",
         "Completed": "Завершено",
         "Completed: {done} of {total}": "Завершено: {done} из {total}",
-        "Configure the printer serial number and CheckCode.": "Настройте серийный номер принтера и CheckCode.",
+        "Configure the printer serial number and CheckCode.": "Укажите серийный номер принтера и CheckCode.",
         "Connect": "Подключиться",
-        "Connect an Adventurer 5M with its CheckCode first.": "Сначала соедините Adventurer 5M с его CheckCode.",
+        "Connect an Adventurer 5M with its CheckCode first.": "Сначала подключите Adventurer 5M и укажите его CheckCode.",
         "Connect to FlashForge printers on your local network.": "Подключитесь к принтерам FlashForge в локальной сети.",
         "Connected": "Подключён",
         "Connected · {transport}": "Подключено · {transport}",
@@ -15471,38 +16131,38 @@ TRANSLATIONS = {
         "Connection check": "Проверка подключения",
         "Connection lost": "Соединение потеряно",
         "Connection restored": "Соединение восстановлено",
-        "Copied": "скопировано",
-        "Copy report": "Копировать отчет",
+        "Copied": "Скопировано",
+        "Copy report": "Копировать отчёт",
         "Coral": "Коралл",
         "Could not check this printer. Check the address and network permissions.": "Не удалось проверить этот принтер. Проверьте адрес и сетевые разрешения.",
-        "Could not confirm the upload. Refresh Printer Files before retrying.": "Не удалось подтвердить загрузку. Прежде чем повторить попытку, обновите файлы принтера.",
-        "Could not confirm the upload. Refresh Printer Files.": "Не удалось подтвердить загрузку. Обновите файлы принтера.",
+        "Could not confirm the upload. Refresh Printer Files before retrying.": "Не удалось подтвердить загрузку. Обновите список файлов принтера перед повторной попыткой.",
+        "Could not confirm the upload. Refresh Printer Files.": "Не удалось подтвердить загрузку. Обновите список файлов принтера.",
         "Could not load files": "Не удалось загрузить файлы.",
         "Could not load the file list": "Не удалось загрузить список файлов.",
         "Could not open the MJPEG stream. Check the camera URL.": "Не удалось открыть поток MJPEG. Проверьте URL-адрес камеры.",
         "Could not open the camera.": "Не удалось открыть камеру.",
-        "Could not read a snapshot from the printer.": "Не удалось прочитать снимок с принтера.",
+        "Could not read a snapshot from the printer.": "Не удалось получить снимок с принтера.",
         "Could not read printer data.": "Не удалось прочитать данные принтера.",
-        "Could not read slice information from this .3mf.": "Не удалось прочитать информацию о фрагменте из этого .3mf.",
+        "Could not read slice information from this .3mf.": "Не удалось прочитать данные нарезки из этого .3mf.",
         "Could not read the camera.": "Не удалось прочитать данные камеры.",
         "Could not read the saved printer web interface URLs.": "Не удалось прочитать сохраненные URL-адреса веб-интерфейса принтера.",
         "Could not read the settings.": "Не удалось прочитать настройки.",
-        "Could not read the source.": "Не удалось прочитать источник.",
-        "Could not read this print source.": "Не удалось прочитать этот источник печати.",
+        "Could not read the source.": "Не удалось прочитать исходный файл.",
+        "Could not read this print source.": "Не удалось прочитать исходный файл печати.",
         "Could not save notification settings.": "Не удалось сохранить настройки уведомлений.",
-        "Could not save print history. New entries are still available for this session.": "Не удалось сохранить историю печати. Для этой сессии все еще доступны новые записи.",
+        "Could not save print history. New entries are still available for this session.": "Не удалось сохранить историю печати. Новые записи доступны до конца сеанса.",
         "Could not save the settings.": "Не удалось сохранить настройки.",
-        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "Не удалось запустить камеру Creator 5 Pro. Проверьте режим LAN и переподключитесь.",
-        "Cream": "Крем",
-        "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "Для Creator 5 and 5 Pro требуется CheckCode и серийный номер принтера. Adventurer 5M автоматически считывает свой серийный номер.",
-        "Creator repeat printing requires a .3mf.": "Повторная печать Creator требует .3mf.",
-        "Cyan": "Голубой",
+        "Could not start the Creator 5 Pro camera. Check LAN mode and reconnect.": "Не удалось запустить камеру Creator 5 Pro. Проверьте режим локальной сети и подключитесь снова.",
+        "Cream": "Кремовый",
+        "Creator 5 and 5 Pro require both CheckCode and the printer serial number. Adventurer 5M reads its serial number automatically.": "Для Creator 5 и 5 Pro нужны CheckCode и серийный номер. У Adventurer 5M серийный номер определяется автоматически.",
+        "Creator repeat printing requires a .3mf.": "Для повторной печати на Creator нужен файл .3mf.",
+        "Cyan": "Циан",
         "Dark blue": "Темно-синий",
         "Dark brown": "Темно-коричневый",
         "Dark green": "Темно-зеленый",
         "Dark theme": "Темная тема",
         "Device": "Принтер",
-        "Device navigation": "Навигация по устройству",
+        "Device navigation": "Навигация по вкладкам принтера",
         "Disconnect": "Отключиться",
         "Disconnected": "Нет связи",
         "Door / lid: {state}": "Дверь/крышка: {state}",
@@ -15514,38 +16174,37 @@ TRANSLATIONS = {
         "Elapsed": "Прошло",
         "Elapsed: {time}": "Прошло: {time}",
         "Empty": "Пусто",
-        "Empty camera stream": "Пустой поток камеры",
-        "Enable LAN-only mode on the printer.": "Включите на принтере режим только LAN.",
-        "Ended: {time}": "Закончено: {time}",
-        "Endstops: {state}": "Концевые упоры: {state}",
-        "Enlarge camera": "Увеличить камеру",
+        "Empty camera stream": "Камера не передаёт кадры",
+        "Enable LAN-only mode on the printer.": "Включите на принтере режим работы только по локальной сети.",
+        "Ended: {time}": "Окончание: {time}",
+        "Endstops: {state}": "Концевики: {state}",
+        "Enlarge camera": "Увеличить изображение камеры",
         "Enter a local IPv4 address for the printer.": "Введите локальный адрес IPv4 для принтера.",
         "Enter a page number": "Введите номер страницы.",
         "Enter a serial number using up to 64 letters, digits, hyphens or underscores.": "Введите серийный номер, используя до 64 букв, цифр, дефисов или подчеркиваний.",
-        "Enter an HTTP or HTTPS MJPEG URL without a username or password.": "Введите URL-адрес HTTP или HTTPS MJPEG без имени пользователя или пароля.",
+        "Enter an HTTP or HTTPS MJPEG URL without a username or password.": "Введите HTTP- или HTTPS-адрес потока MJPEG без имени пользователя и пароля.",
         "Enter your CheckCode in the plugin settings": "Введите свой CheckCode в настройках плагина.",
         "Enter your printer address in the plugin settings.": "Введите адрес вашего принтера в настройках плагина.",
         "Error": "Ошибка",
         "Error: {code}": "Ошибка: {code}",
         "Errors and cancellations": "Ошибки и отмены",
-        "Estimated material": "Предполагаемый материал",
+        "Estimated material": "Расход материала",
         "Estimated material: {weight}": "Расход материала: {weight}",
         "Feed": "Подать",
-        "Filament": "Материал",
-        "Filament movement": "Движение нити",
-        "Filament {number}": "Нить {number}",
-        "Filament {number} requires {material}.": "Для нити {number} требуется {material}.",
+        "Filament": "Филамент",
+        "Filament movement": "Движение филамента",
+        "Filament {number}": "Филамент {number}",
+        "Filament {number} requires {material}.": "Для филамента {number} нужен материал {material}.",
         "File": "Файл",
-        "File name on printer": "Имя файла на принтере.",
+        "File name on printer": "Имя файла на принтере",
         "File upload is available on Adventurer 5M.": "Загрузка файлов доступна на Adventurer 5M.",
         "Files: {count}": "Файлы: {count}",
-        "Filter by printer status": "Фильтрация по состоянию принтера.",
+        "Filter by printer status": "Фильтр по состоянию принтера",
         "Find a file": "Найти файл",
         "Find a history entry": "Найти запись в истории",
         "Find printers": "Найти принтеры",
         "Finish": "Окончание",
         "Finish ≈ {time}": "Окончание ≈ {time}",
-        "Finished cleanly": "Успешно завершено",
         "Finished. Printer ready.": "Завершено. Принтер готов.",
         "Firmware": "Прошивка",
         "FlashForge Device Tab is shutting down.": "FlashForge Device Tab отключается.",
@@ -15553,18 +16212,19 @@ TRANSLATIONS = {
         "Gray": "Серый",
         "Green": "Зеленый",
         "Heat nozzle to 180 °C": "Нагрейте сопло до 180 °C.",
+        "Heat": "Нагреть",
         "Heat off": "Выключить нагрев",
         "Heat the nozzle to at least 180 °C.": "Нагрейте сопло минимум до 180 °C.",
-        "Heating": "Отопление",
-        "Heating nozzles: {count}": "Нагревательные форсунки: {count}",
+        "Heating": "Нагрев",
+        "Heating nozzles: {count}": "Сопел на нагреве: {count}",
         "History": "История",
         "Home": "В ноль",
-        "Home all axes": "Обнулить все оси",
-        "Home required": "Требуется обнуление осей",
-        "Home sent. Waiting for the printer to confirm completion.": "Команда обнуления осей отправлена. Ожидается подтверждение принтера.",
-        "Homing…": "Обнуление осей…",
+        "Home all axes": "Вернуть все оси в ноль",
+        "Home required": "Нужно вернуть оси в ноль",
+        "Home sent. Waiting for the printer to confirm completion.": "Команда возврата в ноль отправлена. Ожидание подтверждения от принтера.",
+        "Homing…": "Возврат осей в ноль…",
         "Host notifications": "Уведомления OrcaSlicer",
-        "IPv4 address": "адрес IPv4",
+        "IPv4 address": "Адрес IPv4",
         "Idle": "Без задания",
         "In Progress": "В процессе",
         "In progress": "В процессе",
@@ -15573,40 +16233,40 @@ TRANSLATIONS = {
         "Input shaper": "Шейпер",
         "Interface language": "Язык интерфейса",
         "Invalid JPEG segment.": "Неверный сегмент JPEG.",
-        "Invalid JSON printer row.": "Неверная строка принтера JSON.",
+        "Invalid JSON printer row.": "Некорректная запись принтера в формате JSON.",
         "Invalid TCP print options.": "Неверные параметры печати TCP.",
         "Invalid entry in the file list": "Неверная запись в списке файлов.",
         "Invalid notification settings.": "Неверные настройки уведомлений.",
         "Invalid print history format": "Неверный формат истории печати.",
         "Invalid print job.": "Недопустимое задание печати.",
         "Invalid printer entry.": "Некорректные данные принтера.",
-        "Invalid printer file name.": "Неверное имя файла принтера.",
+        "Invalid printer file name.": "Недопустимое имя файла на принтере.",
         "Invalid printer list.": "Неверный список принтеров.",
         "Invalid request.": "Неверный запрос.",
-        "Invalid slice information.": "Неверная информация о срезе.",
-        "Job details": "Подробности о вакансии",
-        "Job status unavailable": "Статус вакансии недоступен.",
-        "Jobs": "Вакансии",
-        "Large": "Большой",
-        "Last completed": "Последнее завершенное",
+        "Invalid slice information.": "Некорректные данные нарезки.",
+        "Job details": "Подробности задания",
+        "Job status unavailable": "Состояние задания недоступно",
+        "Jobs": "Задания",
+        "Large": "Крупный",
+        "Last completed": "Последнее завершённое задание",
         "Last reading: {seconds} s ago": "Последнее показание: {seconds} с назад",
         "Layer {layer}": "Слой {layer}",
         "Layer {layer} of {total}": "Слой {layer} из {total}",
         "Layout": "Расположение",
         "Level bed": "Выровнять стол",
-        "Level bed before printing": "Выровняйте платформу перед печатью.",
-        "Light": "Свет",
+        "Level bed before printing": "Выравнивать стол перед печатью",
+        "Light": "Подсветка",
         "Light blue": "Голубой",
         "Light control is unavailable on this printer.": "На этом принтере управление подсветкой недоступно.",
         "Light gray": "Светло-серый",
         "Light green": "Светло-зеленый",
-        "Light off": "Свет выключен",
-        "Light on": "Свет горит",
+        "Light off": "Подсветка выключена",
+        "Light on": "Подсветка включена",
         "Light theme": "Светлая тема",
-        "Linked materials loaded. Check that the stored file has not been replaced.": "Связанные материалы загружены. Убедитесь, что сохраненный файл не был заменен.",
-        "Live camera": "Живая камера",
-        "Live camera · {printer}": "Живая камера · {printer}",
-        "Live cameras": "Камеры прямого эфира",
+        "Linked materials loaded. Check that the stored file has not been replaced.": "Сопоставление материалов загружено. Проверьте, что файл на принтере не заменён.",
+        "Live camera": "Трансляция с камеры",
+        "Live camera · {printer}": "Камера в прямом эфире · {printer}",
+        "Live cameras": "Трансляции с камер",
         "Loading…": "Загрузка…",
         "Locked": "Заблокировано",
         "MJPEG stream URL (HTTP or HTTPS)": "URL-адрес потока MJPEG (HTTP или HTTPS)",
@@ -15619,32 +16279,33 @@ TRANSLATIONS = {
         "Model": "Модель",
         "Monitor": "Монитор",
         "Monitoring is paused during file transfer.": "Во время передачи файлов мониторинг приостанавливается.",
-        "Motor release is unavailable for this printer.": "Для этого принтера функция разблокировки двигателя недоступна.",
+        "Motor release is unavailable for this printer.": "На этом принтере нельзя разблокировать двигатели.",
         "Motor release sent.": "Команда разблокировки двигателей отправлена.",
         "Motors released. Press Home before moving the axes.": "Двигатели разблокированы. Перед перемещением осей нажмите «В ноль».",
-        "Move X negative": "Переместить X в отрицательную сторону",
-        "Move X positive": "Переместить X в положительное положение",
-        "Move Y negative": "Переместить Y в отрицательную сторону",
-        "Move Y positive": "Переместить Y в положительное положение",
-        "Move down": "Переместиться вниз",
+        "Move X negative": "Переместить по оси X в сторону минуса",
+        "Move X positive": "Переместить по оси X в сторону плюса",
+        "Move Y negative": "Переместить по оси Y в сторону минуса",
+        "Move Y positive": "Переместить по оси Y в сторону плюса",
+        "Move down": "Переместить вниз",
         "Move sent to the printer.": "Команда перемещения отправлена.",
-        "Move up": "Подняться вверх",
+        "Move up": "Переместить вверх",
         "Moving…": "Перемещение…",
+        "N": "Соп.",
         "Name": "Имя",
         "Needs Attention": "Требуется внимание",
-        "Network discovery unavailable. Enter the printer address manually.": "Сетевое обнаружение недоступно. Введите адрес принтера вручную.",
+        "Network discovery unavailable. Enter the printer address manually.": "Поиск в локальной сети недоступен. Введите адрес принтера вручную.",
         "Next page": "Следующая страница",
         "No active print job": "Нет активного задания",
         "No camera frame received. Connect to try again.": "Не получен кадр с камеры. Подключитесь, чтобы повторить попытку.",
         "No files": "Файлов нет",
         "No frame received. Check the URL and confirm the stream uses MJPEG.": "Кадр не получен. Проверьте URL-адрес и убедитесь, что поток использует MJPEG.",
-        "No idle printers.": "Отсутствие простаивающих принтеров.",
-        "No loaded slot matches": "Нет совпадений с загруженными слотами.",
+        "No idle printers.": "Нет свободных принтеров.",
+        "No loaded slot matches": "Нет подходящего слота с материалом",
         "No matching files": "Подходящих файлов нет",
-        "No matching jobs.": "Нет подходящих вакансий.",
+        "No matching jobs.": "Нет подходящих заданий.",
         "No new printers found.": "Новых принтеров не обнаружено.",
-        "No preview": "Нет предварительного просмотра",
-        "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.": "Пока не зарегистрировано ни одного задания на печать. История печати записывается, пока OrcaSlicer открыт.",
+        "No preview": "Нет эскиза",
+        "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.": "Заданий пока нет. История печати ведётся, пока открыт OrcaSlicer.",
         "No printers are printing.": "Ни один принтер не печатает.",
         "No printers configured.": "Принтеры не настроены.",
         "No printers match your search and filters.": "Нет принтеров, соответствующих вашему запросу и фильтрам.",
@@ -15657,44 +16318,44 @@ TRANSLATIONS = {
         "Nozzle": "Сопло",
         "Nozzle Target": "Целевая температура сопла",
         "Nozzle T{tool}": "Сопло T{tool}",
-        "Nozzle Z": "Сопло по Z",
+        "Nozzle Z": "Ось Z сопла",
         "Nozzle {temperature} °C": "Сопло {temperature} °C",
-        "Nozzles": "Форсунки",
-        "Nozzles: {count}": "Форсунки: {count}",
+        "Nozzles": "Сопла",
+        "Nozzles: {count}": "Сопел: {count}",
         "Off": "Выкл.",
-        "Offline for at least one minute": "Не в сети не менее одной минуты.",
+        "Offline for at least one minute": "Принтер не в сети больше минуты",
         "On": "Вкл.",
         "One printer per line: address | CheckCode | name | serial number": "Один принтер на строку: адрес | CheckCode | имя | серийный номер",
-        "Open": "Открыть",
+        "Open": "Открыто",
         "Open FlashForge": "Открыть FlashForge",
-        "Open FlashForge Device Tab for a FlashForge printer profile from Speed Dial.": "Откройте FlashForge Device Tab для получения профиля принтера FlashForge из быстрого набора.",
-        "Open FlashForge Device Tab for the current printer profile from Speed Dial.": "Откройте FlashForge Device Tab для текущего профиля принтера из быстрого набора.",
+        "Open FlashForge Device Tab for a FlashForge printer profile from Speed Dial.": "Выберите профиль принтера FlashForge и запустите FlashForge Device Tab из меню быстрого доступа.",
+        "Open FlashForge Device Tab for the current printer profile from Speed Dial.": "Запустите FlashForge Device Tab для текущего профиля из меню быстрого доступа.",
         "Open Printer Interface in Browser": "Открыть интерфейс принтера в браузере",
         "Open printer": "Открыть принтер",
-        "Open the FlashForge tab to see the monitor.": "Откройте вкладку FlashForge, чтобы увидеть монитор.",
+        "Open the FlashForge tab to see the monitor.": "Монитор доступен на вкладке FlashForge.",
         "Open the monitor in OrcaSlicer.": "Откройте монитор в OrcaSlicer.",
-        "Opened FlashForge Device Tab in the Printer tab.": "Открыт FlashForge Device Tab на вкладке Принтер.",
-        "Opening Creator 5 Pro camera…": "Открытие камеры Creator 5 Pro…",
+        "Opened FlashForge Device Tab in the Printer tab.": "FlashForge Device Tab открыт на вкладке «Принтер».",
+        "Opening Creator 5 Pro camera…": "Подключение камеры Creator 5 Pro…",
         "Orange": "Оранжевый",
         "OrcaSlicer is sending a print job. Monitoring will resume when the transfer is complete.": "OrcaSlicer отправляет задание на печать. Мониторинг возобновится после завершения передачи.",
-        "OrcaSlicer is sending a print job. Try again when it finishes.": "OrcaSlicer отправляет задание на печать. Попробуйте еще раз, когда он закончится.",
-        "Original sliced .3mf": "Оригинальная нарезка .3mf",
-        "Other nozzles": "Другие насадки",
+        "OrcaSlicer is sending a print job. Try again when it finishes.": "OrcaSlicer отправляет задание печати. Повторите попытку после передачи.",
+        "Original sliced .3mf": "Исходный .3mf с нарезкой",
+        "Other nozzles": "Другие сопла",
         "Page number": "Номер страницы",
         "Part Cooling Fan": "Вентилятор обдува модели",
         "Part fan": "Обдув модели",
         "Pause": "Пауза",
         "Paused": "На паузе",
-        "Paused, disconnected or reporting a problem": "Приостановлено, отключено или сообщается о проблеме.",
-        "Pausing": "Переход в паузу",
+        "Paused, disconnected or reporting a problem": "На паузе, без связи или с ошибкой",
+        "Pausing": "Приостановка",
         "Pink": "Розовый",
         "Prepared print file": "Подготовленный файл для печати",
         "Press Home before moving the axes.": "Перед перемещением осей нажмите «В ноль».",
         "Press Home to move.": "Нажмите «В ноль» перед перемещением осей.",
-        "Press Home to restore axis control": "Нажмите «В ноль» перед перемещением осей.",
+        "Press Home to restore axis control": "Нажмите «В ноль», чтобы снова управлять осями",
         "Press Settings in the panel header.": "Нажмите «Настройки» в заголовке панели.",
-        "Preview of {file}": "Предварительный просмотр {file}",
-        "Preview unavailable": "Предварительный просмотр недоступен",
+        "Preview of {file}": "Эскиз файла {file}",
+        "Preview unavailable": "Эскиз недоступен",
         "Previous page": "Предыдущая страница",
         "Print": "Печать",
         "Print History": "История печати",
@@ -15705,7 +16366,7 @@ TRANSLATIONS = {
         "Print complete": "Печать завершена",
         "Print completed": "Печать завершена",
         "Print finished": "Печать завершена",
-        "Print history is recorded while OrcaSlicer is open.": "История печати записывается, пока OrcaSlicer открыт.",
+        "Print history is recorded while OrcaSlicer is open.": "История печати ведётся, пока открыт OrcaSlicer.",
         "Print history is temporarily unavailable.": "История печати временно недоступна.",
         "Print job": "Задание печати",
         "Print paused": "Печать приостановлена",
@@ -15715,76 +16376,77 @@ TRANSLATIONS = {
         "Print resumed": "Печать возобновлена",
         "Print speed": "Скорость печати",
         "Print started · {file}": "Печать началась · {file}",
-        "Print stored file": "Печать файла с принтера",
+        "Print stored file": "Печать файла из памяти принтера",
+        "Print success rate": "Доля успешных заданий",
         "Print time": "Время печати",
         "Print time: {time}": "Время печати: {time}",
         "Printer": "Принтер",
         "Printer Files": "Файлы принтера",
-        "Printer IPv4 address": "Адрес принтера IPv4",
+        "Printer IPv4 address": "Адрес IPv4 принтера",
         "Printer Readings": "Показания принтера",
         "Printer accepted the command.": "Принтер принял команду.",
-        "Printer accepted the command. Axis limits could not be checked.": "Принтер принял команду. Пределы осей не удалось проверить.",
-        "Printer camera feed": "Камера принтера",
-        "Printer confirmed the nozzle target.": "Принтер подтвердил цель сопла.",
-        "Printer confirmed the shutdown timer setting.": "Принтер подтвердил настройку таймера выключения.",
-        "Printer confirmed {command} · {state}": "Принтер подтвержден {command} · {state}",
-        "Printer confirmed · {state}": "Принтер подтвержден · {state}",
+        "Printer accepted the command. Axis limits could not be checked.": "Принтер принял команду. Проверить пределы хода осей не удалось.",
+        "Printer camera feed": "Изображение с камеры принтера",
+        "Printer confirmed the nozzle target.": "Принтер подтвердил заданную температуру сопла.",
+        "Printer confirmed the shutdown timer setting.": "Принтер подтвердил настройку таймера автовыключения.",
+        "Printer confirmed {command} · {state}": "Принтер подтвердил команду «{command}» · {state}",
+        "Printer confirmed · {state}": "Принтер подтвердил команду · {state}",
         "Printer connection": "Подключение принтера",
         "Printer control is unavailable.": "Управление принтером недоступно.",
-        "Printer denied control.": "Принтеру отказано в управлении.",
-        "Printer denied manual control.": "Принтеру запрещено ручное управление.",
+        "Printer denied control.": "Принтер отказал в управлении.",
+        "Printer denied manual control.": "Принтер отклонил ручное управление.",
         "Printer details": "Подробности о принтере",
-        "Printer did not confirm that the axes are idle.": "Принтер не подтвердил, что оси простаивают.",
-        "Printer did not confirm {command}. Last reported state: {state}.": "Принтер не подтвердил {command}. Состояние последнего сообщения: {state}.",
+        "Printer did not confirm that the axes are idle.": "Принтер не подтвердил остановку осей.",
+        "Printer did not confirm {command}. Last reported state: {state}.": "Принтер не подтвердил команду «{command}». Последнее состояние: {state}.",
         "Printer did not report the axis position.": "Принтер не сообщил о положении оси.",
         "Printer did not report the axis travel limits.": "Принтер не сообщил о пределах перемещения оси.",
-        "Printer error": "Ошибка принтера.",
-        "Printer has not confirmed the nozzle target. Check Printer Readings.": "Принтер не подтвердил цель сопла. Проверьте показания принтера.",
+        "Printer error": "Ошибка принтера",
+        "Printer has not confirmed the nozzle target. Check Printer Readings.": "Принтер не подтвердил заданную температуру сопла. Проверьте показания принтера.",
         "Printer jobs": "Задания принтера",
         "Printer must be idle.": "Принтер должен быть свободен.",
         "Printer must be idle. Wait for movement or Home to finish.": "Дождитесь, пока принтер закончит перемещение или обнуление осей.",
-        "Printer must be idle. {reason}": "Принтер должен находиться в режиме ожидания. {reason}",
+        "Printer must be idle. {reason}": "Принтер должен быть свободен. {reason}",
         "Printer rejected the selected file.": "Принтер отклонил выбранный файл.",
-        "Printer rejected {command}.": "Принтер отклонил {command}.",
-        "Printer reported an error": "Принтер сообщил об ошибке.",
+        "Printer rejected {command}.": "Принтер отклонил команду «{command}».",
+        "Printer reported an error": "Принтер сообщил об ошибке",
         "Printer reported an error.": "Принтер сообщил об ошибке.",
         "Printer reports the error cleared.": "Принтер сообщает, что ошибка устранена.",
-        "Printer serial number unavailable": "Серийный номер принтера недоступен.",
+        "Printer serial number unavailable": "Серийный номер принтера недоступен",
         "Printer status unavailable.": "Состояние принтера недоступно.",
         "Printers": "Принтеры",
         "Printing": "Печать",
         "Printing started": "Печать началась.",
-        "Print…": "Распечатать…",
-        "Profile changed": "Профиль изменен.",
+        "Print…": "Печать…",
+        "Profile changed": "Профиль изменён",
         "Purple": "Фиолетовый",
         "Range": "Диапазон",
-        "Reading materials…": "Материалы для чтения…",
+        "Reading materials…": "Чтение данных о материалах…",
         "Reading printer status…": "Чтение состояния принтера…",
-        "Readings delayed": "Показания задерживаются",
+        "Readings delayed": "Показания поступают с задержкой",
         "Readings unavailable": "Нет показаний",
         "Ready": "Готов",
         "Ready to move": "Можно перемещать оси",
-        "Reconnect camera": "Переподключите камеру.",
+        "Reconnect camera": "Подключить камеру снова",
         "Red": "Красный",
         "Refresh": "Обновить",
         "Refresh the Creator printer's file list first.": "Сначала обновите список файлов принтера Creator.",
         "Refresh the file list and check the loaded materials.": "Обновите список файлов и проверьте загруженные материалы.",
-        "Release motors": "Разблокировать двигатели",
+        "Release motors": "Отпустить моторы",
         "Remove": "Удалить",
-        "Replace Printer tab": "Вкладка «Замена принтера»",
+        "Replace Printer tab": "Заменить содержимое вкладки «Принтер»",
         "Request failed.": "Не удалось выполнить запрос.",
-        "Restored the printer's original web page.": "Восстановлена ​​исходная веб-страница принтера.",
+        "Restored the printer's original web page.": "Восстановлена исходная веб-страница принтера.",
         "Result": "Результат",
         "Result: {result}": "Результат: {result}",
         "Resume": "Продолжить",
         "Retract": "Втянуть",
         "Rows per page": "Строк на странице",
         "Save": "Сохранить",
-        "Save a frame from the active camera view.": "Сохранение кадра из изображения активной камеры.",
-        "Save and wait a few seconds: temperatures and progress appear here.": "Сохраните и подождите несколько секунд: здесь отображаются температура и прогресс.",
+        "Save a frame from the active camera view.": "Сохраните кадр из открытой трансляции камеры.",
+        "Save and wait a few seconds: temperatures and progress appear here.": "Сохраните настройки. Через несколько секунд здесь появятся температуры и ход печати.",
         "Save snapshot": "Сохранить снимок",
         "Save the printer serial and CheckCode first.": "Сначала сохраните серийный номер принтера и CheckCode.",
-        "Save this printer before checking the connection.": "Сохраните этот принтер перед проверкой соединения.",
+        "Save this printer before checking the connection.": "Сохраните настройки принтера перед проверкой подключения.",
         "Save this setting, then restart OrcaSlicer to switch tabs.": "Сохраните этот параметр, затем перезапустите OrcaSlicer, чтобы переключить вкладки.",
         "Saved. Restart OrcaSlicer to apply the change.": "Сохранено. Перезапустите OrcaSlicer, чтобы применить изменения.",
         "Saving file on the printer and checking the result…": "Сохранение файла на принтере и проверка результата…",
@@ -15797,8 +16459,8 @@ TRANSLATIONS = {
         "Select a printer profile that uses the FlashForge host.": "Выберите профиль принтера, использующий хост FlashForge.",
         "Select a printer to add.": "Выберите принтер для добавления.",
         "Select a stored file first.": "Сначала выберите сохраненный файл.",
-        "Select slots for these file filaments: {numbers}": "Выберите слоты для этих файловых нитей: {numbers}.",
-        "Select the material slots for this file.": "Выберите слоты материалов для этого файла.",
+        "Select slots for these file filaments: {numbers}": "Выберите слоты для материалов файла: {numbers}",
+        "Select the material slots for this file.": "Выберите слоты с материалами для этого файла.",
         "Select the slots used by this file.": "Выберите слоты, используемые этим файлом.",
         "Selected": "Выбрано",
         "Selected · {file}": "Выбрано · {file}",
@@ -15806,12 +16468,12 @@ TRANSLATIONS = {
         "Sending request…": "Отправка запроса…",
         "Sending…": "Отправка…",
         "Separate FlashForge tab (default)": "Отдельная вкладка FlashForge (по умолчанию)",
-        "Serial": "Серийный",
+        "Serial": "Серийный номер",
         "Serial number": "Серийный номер",
         "Serial number (required for Creator 5 / 5 Pro)": "Серийный номер (требуется для Creator 5 / 5 Pro)",
-        "Set target": "Установить температуру",
-        "Set up your first printer": "Настройка вашего первого принтера",
-        "Setting light…": "Установка света…",
+        "Set temperature": "Установить температуру",
+        "Set up your first printer": "Настройте первый принтер",
+        "Setting light…": "Переключение подсветки…",
         "Settings": "Настройки",
         "Settings are unavailable.": "Настройки недоступны.",
         "Show file previews": "Показывать эскизы файлов",
@@ -15819,41 +16481,41 @@ TRANSLATIONS = {
         "Slot updated.": "Обновлен слот.",
         "Slot {number}": "Слот {number}",
         "Slots can be edited while the printer and material station are idle.": "Слоты можно редактировать, пока принтер и станция подачи материала простаивают.",
-        "Small": "Маленький",
-        "Standard": "Стандарт",
+        "Small": "Мелкий",
+        "Standard": "Стандартная",
         "Start unconfirmed · {file}": "Начало не подтверждено · {file}",
         "Start unconfirmed. Check the printer.": "Начало не подтверждено. Проверьте принтер.",
-        "Started": "Началось",
-        "Started: {time}": "Начато: {time}",
+        "Started": "Начало",
+        "Started: {time}": "Начало: {time}",
         "Status: received": "Состояние: данные получены",
         "Stored files": "Сохраненные файлы",
         "System theme": "Системная тема",
-        "Tab placement": "Размещение вкладок",
-        "Tan": "Тан",
-        "Target": "Цель",
+        "Tab placement": "Вкладка монитора",
+        "Tan": "Песочный",
+        "Target": "Заданная температура",
         "Teal": "Бирюзовый",
-        "Temperature change over the last 5 minutes": "Изменение температуры за последние 5 минут.",
+        "Temperature change over the last 5 minutes": "Изменение температуры за последние 5 минут",
         "Temperatures": "Температура",
-        "The .3mf has invalid or unsupported filament assignments.": ".3mf имеет недопустимые или неподдерживаемые назначения нитей.",
+        "The .3mf has invalid or unsupported filament assignments.": "В файле .3mf недопустимые или неподдерживаемые назначения материалов.",
         "The .3mf transfer was interrupted.": "Передача .3mf была прервана.",
-        "The CheckCode must be printable ASCII, up to 32 characters.": "CheckCode должен быть в формате ASCII, допускающем печать, длиной до 32 символов.",
+        "The CheckCode must be printable ASCII, up to 32 characters.": "CheckCode должен содержать до 32 печатных символов ASCII.",
         "The Creator 5 Pro camera is unavailable.": "Камера Creator 5 Pro недоступна.",
         "The active printer profile changed. Try again.": "Активный профиль принтера изменен. Попробуйте еще раз.",
-        "The current job changed before {command} could be confirmed.": "Текущее задание было изменено до подтверждения {command}.",
-        "The end of this job was not observed.": "Окончание этой работы не наблюдалось.",
-        "The file is unavailable or cannot be identified on this printer.": "Файл недоступен или не может быть идентифицирован на этом принтере.",
-        "The file list changed. Refresh Printer Files.": "Список файлов изменен. Обновите файлы принтера.",
-        "The file preview changed. Choose the original sliced .3mf again.": "Изменился предварительный просмотр файла. Снова выберите исходный нарезанный .3mf.",
+        "The current job changed before {command} could be confirmed.": "Текущее задание сменилось до подтверждения команды «{command}».",
+        "The end of this job was not observed.": "Плагин не зафиксировал завершение этого задания.",
+        "The file is unavailable or cannot be identified on this printer.": "Файл недоступен или его не удалось найти на принтере.",
+        "The file list changed. Refresh Printer Files.": "Список файлов изменился. Обновите список файлов принтера.",
+        "The file preview changed. Choose the original sliced .3mf again.": "Эскиз файла изменился. Снова выберите исходный .3mf с нарезкой.",
         "The file will be saved on the printer without starting a print.": "Файл будет сохранен на принтере без запуска печати.",
         "The local file transfer was interrupted.": "Локальная передача файлов была прервана.",
         "The monitor is in the Printer tab.": "Монитор находится на вкладке «Принтер».",
         "The new language appears when you reopen the monitor.": "Сохраните настройки и снова откройте монитор.",
-        "The print job changed. Refresh its status and try again.": "Задание печати изменено. Обновите его статус и повторите попытку.",
+        "The print job changed. Refresh its status and try again.": "Задание печати сменилось. Обновите его состояние и повторите попытку.",
         "The printer API is unavailable": "API принтера недоступен",
         "The printer HTTP API returned status {code}.": "API HTTP принтера вернул статус {code}.",
-        "The printer HTTP connection failed.": "Не удалось подключиться к принтеру HTTP.",
+        "The printer HTTP connection failed.": "Не удалось подключиться к принтеру по HTTP.",
         "The printer HTTP response is too large.": "Ответ принтера HTTP слишком велик.",
-        "The printer accepted the transfer, but the file and idle state could not both be verified.": "Принтер принял передачу, но не удалось одновременно проверить файл и состояние ожидания.",
+        "The printer accepted the transfer, but the file and idle state could not both be verified.": "Принтер принял передачу. Не удалось подтвердить одновременно наличие файла и готовность принтера.",
         "The printer address changed. Reopen FlashForge Device Tab for the current printer.": "Адрес принтера изменился. Снова откройте FlashForge Device Tab для текущего принтера.",
         "The printer address in the plugin settings does not match the active profile.": "Адрес принтера в настройках плагина не соответствует активному профилю.",
         "The printer did not accept the command.": "Принтер не принял команду.",
@@ -15865,41 +16527,41 @@ TRANSLATIONS = {
         "The printer did not respond or returned incomplete data": "Принтер не ответил или вернул неполные данные.",
         "The printer has not reported the remaining time yet": "Принтер еще не сообщил об оставшемся времени.",
         "The printer is not connected yet.": "Принтер еще не подключен.",
-        "The printer must be idle and free of errors to upload a file.": "Для загрузки файла принтер должен находиться в режиме ожидания и не иметь ошибок.",
-        "The printer must be idle to upload a file.": "Для загрузки файла принтер должен находиться в режиме ожидания.",
-        "The printer must be idle.": "Принтер должен находиться в режиме ожидания.",
+        "The printer must be idle and free of errors to upload a file.": "Для загрузки файла принтер должен быть свободен, без активных ошибок.",
+        "The printer must be idle to upload a file.": "Для загрузки файла принтер должен быть свободен.",
+        "The printer must be idle.": "Принтер должен быть свободен.",
         "The printer rejected the HTTP request (code {code}).": "Принтер отклонил запрос HTTP (код {code}).",
         "The printer reported an active print. Check the printer before retrying.": "Принтер сообщил об активной печати. Прежде чем повторить попытку, проверьте принтер.",
-        "The printer requires homing before manual movement.": "Перед ручным перемещением нужно обнулить оси.",
-        "The printer response is too large": "Слишком большая реакция принтера",
+        "The printer requires homing before manual movement.": "Перед ручным перемещением верните оси в ноль.",
+        "The printer response is too large": "Ответ принтера слишком большой",
         "The printer returned an invalid file list.": "Принтер вернул неверный список файлов.",
         "The printer returned invalid HTTP data.": "Принтер вернул неверные данные HTTP.",
         "The printer returned invalid status data.": "Принтер вернул неверные данные о состоянии.",
         "The printer stopped sending data": "Принтер перестал отправлять данные.",
-        "The saved preview changed. Choose the original sliced .3mf.": "Сохраненный предварительный просмотр изменен. Выберите оригинальный нарезанный .3mf.",
-        "The saved print history is damaged. New entries are available for this session.": "Сохраненная история печати повреждена. Для этого сеанса доступны новые записи.",
-        "The slice information is too large.": "Информация о срезе слишком велика.",
+        "The saved preview changed. Choose the original sliced .3mf.": "Сохранённый эскиз изменился. Выберите исходный .3mf с нарезкой.",
+        "The saved print history is damaged. New entries are available for this session.": "Сохранённая история печати повреждена. Новые записи доступны до конца сеанса.",
+        "The slice information is too large.": "Данные нарезки слишком велики.",
         "Theme": "Тема",
-        "This file requires multiple filaments.": "Для этого файла требуется несколько нитей.",
+        "This file requires multiple filaments.": "Для этого файла требуется несколько материалов.",
         "This printer has no camera.": "В этом принтере нет камеры.",
         "This printer is not configured yet.": "Этот принтер еще не настроен.",
         "This printer is not in the plugin settings.": "Этого принтера нет в настройках плагина.",
-        "This step exceeds the axis travel limit": "Этот шаг превышает предел перемещения оси.",
+        "This step exceeds the axis travel limit": "Этот шаг выходит за пределы хода оси",
         "Timer off": "Таймер выключен",
         "Timer {minutes} min": "Таймер {minutes} мин.",
         "Total pages: {count}": "Всего страниц: {count}",
         "Totals": "Итоги",
-        "Transport: {transport}": "Транспорт: {transport}",
-        "Travel limit": "Ограничение перемещения",
-        "Trend unavailable": "Тренд недоступен",
+        "Transport: {transport}": "Протокол: {transport}",
+        "Travel limit": "Предел хода оси",
+        "Trend unavailable": "Нет данных об изменении температуры",
         "Unavailable": "Недоступно",
         "Unexpected response from the printer": "Неожиданный ответ принтера.",
         "Unknown": "Неизвестно",
         "Unknown Result": "Результат неизвестен",
-        "Unknown filename": "Файл неизвестен",
+        "Unknown filename": "Неизвестное имя файла",
         "Unknown printer command.": "Неизвестная команда принтера.",
         "Unrecognized file list format": "Нераспознанный формат списка файлов.",
-        "Unsupported nozzle target.": "Неподдерживаемая цель сопла.",
+        "Unsupported nozzle target.": "Эта температура сопла не поддерживается.",
         "Unused": "Не используется",
         "Up": "Вверх",
         "Upload": "Загрузить",
@@ -15908,15 +16570,15 @@ TRANSLATIONS = {
         "Upload progress": "Ход загрузки",
         "Uploaded · {file}": "Загружено · {file}",
         "Use A–Z, digits, spaces, dots, underscores or hyphens and a .gcode or .3mf extension.": "Используйте буквы A–Z, цифры, пробелы, точки, подчеркивания или дефисы, а также расширение .gcode или .3mf.",
-        "Use a .gcode or sliced .3mf name with A–Z, digits, spaces, dots, underscores or hyphens.": "Используйте имя .gcode или фрагментированное имя .3mf с буквами A–Z, цифрами, пробелами, точками, подчеркиваниями или дефисами.",
+        "Use a .gcode or sliced .3mf name with A–Z, digits, spaces, dots, underscores or hyphens.": "В имени файла .gcode или .3mf с нарезкой допустимы буквы A–Z, цифры, пробелы, точки, подчёркивания и дефисы.",
         "Use a JSON array for values containing a vertical bar.": "Используйте массив JSON для значений, содержащих вертикальную черту.",
         "Use a JSON array of four strings when a value contains a vertical bar.": "Используйте массив JSON из четырех строк, если значение содержит вертикальную черту.",
-        "Use linked materials": "Используйте связанные материалы.",
+        "Use linked materials": "Использовать сохранённое сопоставление материалов",
         "Violet": "Фиолетовый",
-        "Wait for the axes to stop before moving filament.": "Прежде чем перемещать нить, дождитесь остановки осей.",
+        "Wait for the axes to stop before moving filament.": "Перед подачей или втягиванием филамента дождитесь остановки осей.",
         "Wait for the printer to reconnect with the new settings.": "Подождите, пока принтер повторно подключится с новыми настройками.",
         "Wait until OrcaSlicer finishes sending the print job.": "Подождите, пока OrcaSlicer завершит отправку задания на печать.",
-        "Waiting for Home to finish…": "Ожидание завершения обнуления осей…",
+        "Waiting for Home to finish…": "Ожидание возврата осей в ноль…",
         "Waiting for job status": "Ожидание статуса задания",
         "Waiting for printer…": "Ожидание принтера…",
         "Waiting for readings": "Ожидание показаний",
@@ -15924,17 +16586,26 @@ TRANSLATIONS = {
         "Waiting for the printer to confirm calibration.": "Ожидание подтверждения калибровки принтером.",
         "Waiting for the printer…": "Ожидание принтера…",
         "White": "Белый",
-        "XY movement. Arrow keys move 1 mm, Shift moves 10 mm.": "движение XY. Клавиши со стрелками перемещаются на 1 мм, Shift — на 10 мм.",
+        "XY movement. Arrow keys move 1 mm, Shift moves 10 mm.": "Перемещение по X и Y. Стрелки перемещают на 1 мм, Shift со стрелкой — на 10 мм.",
         "Yellow": "Желтый",
         "available": "доступно",
-        "not reported": "не сообщается",
-        "reported; stream not tested": "сообщается; поток не проверен",
-        "unavailable": "недоступен",
+        "not reported": "не получен",
+        "reported; stream not tested": "получен, трансляция не проверялась",
+        "unavailable": "недоступно",
         "{axis} move exceeds the axis travel limits ({minimum} to {maximum} mm).": "Перемещение по оси {axis} выходит за допустимые пределы (от {minimum} до {maximum} мм).",
         "{command} · Accepted": "{command} · Принято",
         "{time} left": "Осталось {time}",
     },
     "sv": {
+        "While this tab is open": "Medan den här fliken är öppen",
+        "Only during an active print": "Endast under en aktiv utskrift",
+        "Waiting for part removal": "Väntar på att delen tas bort",
+        "Wait for part removal": "Vänta tills delen tas bort",
+        "Bed is clear": "Byggplattan är fri",
+        "Chart layout": "Diagramlayout",
+        "Shared scale": "Gemensam skala",
+        "Separate scales": "Separata skalor",
+        "Select at least one temperature line.": "Välj minst en temperaturkurva.",
         " · Total print time: {time}": " · Total utskriftstid: {time}",
         "0 min": "0 min",
         "1 mm": "1 mm",
@@ -15956,23 +16627,24 @@ TRANSLATIONS = {
         "Allow access to the printer, then reload the plugin.": "Tillåt åtkomst till skrivaren och ladda sedan om plugin-programmet.",
         "Another print source is being read.": "En annan utskriftskälla läses.",
         "Appearance": "Utseende",
-        "Apply": "Ansök",
+        "Apply": "Verkställ",
         "Attention": "Observera",
         "Authenticated readings: {availability}": "Autentiserade avläsningar: {availability}",
         "Auto shutdown": "Automatisk avstängning",
         "Axes": "Axlar",
         "Axes busy": "Axlar upptagna",
         "Axis movement step": "Axelrörelsesteg",
+        "B": "Platta",
         "Basic readings received. CheckCode could not be verified.": "Grundläggande avläsningar mottagna. CheckCode kunde inte verifieras.",
         "Bed": "Byggplatta",
-        "Bed Target": "Sängmål",
-        "Bed Z": "Säng Z",
+        "Bed Target": "Måltemperatur för byggplattan",
+        "Bed Z": "Byggplattans Z-axel",
         "Bed leveling": "Justering av Byggplattan",
         "Black": "Svart",
         "Blue": "Blå",
         "Brown": "Brun",
         "Browse files": "Bläddra bland filer",
-        "Build volume": "Bygg volym",
+        "Build volume": "Byggvolym",
         "Busy": "Upptagen",
         "Calibrating": "Kalibrering",
         "Calibration": "Kalibrering",
@@ -15990,8 +16662,8 @@ TRANSLATIONS = {
         "Canceled": "Avbruten",
         "Canceling": "Avbryter",
         "Card size": "Kortstorlek",
-        "Chamber": "Kammare",
-        "Chamber light": "Kammarljus",
+        "Chamber": "Utskriftskammare",
+        "Chamber light": "Belysning i utskriftskammaren",
         "Chart nozzle": "Kartmunstycke",
         "Chart of actual and target temperatures for the nozzle and bed": "Diagram över faktiska temperaturer och måltemperaturer för munstycket och bädden",
         "Check connection": "Kontrollera anslutningen",
@@ -16015,12 +16687,12 @@ TRANSLATIONS = {
         "Choose a material and color supported by this printer.": "Välj ett material och en färg som stöds av denna skrivare.",
         "Choose a nonempty print file no larger than 128 MB.": "Välj en icke-tom utskriftsfil som inte är större än 128 MB.",
         "Choose a print file no larger than 128 MB.": "Välj en utskriftsfil som inte är större än 128 MB.",
-        "Choose a sliced .3mf with one plate and filament information.": "Välj en skivad .3mf med information om en platta och filament.",
-        "Choose a sliced .3mf with one plate.": "Välj en skivad .3mf med en tallrik.",
+        "Choose a sliced .3mf with one plate and filament information.": "Välj en .3mf-fil med utskriftsbanor för en byggplatta och filamentinformation.",
+        "Choose a sliced .3mf with one plate.": "Välj en .3mf-fil med färdiga utskriftsbanor för en enda byggplatta.",
         "Choose a text .gcode file or a sliced .3mf.": "Välj en .gcode-textfil eller en skivad .3mf.",
         "Choose delay…": "Välj fördröjning...",
         "Choose material": "Välj material",
-        "Choose the original .3mf with one sliced plate and the same file name.": "Välj original .3mf med en skivad platta och samma filnamn.",
+        "Choose the original .3mf with one sliced plate and the same file name.": "Välj den ursprungliga .3mf-filen med utskriftsbanor för en enda byggplatta och samma filnamn.",
         "Choose the original sliced .3mf for this Creator file.": "Välj originalet skivade .3mf för denna Creator-fil.",
         "Choose the original sliced .3mf.": "Välj originalet skivade .3mf.",
         "Choose the sliced .3mf that matches the stored file name.": "Välj den skivade .3mf som matchar det lagrade filnamnet.",
@@ -16028,7 +16700,7 @@ TRANSLATIONS = {
         "Clear filters": "Rensa filter",
         "Close": "Stäng",
         "Closed": "Stängd",
-        "Collecting readings…": "Samlar avläsningar...",
+        "Collecting readings…": "Samlar in mätvärden…",
         "Color": "Färg",
         "Color differs": "Färgen skiljer sig åt",
         "Command accepted. The printer has not confirmed the change.": "Kommandot accepterat. Skrivaren har inte bekräftat ändringen.",
@@ -16097,7 +16769,7 @@ TRANSLATIONS = {
         "Empty camera stream": "Tom kameraström",
         "Enable LAN-only mode on the printer.": "Aktivera endast LAN-läget på skrivaren.",
         "Ended: {time}": "Avslutad: {time}",
-        "Endstops: {state}": "Ändstopp: {state}",
+        "Endstops: {state}": "Ändlägesbrytare: {state}",
         "Enlarge camera": "Förstora kameran",
         "Enter a local IPv4 address for the printer.": "Ange en lokal IPv4-adress för skrivaren.",
         "Enter a page number": "Ange ett sidnummer",
@@ -16125,7 +16797,6 @@ TRANSLATIONS = {
         "Find printers": "Hitta skrivare",
         "Finish": "Avsluta",
         "Finish ≈ {time}": "Finish ≈ {time}",
-        "Finished cleanly": "Rent färdigt",
         "Finished. Printer ready.": "Färdig. Skrivaren klar.",
         "Firmware": "Firmware",
         "FlashForge Device Tab is shutting down.": "FlashForge Device Tab stängs av.",
@@ -16136,12 +16807,12 @@ TRANSLATIONS = {
         "Heat off": "Värme av",
         "Heat the nozzle to at least 180 °C.": "Värm munstycket till minst 180 °C.",
         "Heating": "Uppvärmning",
-        "Heating nozzles: {count}": "Värmemunstycken: {count}",
+        "Heating nozzles: {count}": "Munstycken som värms upp: {count}",
         "History": "Historik",
         "Home": "Kör till nolläget",
         "Home all axes": "Kör alla axlar till nolläget",
         "Home required": "Nollställning krävs",
-        "Home sent. Waiting for the printer to confirm completion.": "Hem skickat. Väntar på att skrivaren ska bekräfta slutförandet.",
+        "Home sent. Waiting for the printer to confirm completion.": "Kommandot att köra till nolläget har skickats. Väntar på bekräftelse från skrivaren.",
         "Homing…": "Hemsökning...",
         "Host notifications": "Värdaviseringar",
         "IPv4 address": "IPv4-adress",
@@ -16164,9 +16835,9 @@ TRANSLATIONS = {
         "Invalid printer list.": "Ogiltig skrivarlista.",
         "Invalid request.": "Ogiltig begäran.",
         "Invalid slice information.": "Ogiltig segmentinformation.",
-        "Job details": "Jobbdetaljer",
-        "Job status unavailable": "Jobbstatus ej tillgänglig",
-        "Jobs": "Jobb",
+        "Job details": "Information om utskriftsjobbet",
+        "Job status unavailable": "Utskriftsjobbets status är inte tillgänglig",
+        "Jobs": "Utskriftsjobb",
         "Large": "Stor",
         "Last completed": "Senast klar",
         "Last reading: {seconds} s ago": "Senaste mätning för {seconds} s sedan",
@@ -16210,6 +16881,7 @@ TRANSLATIONS = {
         "Move sent to the printer.": "Flytta skickas till skrivaren.",
         "Move up": "Flytta uppåt",
         "Moving…": "Flyttar...",
+        "N": "Munst.",
         "Name": "Namn",
         "Needs Attention": "Behöver uppmärksamhet",
         "Network discovery unavailable. Enter the printer address manually.": "Nätverksupptäckt är inte tillgängligt. Ange skrivarens adress manuellt.",
@@ -16221,7 +16893,7 @@ TRANSLATIONS = {
         "No idle printers.": "Inga inaktiva skrivare.",
         "No loaded slot matches": "Inga laddade slotmatcher",
         "No matching files": "Inga matchande filer",
-        "No matching jobs.": "Inga matchande jobb.",
+        "No matching jobs.": "Inga matchande utskriftsjobb.",
         "No new printers found.": "Inga nya skrivare hittades.",
         "No preview": "Ingen förhandsgranskning",
         "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.": "Inga utskriftsjobb har registrerats ännu. Utskriftshistoriken registreras medan OrcaSlicer är öppen.",
@@ -16235,9 +16907,9 @@ TRANSLATIONS = {
         "Not recorded": "Ej inspelat",
         "Notifications": "Aviseringar",
         "Nozzle": "Nozzel",
-        "Nozzle Target": "Munstycksmål",
+        "Nozzle Target": "Måltemperatur för munstycket",
         "Nozzle T{tool}": "Munstycke T{tool}",
-        "Nozzle Z": "Munstycke Z",
+        "Nozzle Z": "Munstyckets Z-axel",
         "Nozzle {temperature} °C": "Munstycke {temperature} °C",
         "Nozzles": "Munstycken",
         "Nozzles: {count}": "Munstycken: {count}",
@@ -16245,7 +16917,7 @@ TRANSLATIONS = {
         "Offline for at least one minute": "Offline i minst en minut",
         "On": "På",
         "One printer per line: address | CheckCode | name | serial number": "En skrivare per rad: adress | CheckCode | namn | serienummer",
-        "Open": "Öppna",
+        "Open": "Öppen",
         "Open FlashForge": "Öppna FlashForge",
         "Open FlashForge Device Tab for a FlashForge printer profile from Speed Dial.": "Öppna FlashForge Device Tab för en FlashForge-skrivarprofil från Speed Dial.",
         "Open FlashForge Device Tab for the current printer profile from Speed Dial.": "Öppna FlashForge Device Tab för den aktuella skrivarprofilen från Speed ​​Dial.",
@@ -16258,11 +16930,11 @@ TRANSLATIONS = {
         "Orange": "Orange",
         "OrcaSlicer is sending a print job. Monitoring will resume when the transfer is complete.": "OrcaSlicer skickar ett utskriftsjobb. Övervakningen kommer att återupptas när överföringen är klar.",
         "OrcaSlicer is sending a print job. Try again when it finishes.": "OrcaSlicer skickar ett utskriftsjobb. Försök igen när det är klart.",
-        "Original sliced .3mf": "Original skivad .3mf",
+        "Original sliced .3mf": "Ursprunglig .3mf-fil med utskriftsbanor",
         "Other nozzles": "Andra munstycken",
         "Page number": "Sidnummer",
-        "Part Cooling Fan": "Del kylfläkt",
-        "Part fan": "Delfläkt",
+        "Part Cooling Fan": "Kylfläkt för utskriften",
+        "Part fan": "Detaljkylfläkt",
         "Pause": "Paus",
         "Paused": "Pausad",
         "Paused, disconnected or reporting a problem": "Pausad, frånkopplad eller rapporterar ett problem",
@@ -16296,6 +16968,7 @@ TRANSLATIONS = {
         "Print speed": "Utskriftshastighet",
         "Print started · {file}": "Utskrift påbörjad · {file}",
         "Print stored file": "Skriv ut lagrad fil",
+        "Print success rate": "Andel lyckade utskrifter",
         "Print time": "Utskriftstid",
         "Print time: {time}": "Utskriftstid: {time}",
         "Printer": "Skrivare",
@@ -16304,7 +16977,7 @@ TRANSLATIONS = {
         "Printer Readings": "Skrivaravläsningar",
         "Printer accepted the command.": "Skrivaren accepterade kommandot.",
         "Printer accepted the command. Axis limits could not be checked.": "Skrivaren accepterade kommandot. Axelgränser kunde inte kontrolleras.",
-        "Printer camera feed": "Skrivarkameramatning",
+        "Printer camera feed": "Bild från skrivarens kamera",
         "Printer confirmed the nozzle target.": "Skrivaren bekräftade munstycksmålet.",
         "Printer confirmed the shutdown timer setting.": "Skrivaren bekräftade inställningen av avstängningstimern.",
         "Printer confirmed {command} · {state}": "Skrivaren bekräftad {command} · {state}",
@@ -16322,7 +16995,7 @@ TRANSLATIONS = {
         "Printer has not confirmed the nozzle target. Check Printer Readings.": "Skrivaren har inte bekräftat munstycksmålet. Kontrollera skrivaravläsningar.",
         "Printer jobs": "Skrivarjobb",
         "Printer must be idle.": "Skrivaren måste vara inaktiv.",
-        "Printer must be idle. Wait for movement or Home to finish.": "Skrivaren måste vara inaktiv. Vänta tills rörelsen eller Home är klar.",
+        "Printer must be idle. Wait for movement or Home to finish.": "Skrivaren måste vara inaktiv. Vänta tills förflyttningen eller körningen till nolläget är klar.",
         "Printer must be idle. {reason}": "Skrivaren måste vara inaktiv. {reason}",
         "Printer rejected the selected file.": "Skrivaren avvisade den valda filen.",
         "Printer rejected {command}.": "Skrivaren avvisades {command}.",
@@ -16338,7 +17011,7 @@ TRANSLATIONS = {
         "Profile changed": "Profil ändrad",
         "Purple": "Lila",
         "Range": "Räckvidd",
-        "Reading materials…": "Läsmaterial...",
+        "Reading materials…": "Läser in materialdata…",
         "Reading printer status…": "Läser skrivarstatus...",
         "Readings delayed": "Avläsningar försenade",
         "Readings unavailable": "Avläsningar inte tillgängliga",
@@ -16349,9 +17022,9 @@ TRANSLATIONS = {
         "Refresh": "Uppdatera",
         "Refresh the Creator printer's file list first.": "Uppdatera först Creator-skrivarens fillista.",
         "Refresh the file list and check the loaded materials.": "Uppdatera fillistan och kontrollera det laddade materialet.",
-        "Release motors": "Lossa motorerna",
+        "Release motors": "Frikoppla motorerna",
         "Remove": "Ta bort",
-        "Replace Printer tab": "Byt fliken Skrivare",
+        "Replace Printer tab": "Ersätt innehållet på fliken Skrivare",
         "Request failed.": "Begäran misslyckades.",
         "Restored the printer's original web page.": "Återställde skrivarens ursprungliga webbsida.",
         "Result": "Resultat",
@@ -16389,9 +17062,10 @@ TRANSLATIONS = {
         "Serial": "Seriell",
         "Serial number": "Serienummer",
         "Serial number (required for Creator 5 / 5 Pro)": "Serienummer (krävs för Creator 5 / 5 Pro)",
-        "Set target": "Sätt mål",
+        "Set temperature": "Ställ in temperaturen",
+        "Heat": "Värm",
         "Set up your first printer": "Konfigurera din första skrivare",
-        "Setting light…": "Ställer in ljus...",
+        "Setting light…": "Växlar belysning…",
         "Settings": "Inställningar",
         "Settings are unavailable.": "Inställningar är inte tillgängliga.",
         "Show file previews": "Visa filförhandsvisningar",
@@ -16409,8 +17083,8 @@ TRANSLATIONS = {
         "Stored files": "Lagrade filer",
         "System theme": "Systemtema",
         "Tab placement": "Flikplacering",
-        "Tan": "Solbränna",
-        "Target": "Mål",
+        "Tan": "Ljusbrun",
+        "Target": "Måltemperatur",
         "Teal": "Kricka",
         "Temperature change over the last 5 minutes": "Temperaturförändring under de senaste 5 minuterna",
         "Temperatures": "Temperaturer",
@@ -16450,7 +17124,7 @@ TRANSLATIONS = {
         "The printer must be idle.": "Skrivaren måste vara inaktiv.",
         "The printer rejected the HTTP request (code {code}).": "Skrivaren avvisade HTTP-begäran (kod {code}).",
         "The printer reported an active print. Check the printer before retrying.": "Skrivaren rapporterade en aktiv utskrift. Kontrollera skrivaren innan du försöker igen.",
-        "The printer requires homing before manual movement.": "Skrivaren kräver målsökning innan manuell förflyttning.",
+        "The printer requires homing before manual movement.": "Kör axlarna till nolläget innan du förflyttar dem manuellt.",
         "The printer response is too large": "Skrivarens svar är för stort",
         "The printer returned an invalid file list.": "Skrivaren returnerade en ogiltig fillista.",
         "The printer returned invalid HTTP data.": "Skrivaren returnerade ogiltiga HTTP-data.",
@@ -16469,8 +17143,8 @@ TRANSLATIONS = {
         "Timer {minutes} min": "Timer {minutes} min",
         "Total pages: {count}": "Totalt antal sidor: {count}",
         "Totals": "Summor",
-        "Transport: {transport}": "Transport: {transport}",
-        "Travel limit": "Resegräns",
+        "Transport: {transport}": "Protokoll: {transport}",
+        "Travel limit": "Axelns rörelsegräns",
         "Trend unavailable": "Trend ej tillgänglig",
         "Unavailable": "Ej tillgänglig",
         "Unexpected response from the printer": "Oväntat svar från skrivaren",
@@ -16499,7 +17173,7 @@ TRANSLATIONS = {
         "Waiting for Home to finish…": "Väntar på att axlarna når nolläget…",
         "Waiting for job status": "Väntar på jobbstatus",
         "Waiting for printer…": "Väntar på skrivare...",
-        "Waiting for readings": "Väntar på avläsningar",
+        "Waiting for readings": "Väntar på mätvärden",
         "Waiting for temperature readings": "Väntar på temperaturavläsningar",
         "Waiting for the printer to confirm calibration.": "Väntar på att skrivaren ska bekräfta kalibreringen.",
         "Waiting for the printer…": "Väntar på skrivaren...",
@@ -16515,6 +17189,15 @@ TRANSLATIONS = {
         "{time} left": "{time} kvar",
     },
     "th": {
+        "While this tab is open": "ขณะที่เปิดแท็บนี้",
+        "Only during an active print": "เฉพาะเมื่อมีงานพิมพ์ที่กำลังดำเนินการ",
+        "Waiting for part removal": "รอนำชิ้นงานออก",
+        "Wait for part removal": "รอให้นำชิ้นงานออก",
+        "Bed is clear": "แท่นพิมพ์ว่าง",
+        "Chart layout": "เค้าโครงกราฟ",
+        "Shared scale": "สเกลร่วม",
+        "Separate scales": "สเกลแยก",
+        "Select at least one temperature line.": "เลือกเส้นอุณหภูมิอย่างน้อยหนึ่งเส้น",
         " · Total print time: {time}": " · เวลาในการพิมพ์ทั้งหมด: {time}",
         "0 min": "0 นาที",
         "1 mm": "1 มม",
@@ -16536,23 +17219,24 @@ TRANSLATIONS = {
         "Allow access to the printer, then reload the plugin.": "อนุญาตให้เข้าถึงเครื่องพิมพ์ จากนั้นโหลดปลั๊กอินใหม่",
         "Another print source is being read.": "กำลังอ่านแหล่งการพิมพ์อื่น",
         "Appearance": "ลักษณะที่ปรากฏ",
-        "Apply": "สมัคร",
+        "Apply": "นำไปใช้",
         "Attention": "ความสนใจ",
         "Authenticated readings: {availability}": "การอ่านที่ได้รับการรับรองความถูกต้อง: {availability}",
         "Auto shutdown": "ปิดเครื่องอัตโนมัติ",
         "Axes": "แกน",
         "Axes busy": "แกนไม่ว่าง",
         "Axis movement step": "ขั้นตอนการเคลื่อนแกน",
+        "B": "ฐานพิมพ์",
         "Basic readings received. CheckCode could not be verified.": "การอ่านค่าพื้นฐานที่ได้รับ ไม่สามารถตรวจสอบ CheckCode ได้",
         "Bed": "ฐานพิมพ์",
         "Bed Target": "อุณหภูมิเป้าหมายของฐานพิมพ์",
-        "Bed Z": "เตียง Z",
+        "Bed Z": "แกน Z ของฐานพิมพ์",
         "Bed leveling": "ปรับระดับฐานพิมพ์",
         "Black": "สีดำ",
         "Blue": "สีฟ้า",
         "Brown": "สีน้ำตาล",
         "Browse files": "เรียกดูไฟล์",
-        "Build volume": "ปริมาณการสร้าง",
+        "Build volume": "ปริมาตรการพิมพ์",
         "Busy": "ไม่ว่าง",
         "Calibrating": "การปรับเทียบ",
         "Calibration": "การสอบเทียบ",
@@ -16568,10 +17252,10 @@ TRANSLATIONS = {
         "Cancel": "ยกเลิก",
         "Cancel print?": "ยกเลิกการพิมพ์หรือไม่?",
         "Canceled": "ยกเลิกแล้ว",
-        "Canceling": "การยกเลิก",
+        "Canceling": "กำลังยกเลิก",
         "Card size": "ขนาดการ์ด",
-        "Chamber": "ห้อง",
-        "Chamber light": "ไฟห้อง",
+        "Chamber": "ห้องพิมพ์",
+        "Chamber light": "ไฟในห้องพิมพ์",
         "Chart nozzle": "แผนภูมิหัวฉีด",
         "Chart of actual and target temperatures for the nozzle and bed": "แผนภูมิอุณหภูมิจริงและอุณหภูมิเป้าหมายสำหรับหัวฉีดและฐาน",
         "Check connection": "ตรวจสอบการเชื่อมต่อ",
@@ -16595,20 +17279,20 @@ TRANSLATIONS = {
         "Choose a material and color supported by this printer.": "เลือกวัสดุและสีที่เครื่องพิมพ์นี้รองรับ",
         "Choose a nonempty print file no larger than 128 MB.": "เลือกไฟล์พิมพ์ที่ไม่ว่างเปล่าซึ่งมีขนาดไม่เกิน 128 MB",
         "Choose a print file no larger than 128 MB.": "เลือกไฟล์พิมพ์ที่มีขนาดไม่เกิน 128 MB",
-        "Choose a sliced .3mf with one plate and filament information.": "เลือก .3mf ที่หั่นเป็นชิ้นพร้อมข้อมูลแผ่นเดียวและเส้นใย",
-        "Choose a sliced .3mf with one plate.": "เลือก .3mf ที่หั่นแล้วด้วยจานเดียว",
+        "Choose a sliced .3mf with one plate and filament information.": "เลือกไฟล์ .3mf ที่มีเพลตที่สไลซ์แล้วเพียงเพลตเดียวพร้อมข้อมูลเส้นพลาสติก",
+        "Choose a sliced .3mf with one plate.": "เลือกไฟล์ .3mf ที่มีเพลตพิมพ์ที่สไลซ์แล้วเพียงเพลตเดียว",
         "Choose a text .gcode file or a sliced .3mf.": "เลือกไฟล์ข้อความ .gcode หรือ .3mf ที่หั่นเป็นชิ้น",
         "Choose delay…": "เลือกดีเลย์...",
         "Choose material": "เลือกวัสดุ",
-        "Choose the original .3mf with one sliced plate and the same file name.": "เลือก .3mf ดั้งเดิมที่มีแผ่นหั่นหนึ่งแผ่นและชื่อไฟล์เดียวกัน",
+        "Choose the original .3mf with one sliced plate and the same file name.": "เลือกไฟล์ .3mf ต้นฉบับที่มีเพลตที่สไลซ์แล้วเพียงเพลตเดียวและชื่อไฟล์ตรงกัน",
         "Choose the original sliced .3mf for this Creator file.": "เลือก .3mf ต้นฉบับที่หั่นแล้วสำหรับไฟล์ตัวสร้างนี้",
         "Choose the original sliced .3mf.": "เลือก .3mf ที่หั่นเป็นต้นฉบับ",
         "Choose the sliced .3mf that matches the stored file name.": "เลือก .3mf ที่หั่นแล้วซึ่งตรงกับชื่อไฟล์ที่จัดเก็บไว้",
         "Clear error": "ข้อผิดพลาดที่ชัดเจน",
         "Clear filters": "ล้างตัวกรอง",
         "Close": "ปิด",
-        "Closed": "ปิดแล้ว",
-        "Collecting readings…": "กำลังรวบรวมการอ่าน...",
+        "Closed": "ปิด",
+        "Collecting readings…": "กำลังรวบรวมค่าที่วัดได้…",
         "Color": "สี",
         "Color differs": "สีแตกต่าง",
         "Command accepted. The printer has not confirmed the change.": "ยอมรับคำสั่งแล้ว เครื่องพิมพ์ไม่ได้ยืนยันการเปลี่ยนแปลง",
@@ -16677,7 +17361,7 @@ TRANSLATIONS = {
         "Empty camera stream": "สตรีมกล้องว่างเปล่า",
         "Enable LAN-only mode on the printer.": "เปิดใช้งานโหมดเฉพาะ LAN บนเครื่องพิมพ์",
         "Ended: {time}": "สิ้นสุดแล้ว: {time}",
-        "Endstops: {state}": "จุดสิ้นสุด: {state}",
+        "Endstops: {state}": "ลิมิตสวิตช์: {state}",
         "Enlarge camera": "ขยายกล้อง",
         "Enter a local IPv4 address for the printer.": "ป้อนที่อยู่ IPv4 ในเครื่องสำหรับเครื่องพิมพ์",
         "Enter a page number": "ป้อนหมายเลขหน้า",
@@ -16705,7 +17389,6 @@ TRANSLATIONS = {
         "Find printers": "ค้นหาเครื่องพิมพ์",
         "Finish": "เสร็จสิ้น",
         "Finish ≈ {time}": "เสร็จสิ้น data {time}",
-        "Finished cleanly": "เสร็จสิ้นอย่างเรียบร้อย",
         "Finished. Printer ready.": "เสร็จสิ้นแล้ว เครื่องพิมพ์พร้อม",
         "Firmware": "เฟิร์มแวร์",
         "FlashForge Device Tab is shutting down.": "FlashForge Device Tab กำลังปิดการทำงาน",
@@ -16715,13 +17398,13 @@ TRANSLATIONS = {
         "Heat nozzle to 180 °C": "หัวฉีดความร้อนถึง 180 °C",
         "Heat off": "ปิดความร้อน",
         "Heat the nozzle to at least 180 °C.": "ตั้งอุณหภูมิหัวฉีดให้ร้อนอย่างน้อย 180 °C",
-        "Heating": "เครื่องทำความร้อน",
-        "Heating nozzles: {count}": "หัวฉีดทำความร้อน: {count}",
+        "Heating": "กำลังทำความร้อน",
+        "Heating nozzles: {count}": "หัวฉีดที่กำลังทำความร้อน: {count}",
         "History": "ประวัติ",
         "Home": "กลับจุดเริ่มต้น",
         "Home all axes": "กลับสู่จุดเริ่มต้นทุกแกน",
         "Home required": "ต้องกลับจุดเริ่มต้นก่อน",
-        "Home sent. Waiting for the printer to confirm completion.": "ส่งถึงบ้านแล้ว กำลังรอให้เครื่องพิมพ์ยืนยันการดำเนินการเสร็จสิ้น",
+        "Home sent. Waiting for the printer to confirm completion.": "ส่งคำสั่งให้แกนกลับจุดเริ่มต้นแล้ว กำลังรอเครื่องพิมพ์ยืนยันว่าเสร็จสิ้น",
         "Homing…": "กลับบ้าน…",
         "Host notifications": "การแจ้งเตือนโฮสต์",
         "IPv4 address": "ที่อยู่ IPv4",
@@ -16744,9 +17427,9 @@ TRANSLATIONS = {
         "Invalid printer list.": "รายการเครื่องพิมพ์ไม่ถูกต้อง",
         "Invalid request.": "คำขอไม่ถูกต้อง",
         "Invalid slice information.": "ข้อมูลชิ้นไม่ถูกต้อง",
-        "Job details": "รายละเอียดงาน",
-        "Job status unavailable": "สถานะงานไม่พร้อมใช้งาน",
-        "Jobs": "งาน",
+        "Job details": "รายละเอียดงานพิมพ์",
+        "Job status unavailable": "ไม่สามารถดูสถานะงานพิมพ์ได้",
+        "Jobs": "งานพิมพ์",
         "Large": "ใหญ่",
         "Last completed": "เสร็จสิ้นครั้งสุดท้าย",
         "Last reading: {seconds} s ago": "อ่านค่าล่าสุดเมื่อ {seconds} วินาทีที่แล้ว",
@@ -16790,6 +17473,7 @@ TRANSLATIONS = {
         "Move sent to the printer.": "ย้ายส่งไปยังเครื่องพิมพ์",
         "Move up": "เลื่อนขึ้น",
         "Moving…": "การเคลื่อนไหว...",
+        "N": "หัวฉีด",
         "Name": "ชื่อ",
         "Needs Attention": "ต้องการความสนใจ",
         "Network discovery unavailable. Enter the printer address manually.": "การค้นหาเครือข่ายไม่พร้อมใช้งาน ป้อนที่อยู่เครื่องพิมพ์ด้วยตนเอง",
@@ -16801,7 +17485,7 @@ TRANSLATIONS = {
         "No idle printers.": "ไม่มีเครื่องพิมพ์ที่ไม่ได้ใช้งาน",
         "No loaded slot matches": "ไม่มีช่องที่โหลดตรงกัน",
         "No matching files": "ไม่พบไฟล์ที่ตรงกัน",
-        "No matching jobs.": "ไม่มีงานที่ตรงกัน",
+        "No matching jobs.": "ไม่พบงานพิมพ์ที่ตรงกัน",
         "No new printers found.": "ไม่พบเครื่องพิมพ์ใหม่",
         "No preview": "ไม่มีการแสดงตัวอย่าง",
         "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.": "ยังไม่มีการบันทึกงานพิมพ์ ประวัติการพิมพ์จะถูกบันทึกในขณะที่ OrcaSlicer เปิดอยู่",
@@ -16817,7 +17501,7 @@ TRANSLATIONS = {
         "Nozzle": "หัวฉีด",
         "Nozzle Target": "อุณหภูมิเป้าหมายของหัวฉีด",
         "Nozzle T{tool}": "หัวฉีด T{tool}",
-        "Nozzle Z": "หัวฉีด Z",
+        "Nozzle Z": "แกน Z ของหัวฉีด",
         "Nozzle {temperature} °C": "หัวฉีด {temperature} °C",
         "Nozzles": "หัวฉีด",
         "Nozzles: {count}": "หัวฉีด: {count}",
@@ -16838,11 +17522,11 @@ TRANSLATIONS = {
         "Orange": "ส้ม",
         "OrcaSlicer is sending a print job. Monitoring will resume when the transfer is complete.": "OrcaSlicer กำลังส่งงานพิมพ์ การตรวจสอบจะกลับมาทำงานอีกครั้งเมื่อการถ่ายโอนเสร็จสมบูรณ์",
         "OrcaSlicer is sending a print job. Try again when it finishes.": "OrcaSlicer กำลังส่งงานพิมพ์ ลองอีกครั้งเมื่อเสร็จสิ้น",
-        "Original sliced .3mf": ".3mf ดั้งเดิมหั่นเป็นชิ้น",
+        "Original sliced .3mf": "ไฟล์ .3mf ต้นฉบับที่สไลซ์แล้ว",
         "Other nozzles": "หัวฉีดอื่นๆ",
         "Page number": "หมายเลขหน้า",
         "Part Cooling Fan": "พัดลมระบายความร้อนชิ้นงาน",
-        "Part fan": "ส่วนพัดลม",
+        "Part fan": "พัดลมชิ้นงาน",
         "Pause": "หยุดชั่วคราว",
         "Paused": "หยุดชั่วคราว",
         "Paused, disconnected or reporting a problem": "หยุดชั่วคราว ยกเลิกการเชื่อมต่อ หรือรายงานปัญหา",
@@ -16876,6 +17560,7 @@ TRANSLATIONS = {
         "Print speed": "ความเร็วในการพิมพ์",
         "Print started · {file}": "เริ่มการพิมพ์ · {file}",
         "Print stored file": "พิมพ์ไฟล์ที่เก็บไว้",
+        "Print success rate": "อัตราการพิมพ์สำเร็จ",
         "Print time": "เวลาในการพิมพ์",
         "Print time: {time}": "เวลาในการพิมพ์: {time}",
         "Printer": "เครื่องพิมพ์",
@@ -16884,7 +17569,7 @@ TRANSLATIONS = {
         "Printer Readings": "การอ่านเครื่องพิมพ์",
         "Printer accepted the command.": "เครื่องพิมพ์ยอมรับคำสั่ง",
         "Printer accepted the command. Axis limits could not be checked.": "เครื่องพิมพ์ยอมรับคำสั่ง ไม่สามารถตรวจสอบขีดจำกัดของแกนได้",
-        "Printer camera feed": "ฟีดกล้องเครื่องพิมพ์",
+        "Printer camera feed": "ภาพจากกล้องของเครื่องพิมพ์",
         "Printer confirmed the nozzle target.": "เครื่องพิมพ์ยืนยันเป้าหมายหัวฉีด",
         "Printer confirmed the shutdown timer setting.": "เครื่องพิมพ์ยืนยันการตั้งค่าตัวจับเวลาปิดเครื่อง",
         "Printer confirmed {command} · {state}": "เครื่องพิมพ์ยืนยันแล้ว {command} · {state}",
@@ -16902,7 +17587,7 @@ TRANSLATIONS = {
         "Printer has not confirmed the nozzle target. Check Printer Readings.": "เครื่องพิมพ์ยังไม่ได้ยืนยันเป้าหมายหัวฉีด ตรวจสอบการอ่านเครื่องพิมพ์",
         "Printer jobs": "งานเครื่องพิมพ์",
         "Printer must be idle.": "เครื่องพิมพ์จะต้องไม่ได้ใช้งาน",
-        "Printer must be idle. Wait for movement or Home to finish.": "เครื่องพิมพ์จะต้องไม่ได้ใช้งาน รอให้การเคลื่อนไหวหรือบ้านเสร็จสิ้น",
+        "Printer must be idle. Wait for movement or Home to finish.": "เครื่องพิมพ์ต้องอยู่ในสถานะว่าง รอให้การเคลื่อนที่หรือการกลับจุดเริ่มต้นเสร็จสิ้น",
         "Printer must be idle. {reason}": "เครื่องพิมพ์จะต้องไม่ได้ใช้งาน {reason}",
         "Printer rejected the selected file.": "เครื่องพิมพ์ปฏิเสธไฟล์ที่เลือก",
         "Printer rejected {command}.": "เครื่องพิมพ์ถูกปฏิเสธ {command}",
@@ -16918,7 +17603,7 @@ TRANSLATIONS = {
         "Profile changed": "โปรไฟล์มีการเปลี่ยนแปลง",
         "Purple": "สีม่วง",
         "Range": "พิสัย",
-        "Reading materials…": "สื่อการอ่าน...",
+        "Reading materials…": "กำลังอ่านข้อมูลวัสดุ…",
         "Reading printer status…": "กำลังอ่านสถานะเครื่องพิมพ์...",
         "Readings delayed": "การอ่านล่าช้า",
         "Readings unavailable": "ไม่สามารถอ่านค่าได้",
@@ -16929,9 +17614,9 @@ TRANSLATIONS = {
         "Refresh": "รีเฟรช",
         "Refresh the Creator printer's file list first.": "รีเฟรชรายการไฟล์ของเครื่องพิมพ์ Creator ก่อน",
         "Refresh the file list and check the loaded materials.": "รีเฟรชรายการไฟล์และตรวจสอบวัสดุที่โหลด",
-        "Release motors": "มอเตอร์ปล่อย",
+        "Release motors": "ปลดล็อกมอเตอร์",
         "Remove": "ลบออก",
-        "Replace Printer tab": "แท็บเปลี่ยนเครื่องพิมพ์",
+        "Replace Printer tab": "แทนที่เนื้อหาของแท็บเครื่องพิมพ์",
         "Request failed.": "คำขอล้มเหลว",
         "Restored the printer's original web page.": "คืนค่าหน้าเว็บดั้งเดิมของเครื่องพิมพ์",
         "Result": "ผลลัพธ์",
@@ -16969,9 +17654,10 @@ TRANSLATIONS = {
         "Serial": "อนุกรม",
         "Serial number": "หมายเลขซีเรียล",
         "Serial number (required for Creator 5 / 5 Pro)": "หมายเลขซีเรียล (จำเป็นสำหรับ Creator 5 / 5 Pro)",
-        "Set target": "ตั้งเป้าหมาย",
+        "Set temperature": "ตั้งอุณหภูมิเป้าหมาย",
+        "Heat": "ให้ความร้อน",
         "Set up your first printer": "ตั้งค่าเครื่องพิมพ์เครื่องแรกของคุณ",
-        "Setting light…": "การตั้งค่าไฟ...",
+        "Setting light…": "กำลังสลับไฟในห้องพิมพ์…",
         "Settings": "การตั้งค่า",
         "Settings are unavailable.": "การตั้งค่าไม่พร้อมใช้งาน",
         "Show file previews": "แสดงตัวอย่างไฟล์",
@@ -16989,8 +17675,8 @@ TRANSLATIONS = {
         "Stored files": "ไฟล์ที่จัดเก็บ",
         "System theme": "ธีมของระบบ",
         "Tab placement": "การจัดวางแท็บ",
-        "Tan": "สีน้ำตาล",
-        "Target": "เป้าหมาย",
+        "Tan": "สีน้ำตาลอ่อน",
+        "Target": "อุณหภูมิเป้าหมาย",
         "Teal": "นกเป็ดน้ำ",
         "Temperature change over the last 5 minutes": "อุณหภูมิเปลี่ยนแปลงในช่วง 5 นาทีที่ผ่านมา",
         "Temperatures": "อุณหภูมิ",
@@ -17030,7 +17716,7 @@ TRANSLATIONS = {
         "The printer must be idle.": "เครื่องพิมพ์จะต้องไม่ได้ใช้งาน",
         "The printer rejected the HTTP request (code {code}).": "เครื่องพิมพ์ปฏิเสธคำขอ HTTP (รหัส {code})",
         "The printer reported an active print. Check the printer before retrying.": "เครื่องพิมพ์รายงานว่ามีงานพิมพ์อยู่ ตรวจสอบเครื่องพิมพ์ก่อนลองอีกครั้ง",
-        "The printer requires homing before manual movement.": "เครื่องพิมพ์จำเป็นต้องกลับบ้านก่อนที่จะเคลื่อนย้ายด้วยตนเอง",
+        "The printer requires homing before manual movement.": "ให้แกนกลับจุดเริ่มต้นก่อนขยับด้วยตนเอง",
         "The printer response is too large": "การตอบสนองของเครื่องพิมพ์ใหญ่เกินไป",
         "The printer returned an invalid file list.": "เครื่องพิมพ์ส่งคืนรายการไฟล์ที่ไม่ถูกต้อง",
         "The printer returned invalid HTTP data.": "เครื่องพิมพ์ส่งคืนข้อมูล HTTP ที่ไม่ถูกต้อง",
@@ -17049,8 +17735,8 @@ TRANSLATIONS = {
         "Timer {minutes} min": "ตัวจับเวลา {minutes} นาที",
         "Total pages: {count}": "จำนวนหน้าทั้งหมด: {count}",
         "Totals": "ผลรวม",
-        "Transport: {transport}": "การขนส่ง: {transport}",
-        "Travel limit": "ขีดจำกัดการเดินทาง",
+        "Transport: {transport}": "โปรโตคอล: {transport}",
+        "Travel limit": "ขีดจำกัดการเคลื่อนที่ของแกน",
         "Trend unavailable": "แนวโน้มไม่พร้อมใช้งาน",
         "Unavailable": "ไม่สามารถใช้งานได้",
         "Unexpected response from the printer": "การตอบสนองที่ไม่คาดคิดจากเครื่องพิมพ์",
@@ -17079,7 +17765,7 @@ TRANSLATIONS = {
         "Waiting for Home to finish…": "กำลังรอให้แกนกลับถึงจุดเริ่มต้น…",
         "Waiting for job status": "กำลังรอสถานะงาน",
         "Waiting for printer…": "กำลังรอเครื่องพิมพ์...",
-        "Waiting for readings": "รอการอ่าน",
+        "Waiting for readings": "กำลังรอค่าที่วัดได้",
         "Waiting for temperature readings": "กำลังรอการอ่านอุณหภูมิ",
         "Waiting for the printer to confirm calibration.": "รอให้เครื่องพิมพ์ยืนยันการปรับเทียบ",
         "Waiting for the printer…": "กำลังรอเครื่องพิมพ์...",
@@ -17095,6 +17781,15 @@ TRANSLATIONS = {
         "{time} left": "เหลือ {time}",
     },
     "tr": {
+        "While this tab is open": "Bu sekme açıkken",
+        "Only during an active print": "Yalnızca etkin bir baskı işi sırasında",
+        "Waiting for part removal": "Parçanın çıkarılması bekleniyor",
+        "Wait for part removal": "Parçanın çıkarılmasını bekle",
+        "Bed is clear": "Tabla boş",
+        "Chart layout": "Grafik düzeni",
+        "Shared scale": "Ortak ölçek",
+        "Separate scales": "Ayrı ölçekler",
+        "Select at least one temperature line.": "En az bir sıcaklık çizgisi seçin.",
         " · Total print time: {time}": " · Toplam yazdırma süresi: {time}",
         "0 min": "0 dk",
         "1 mm": "1 mm",
@@ -17123,16 +17818,17 @@ TRANSLATIONS = {
         "Axes": "Eksenler",
         "Axes busy": "Eksenler meşgul",
         "Axis movement step": "Eksen hareket adımı",
+        "B": "Yatak",
         "Basic readings received. CheckCode could not be verified.": "Alınan temel okumalar. CheckCode doğrulanamadı.",
         "Bed": "Yatak",
-        "Bed Target": "Yatak Hedefi",
-        "Bed Z": "Yatak Z",
+        "Bed Target": "Yatak hedef sıcaklığı",
+        "Bed Z": "Baskı yatağının Z ekseni",
         "Bed leveling": "Yatak Seviyeleme",
         "Black": "Siyah",
         "Blue": "Mavi",
         "Brown": "Kahverengi",
         "Browse files": "Dosyalara göz atın",
-        "Build volume": "Oluşturma hacmi",
+        "Build volume": "Baskı hacmi",
         "Busy": "Meşgul",
         "Calibrating": "Kalibrasyon",
         "Calibration": "Kalibrasyon",
@@ -17150,8 +17846,8 @@ TRANSLATIONS = {
         "Canceled": "İptal edildi",
         "Canceling": "İptal ediliyor",
         "Card size": "Kart boyutu",
-        "Chamber": "Oda",
-        "Chamber light": "Oda ışığı",
+        "Chamber": "Baskı haznesi",
+        "Chamber light": "Baskı haznesi ışığı",
         "Chart nozzle": "Grafik başlığı",
         "Chart of actual and target temperatures for the nozzle and bed": "Nozul ve yatak için gerçek ve hedef sıcaklık tablosu",
         "Check connection": "Bağlantıyı kontrol edin",
@@ -17175,12 +17871,12 @@ TRANSLATIONS = {
         "Choose a material and color supported by this printer.": "Bu yazıcının desteklediği bir malzeme ve renk seçin.",
         "Choose a nonempty print file no larger than 128 MB.": "Boş olmayan, 128 MB'tan büyük olmayan bir yazdırma dosyası seçin.",
         "Choose a print file no larger than 128 MB.": "128 MB'tan büyük olmayan bir yazdırma dosyası seçin.",
-        "Choose a sliced .3mf with one plate and filament information.": "Tek plaka ve filaman bilgisine sahip dilimlenmiş bir .3mf seçin.",
-        "Choose a sliced .3mf with one plate.": "Tek tabaklı dilimlenmiş .3mf'yi seçin.",
+        "Choose a sliced .3mf with one plate and filament information.": "Bir dilimlenmiş baskı plakası ve filament bilgileri içeren .3mf dosyası seçin.",
+        "Choose a sliced .3mf with one plate.": "Yalnızca bir dilimlenmiş baskı plakası içeren .3mf dosyası seçin.",
         "Choose a text .gcode file or a sliced .3mf.": "Bir metin .gcode dosyası veya dilimlenmiş bir .3mf seçin.",
         "Choose delay…": "Gecikmeyi seçin…",
         "Choose material": "Malzemeyi seçin",
-        "Choose the original .3mf with one sliced plate and the same file name.": "Tek dilimli plakaya ve aynı dosya adına sahip orijinal .3mf'yi seçin.",
+        "Choose the original .3mf with one sliced plate and the same file name.": "Dosya adı aynı olan ve yalnızca bir dilimlenmiş baskı plakası içeren özgün .3mf dosyasını seçin.",
         "Choose the original sliced .3mf for this Creator file.": "Bu Oluşturucu dosyası için orijinal dilimlenmiş .3mf'yi seçin.",
         "Choose the original sliced .3mf.": "Orijinal dilimlenmiş .3mf'yi seçin.",
         "Choose the sliced .3mf that matches the stored file name.": "Saklanan dosya adıyla eşleşen dilimlenmiş .3mf'yi seçin.",
@@ -17188,7 +17884,7 @@ TRANSLATIONS = {
         "Clear filters": "Filtreleri temizle",
         "Close": "Kapat",
         "Closed": "Kapalı",
-        "Collecting readings…": "Okumalar toplanıyor…",
+        "Collecting readings…": "Ölçümler toplanıyor…",
         "Color": "Renk",
         "Color differs": "Renk farklıdır",
         "Command accepted. The printer has not confirmed the change.": "Komut kabul edildi. Yazıcı değişikliği onaylamadı.",
@@ -17257,7 +17953,7 @@ TRANSLATIONS = {
         "Empty camera stream": "Boş kamera akışı",
         "Enable LAN-only mode on the printer.": "Yazıcıda yalnızca LAN modunu etkinleştirin.",
         "Ended: {time}": "Bitiş: {time}",
-        "Endstops: {state}": "Uç duraklar: {state}",
+        "Endstops: {state}": "Limit anahtarları: {state}",
         "Enlarge camera": "Kamerayı büyüt",
         "Enter a local IPv4 address for the printer.": "Yazıcı için yerel bir IPv4 adresi girin.",
         "Enter a page number": "Bir sayfa numarası girin",
@@ -17285,7 +17981,6 @@ TRANSLATIONS = {
         "Find printers": "Yazıcıları bulun",
         "Finish": "Bitir",
         "Finish ≈ {time}": "Bitiş ≈ {time}",
-        "Finished cleanly": "Temiz bir şekilde tamamlandı",
         "Finished. Printer ready.": "Bitti. Yazıcı hazır.",
         "Firmware": "Firmware",
         "FlashForge Device Tab is shutting down.": "FlashForge Device Tab kapatılıyor.",
@@ -17295,13 +17990,13 @@ TRANSLATIONS = {
         "Heat nozzle to 180 °C": "Memeyi 180 °C'ye ısıtın",
         "Heat off": "Isıtma kapalı",
         "Heat the nozzle to at least 180 °C.": "Nozulu en az 180 °C'ye ısıtın.",
-        "Heating": "Isıtma",
-        "Heating nozzles: {count}": "Isıtma nozulları: {count}",
+        "Heating": "Isınıyor",
+        "Heating nozzles: {count}": "Isınan nozullar: {count}",
         "History": "Geçmiş",
         "Home": "Başlangıç konumuna git",
         "Home all axes": "Tüm eksenleri başlangıç konumuna getir",
         "Home required": "Başlangıç konumuna dönülmeli",
-        "Home sent. Waiting for the printer to confirm completion.": "Eve gönderildi. Yazıcının tamamlanmayı onaylaması bekleniyor.",
+        "Home sent. Waiting for the printer to confirm completion.": "Başlangıç konumuna dönme komutu gönderildi. Yazıcının tamamlandığını onaylaması bekleniyor.",
         "Homing…": "Hedefe dönüş…",
         "Host notifications": "Toplantı sahibi bildirimleri",
         "IPv4 address": "IPv4 adresi",
@@ -17324,9 +18019,9 @@ TRANSLATIONS = {
         "Invalid printer list.": "Geçersiz yazıcı listesi.",
         "Invalid request.": "Geçersiz istek.",
         "Invalid slice information.": "Geçersiz dilim bilgisi.",
-        "Job details": "İş ayrıntıları",
-        "Job status unavailable": "İş durumu mevcut değil",
-        "Jobs": "İş İlanları",
+        "Job details": "Yazdırma işi ayrıntıları",
+        "Job status unavailable": "Yazdırma işi durumu alınamadı",
+        "Jobs": "Yazdırma işleri",
         "Large": "Büyük",
         "Last completed": "Son tamamlanan",
         "Last reading: {seconds} s ago": "Son ölçüm: {seconds} sn önce",
@@ -17370,6 +18065,7 @@ TRANSLATIONS = {
         "Move sent to the printer.": "Yazıcıya gönderilen taşıma.",
         "Move up": "Yukarı git",
         "Moving…": "Hareket ediyor…",
+        "N": "Nozul",
         "Name": "İsim",
         "Needs Attention": "Dikkat Edilmesi Gerekiyor",
         "Network discovery unavailable. Enter the printer address manually.": "Ağ keşfi kullanılamıyor. Yazıcı adresini manuel olarak girin.",
@@ -17381,7 +18077,7 @@ TRANSLATIONS = {
         "No idle printers.": "Boşta kalan yazıcı yok.",
         "No loaded slot matches": "Yüklü slot eşleşmesi yok",
         "No matching files": "Eşleşen dosya yok",
-        "No matching jobs.": "Eşleşen iş yok.",
+        "No matching jobs.": "Eşleşen yazdırma işi yok.",
         "No new printers found.": "Yeni yazıcı bulunamadı.",
         "No preview": "Önizleme yok",
         "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.": "Henüz kayıtlı yazdırma işi yok. OrcaSlicer açıkken yazdırma geçmişi kaydedilir.",
@@ -17395,9 +18091,9 @@ TRANSLATIONS = {
         "Not recorded": "Kaydedilmedi",
         "Notifications": "Bildirimler",
         "Nozzle": "Nozul",
-        "Nozzle Target": "Nozul Hedefi",
+        "Nozzle Target": "Nozul hedef sıcaklığı",
         "Nozzle T{tool}": "Nozul T{tool}",
-        "Nozzle Z": "Nozul Z",
+        "Nozzle Z": "Nozulun Z ekseni",
         "Nozzle {temperature} °C": "Nozul {temperature} °C",
         "Nozzles": "Nozullar",
         "Nozzles: {count}": "Nozullar: {count}",
@@ -17418,11 +18114,11 @@ TRANSLATIONS = {
         "Orange": "Turuncu",
         "OrcaSlicer is sending a print job. Monitoring will resume when the transfer is complete.": "OrcaSlicer bir yazdırma işi gönderiyor. Aktarım tamamlandığında izleme devam edecektir.",
         "OrcaSlicer is sending a print job. Try again when it finishes.": "OrcaSlicer bir yazdırma işi gönderiyor. Bittiğinde tekrar deneyin.",
-        "Original sliced .3mf": "Orijinal dilimlenmiş .3mf",
+        "Original sliced .3mf": "Dilimlenmiş özgün .3mf dosyası",
         "Other nozzles": "Diğer nozullar",
         "Page number": "Sayfa numarası",
-        "Part Cooling Fan": "Parça Soğutma Fanı",
-        "Part fan": "Parça fanı",
+        "Part Cooling Fan": "Parça soğutma fanı",
+        "Part fan": "Parça soğutma fanı",
         "Pause": "Duraklat",
         "Paused": "Duraklatıldı",
         "Paused, disconnected or reporting a problem": "Duraklatıldı, bağlantı kesildi veya sorun bildirildi",
@@ -17456,6 +18152,7 @@ TRANSLATIONS = {
         "Print speed": "Baskı hızı",
         "Print started · {file}": "Yazdırma başladı · {file}",
         "Print stored file": "Saklanan dosyayı yazdır",
+        "Print success rate": "Başarı oranı",
         "Print time": "Yazdırma süresi",
         "Print time: {time}": "Yazdırma süresi: {time}",
         "Printer": "Yazıcı",
@@ -17464,7 +18161,7 @@ TRANSLATIONS = {
         "Printer Readings": "Yazıcı Okumaları",
         "Printer accepted the command.": "Yazıcı komutu kabul etti.",
         "Printer accepted the command. Axis limits could not be checked.": "Yazıcı komutu kabul etti. Eksen sınırları kontrol edilemedi.",
-        "Printer camera feed": "Yazıcı kamera beslemesi",
+        "Printer camera feed": "Yazıcı kamerası görüntüsü",
         "Printer confirmed the nozzle target.": "Yazıcı püskürtme ucu hedefini doğruladı.",
         "Printer confirmed the shutdown timer setting.": "Yazıcı kapatma zamanlayıcısı ayarını doğruladı.",
         "Printer confirmed {command} · {state}": "Yazıcı onayladı {command} · {state}",
@@ -17482,7 +18179,7 @@ TRANSLATIONS = {
         "Printer has not confirmed the nozzle target. Check Printer Readings.": "Yazıcı püskürtme ucu hedefini onaylamadı. Yazıcı Okumalarını Kontrol Edin.",
         "Printer jobs": "Yazıcı işleri",
         "Printer must be idle.": "Yazıcı boşta olmalıdır.",
-        "Printer must be idle. Wait for movement or Home to finish.": "Yazıcı boşta olmalıdır. Hareketin veya Ana Sayfanın bitmesini bekleyin.",
+        "Printer must be idle. Wait for movement or Home to finish.": "Yazıcı boşta olmalıdır. Hareketin veya başlangıç konumuna dönüşün tamamlanmasını bekleyin.",
         "Printer must be idle. {reason}": "Yazıcı boşta olmalıdır. {reason}",
         "Printer rejected the selected file.": "Yazıcı seçilen dosyayı reddetti.",
         "Printer rejected {command}.": "Yazıcı {command}'yi reddetti.",
@@ -17498,7 +18195,7 @@ TRANSLATIONS = {
         "Profile changed": "Profil değiştirildi",
         "Purple": "Mor",
         "Range": "Aralık",
-        "Reading materials…": "Okuma materyalleri…",
+        "Reading materials…": "Malzeme bilgileri okunuyor…",
         "Reading printer status…": "Yazıcı durumu okunuyor…",
         "Readings delayed": "Okumalar gecikti",
         "Readings unavailable": "Okumalar mevcut değil",
@@ -17509,9 +18206,9 @@ TRANSLATIONS = {
         "Refresh": "Yenile",
         "Refresh the Creator printer's file list first.": "Öncelikle Creator yazıcının dosya listesini yenileyin.",
         "Refresh the file list and check the loaded materials.": "Dosya listesini yenileyin ve yüklenen malzemeleri kontrol edin.",
-        "Release motors": "Motorları serbest bırakın",
+        "Release motors": "Motorların kilidini aç",
         "Remove": "Kaldır",
-        "Replace Printer tab": "Yazıcıyı Değiştir sekmesi",
+        "Replace Printer tab": "Yazıcı sekmesinin içeriğini değiştir",
         "Request failed.": "İstek başarısız oldu.",
         "Restored the printer's original web page.": "Yazıcının orijinal web sayfası geri yüklendi.",
         "Result": "Sonuç",
@@ -17549,9 +18246,10 @@ TRANSLATIONS = {
         "Serial": "Seri",
         "Serial number": "Seri numarası",
         "Serial number (required for Creator 5 / 5 Pro)": "Seri numarası (Creator 5 / 5 Pro için gereklidir)",
-        "Set target": "Hedefi belirle",
+        "Set temperature": "Sıcaklığı ayarla",
+        "Heat": "Isıt",
         "Set up your first printer": "İlk yazıcınızı kurun",
-        "Setting light…": "Işık ayarlanıyor…",
+        "Setting light…": "Aydınlatma değiştiriliyor…",
         "Settings": "Ayarlar",
         "Settings are unavailable.": "Ayarlar kullanılamıyor.",
         "Show file previews": "Dosya önizlemelerini göster",
@@ -17569,8 +18267,8 @@ TRANSLATIONS = {
         "Stored files": "Saklanan dosyalar",
         "System theme": "Sistem teması",
         "Tab placement": "Sekme yerleşimi",
-        "Tan": "Bronzluk",
-        "Target": "Hedef",
+        "Tan": "Açık kahverengi",
+        "Target": "Hedef sıcaklık",
         "Teal": "Deniz mavisi",
         "Temperature change over the last 5 minutes": "Son 5 dakikadaki sıcaklık değişimi",
         "Temperatures": "Sıcaklıklar",
@@ -17610,7 +18308,7 @@ TRANSLATIONS = {
         "The printer must be idle.": "Yazıcı boşta olmalıdır.",
         "The printer rejected the HTTP request (code {code}).": "Yazıcı HTTP isteğini reddetti (kod {code}).",
         "The printer reported an active print. Check the printer before retrying.": "Yazıcı etkin bir yazdırma bildirdi. Yeniden denemeden önce yazıcıyı kontrol edin.",
-        "The printer requires homing before manual movement.": "Yazıcı, manüel hareketten önce hedef konumuna gitmeyi gerektirir.",
+        "The printer requires homing before manual movement.": "Eksenleri elle hareket ettirmeden önce başlangıç konumuna döndürün.",
         "The printer response is too large": "Yazıcının yanıtı çok büyük",
         "The printer returned an invalid file list.": "Yazıcı geçersiz bir dosya listesi döndürdü.",
         "The printer returned invalid HTTP data.": "Yazıcı geçersiz HTTP verileri döndürdü.",
@@ -17629,8 +18327,8 @@ TRANSLATIONS = {
         "Timer {minutes} min": "Zamanlayıcı {minutes} dk.",
         "Total pages: {count}": "Toplam sayfa: {count}",
         "Totals": "Toplamlar",
-        "Transport: {transport}": "Taşıma: {transport}",
-        "Travel limit": "Seyahat limiti",
+        "Transport: {transport}": "Protokol: {transport}",
+        "Travel limit": "Eksen hareket sınırı",
         "Trend unavailable": "Trend mevcut değil",
         "Unavailable": "Kullanılamaz",
         "Unexpected response from the printer": "Yazıcıdan beklenmeyen yanıt",
@@ -17659,7 +18357,7 @@ TRANSLATIONS = {
         "Waiting for Home to finish…": "Eksenlerin başlangıç konumuna dönmesi bekleniyor…",
         "Waiting for job status": "İş durumu bekleniyor",
         "Waiting for printer…": "Yazıcı bekleniyor…",
-        "Waiting for readings": "Okumalar bekleniyor",
+        "Waiting for readings": "Ölçümler bekleniyor",
         "Waiting for temperature readings": "Sıcaklık okumaları bekleniyor",
         "Waiting for the printer to confirm calibration.": "Yazıcının kalibrasyonu onaylaması bekleniyor.",
         "Waiting for the printer…": "Yazıcı bekleniyor…",
@@ -17675,6 +18373,15 @@ TRANSLATIONS = {
         "{time} left": "Kalan süre: {time}",
     },
     "uk": {
+        "While this tab is open": "Поки відкрита ця вкладка",
+        "Only during an active print": "Лише під час активного завдання",
+        "Waiting for part removal": "Чекає на зняття деталі",
+        "Wait for part removal": "Чекати на зняття деталі",
+        "Bed is clear": "Стіл вільний",
+        "Chart layout": "Вигляд графіка",
+        "Shared scale": "Спільна шкала",
+        "Separate scales": "Окремі шкали",
+        "Select at least one temperature line.": "Виберіть хоча б одну лінію температури.",
         " · Total print time: {time}": " · Загальний час друку: {time}",
         "0 min": "0 хв",
         "1 mm": "1 мм",
@@ -17703,16 +18410,17 @@ TRANSLATIONS = {
         "Axes": "Осі",
         "Axes busy": "Сокири зайняті",
         "Axis movement step": "Крок руху осі",
+        "B": "Стіл",
         "Basic readings received. CheckCode could not be verified.": "Отримано основні показання. CheckCode не вдалося перевірити.",
         "Bed": "Стіл",
         "Bed Target": "Цільова температура столу",
-        "Bed Z": "Ліжко Z",
+        "Bed Z": "Вісь Z столу",
         "Bed leveling": "Вирівнювання столу",
         "Black": "Чорний",
         "Blue": "Синій",
         "Brown": "Коричневий",
         "Browse files": "Перегляд файлів",
-        "Build volume": "Збільшити обсяг",
+        "Build volume": "Область друку",
         "Busy": "Зайнятий",
         "Calibrating": "Калібрування",
         "Calibration": "Калібрування",
@@ -17728,10 +18436,10 @@ TRANSLATIONS = {
         "Cancel": "Скасувати",
         "Cancel print?": "Скасувати друк?",
         "Canceled": "Скасовано",
-        "Canceling": "Скасування",
+        "Canceling": "Скасування триває",
         "Card size": "Розмір картки",
-        "Chamber": "Палата",
-        "Chamber light": "Камерне світло",
+        "Chamber": "Камера друку",
+        "Chamber light": "Підсвічування камери друку",
         "Chart nozzle": "Насадка для діаграм",
         "Chart of actual and target temperatures for the nozzle and bed": "Діаграма фактичної та цільової температур для сопла та шару",
         "Check connection": "Перевірте з'єднання",
@@ -17755,19 +18463,19 @@ TRANSLATIONS = {
         "Choose a material and color supported by this printer.": "Виберіть матеріал і колір, які підтримуються цим принтером.",
         "Choose a nonempty print file no larger than 128 MB.": "Виберіть непорожній файл для друку розміром не більше 128 МБ.",
         "Choose a print file no larger than 128 MB.": "Виберіть файл для друку розміром не більше 128 МБ.",
-        "Choose a sliced .3mf with one plate and filament information.": "Виберіть нарізаний .3mf з інформацією про одну пластину та нитку.",
-        "Choose a sliced .3mf with one plate.": "Виберіть нарізаний .3mf з однією тарілкою.",
+        "Choose a sliced .3mf with one plate and filament information.": "Виберіть файл .3mf з однією нарізаною пластиною та даними про філаменти.",
+        "Choose a sliced .3mf with one plate.": "Виберіть файл .3mf з однією нарізаною пластиною.",
         "Choose a text .gcode file or a sliced .3mf.": "Виберіть текстовий файл .gcode або нарізаний .3mf.",
         "Choose delay…": "Виберіть затримку...",
         "Choose material": "Виберіть матеріал",
-        "Choose the original .3mf with one sliced plate and the same file name.": "Виберіть оригінальний .3mf з однією нарізаною пластиною та такою ж назвою файлу.",
+        "Choose the original .3mf with one sliced plate and the same file name.": "Виберіть вихідний файл .3mf з однією нарізаною пластиною та такою самою назвою.",
         "Choose the original sliced .3mf for this Creator file.": "Виберіть оригінальний нарізаний .3mf для цього файлу Creator.",
         "Choose the original sliced .3mf.": "Виберіть оригінальний нарізаний .3mf.",
         "Choose the sliced .3mf that matches the stored file name.": "Виберіть нарізаний .3mf, який відповідає імені збереженого файлу.",
         "Clear error": "Очистити помилку",
         "Clear filters": "Очистити фільтри",
         "Close": "Закрити",
-        "Closed": "Закрито",
+        "Closed": "Зачинено",
         "Collecting readings…": "Збір показань…",
         "Color": "Колір",
         "Color differs": "Колір відрізняється",
@@ -17837,7 +18545,7 @@ TRANSLATIONS = {
         "Empty camera stream": "Порожній потік камери",
         "Enable LAN-only mode on the printer.": "Увімкніть на принтері режим лише LAN.",
         "Ended: {time}": "Завершено: {time}",
-        "Endstops: {state}": "Кінцеві упори: {state}",
+        "Endstops: {state}": "Кінцеві вимикачі: {state}",
         "Enlarge camera": "Збільшити камеру",
         "Enter a local IPv4 address for the printer.": "Введіть локальну адресу IPv4 для принтера.",
         "Enter a page number": "Введіть номер сторінки",
@@ -17865,7 +18573,6 @@ TRANSLATIONS = {
         "Find printers": "Знайти принтери",
         "Finish": "Завершити",
         "Finish ≈ {time}": "Оздоблення ≈ {time}",
-        "Finished cleanly": "Завершено чисто",
         "Finished. Printer ready.": "Готово. Принтер готовий.",
         "Firmware": "Прошивка",
         "FlashForge Device Tab is shutting down.": "FlashForge Device Tab вимикається.",
@@ -17875,13 +18582,13 @@ TRANSLATIONS = {
         "Heat nozzle to 180 °C": "Нагрійте сопло до 180 °C",
         "Heat off": "Вимкнути тепло",
         "Heat the nozzle to at least 180 °C.": "Нагрійте сопло щонайменше до 180 °C.",
-        "Heating": "Опалення",
-        "Heating nozzles: {count}": "Нагрівальні форсунки: {count}",
+        "Heating": "Нагрівання",
+        "Heating nozzles: {count}": "Сопел, що нагріваються: {count}",
         "History": "Історія",
         "Home": "У нуль",
         "Home all axes": "Обнулити всі осі",
         "Home required": "Потрібне обнулення осей",
-        "Home sent. Waiting for the printer to confirm completion.": "Відправлено додому. Очікування підтвердження від принтера.",
+        "Home sent. Waiting for the printer to confirm completion.": "Команду повернення осей у нуль надіслано. Очікування підтвердження від принтера.",
         "Homing…": "Наведення…",
         "Host notifications": "Сповіщення хоста",
         "IPv4 address": "Адреса IPv4",
@@ -17904,9 +18611,9 @@ TRANSLATIONS = {
         "Invalid printer list.": "Недійсний список принтерів.",
         "Invalid request.": "Недійсний запит.",
         "Invalid slice information.": "Недійсна інформація зрізу.",
-        "Job details": "Деталі роботи",
-        "Job status unavailable": "Статус вакансії недоступний",
-        "Jobs": "Вакансії",
+        "Job details": "Подробиці завдання друку",
+        "Job status unavailable": "Стан завдання друку недоступний",
+        "Jobs": "Завдання друку",
         "Large": "Великий",
         "Last completed": "Востаннє завершено",
         "Last reading: {seconds} s ago": "Останнє показання: {seconds} с тому",
@@ -17950,6 +18657,7 @@ TRANSLATIONS = {
         "Move sent to the printer.": "Переміщення надіслано на принтер.",
         "Move up": "Рух вгору",
         "Moving…": "Переміщення…",
+        "N": "Сопло",
         "Name": "Ім'я",
         "Needs Attention": "Потребує уваги",
         "Network discovery unavailable. Enter the printer address manually.": "Виявлення мережі недоступне. Введіть адресу принтера вручну.",
@@ -17961,7 +18669,7 @@ TRANSLATIONS = {
         "No idle printers.": "Немає неактивних принтерів.",
         "No loaded slot matches": "Немає завантажених слотів",
         "No matching files": "Відповідних файлів немає",
-        "No matching jobs.": "Немає відповідних завдань.",
+        "No matching jobs.": "Відповідних завдань друку немає.",
         "No new printers found.": "Не знайдено нових принтерів.",
         "No preview": "Без попереднього перегляду",
         "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.": "Ще не зареєстровано завдань друку. Історія друку записується, коли OrcaSlicer відкрито.",
@@ -17977,15 +18685,15 @@ TRANSLATIONS = {
         "Nozzle": "Сопло",
         "Nozzle Target": "Цільова температура сопла",
         "Nozzle T{tool}": "Насадка T{tool}",
-        "Nozzle Z": "Сопло Z",
+        "Nozzle Z": "Вісь Z сопла",
         "Nozzle {temperature} °C": "Сопло {temperature} °C",
-        "Nozzles": "Насадки",
+        "Nozzles": "Сопла",
         "Nozzles: {count}": "Насадки: {count}",
         "Off": "Вимк",
         "Offline for at least one minute": "Не в мережі принаймні одну хвилину",
         "On": "Увімкнено",
         "One printer per line: address | CheckCode | name | serial number": "Один принтер на рядок: адреса | CheckCode | назва | серійний номер",
-        "Open": "Відкрити",
+        "Open": "Відчинено",
         "Open FlashForge": "Відкрийте FlashForge",
         "Open FlashForge Device Tab for a FlashForge printer profile from Speed Dial.": "Відкрийте FlashForge Device Tab для профілю принтера FlashForge із швидкого набору.",
         "Open FlashForge Device Tab for the current printer profile from Speed Dial.": "Відкрийте FlashForge Device Tab для поточного профілю принтера з швидкого набору.",
@@ -17998,11 +18706,11 @@ TRANSLATIONS = {
         "Orange": "Помаранчевий",
         "OrcaSlicer is sending a print job. Monitoring will resume when the transfer is complete.": "OrcaSlicer надсилає завдання друку. Моніторинг відновиться після завершення передачі.",
         "OrcaSlicer is sending a print job. Try again when it finishes.": "OrcaSlicer надсилає завдання друку. Спробуйте знову, коли він закінчиться.",
-        "Original sliced .3mf": "Оригінальна нарізка .3mf",
-        "Other nozzles": "Інші насадки",
+        "Original sliced .3mf": "Вихідний файл .3mf з нарізкою",
+        "Other nozzles": "Інші сопла",
         "Page number": "Номер сторінки",
-        "Part Cooling Fan": "Вентилятор обдуву моделі",
-        "Part fan": "Частина вентилятора",
+        "Part Cooling Fan": "Вентилятор обдування моделі",
+        "Part fan": "Обдування моделі",
         "Pause": "Пауза",
         "Paused": "Призупинено",
         "Paused, disconnected or reporting a problem": "Призупинено, відключено або повідомлено про проблему",
@@ -18036,6 +18744,7 @@ TRANSLATIONS = {
         "Print speed": "Швидкість друку",
         "Print started · {file}": "Друк розпочато · {file}",
         "Print stored file": "Друк збереженого файлу",
+        "Print success rate": "Частка успішних завдань",
         "Print time": "Час друку",
         "Print time: {time}": "Час друку: {time}",
         "Printer": "Принтер",
@@ -18044,7 +18753,7 @@ TRANSLATIONS = {
         "Printer Readings": "Показання принтера",
         "Printer accepted the command.": "Принтер прийняв команду.",
         "Printer accepted the command. Axis limits could not be checked.": "Принтер прийняв команду. Не вдалося перевірити межі осі.",
-        "Printer camera feed": "Подача камери принтера",
+        "Printer camera feed": "Зображення з камери принтера",
         "Printer confirmed the nozzle target.": "Принтер підтвердив цільове сопло.",
         "Printer confirmed the shutdown timer setting.": "Принтер підтвердив налаштування таймера вимкнення.",
         "Printer confirmed {command} · {state}": "Принтер підтверджено {command} · {state}",
@@ -18062,7 +18771,7 @@ TRANSLATIONS = {
         "Printer has not confirmed the nozzle target. Check Printer Readings.": "Принтер не підтвердив цільове сопло. Перевірте показання принтера.",
         "Printer jobs": "Завдання принтера",
         "Printer must be idle.": "Принтер має бути неактивним.",
-        "Printer must be idle. Wait for movement or Home to finish.": "Принтер має бути неактивним. Дочекайтеся завершення руху або дому.",
+        "Printer must be idle. Wait for movement or Home to finish.": "Принтер має бути вільним. Дочекайтеся завершення переміщення або повернення в нуль.",
         "Printer must be idle. {reason}": "Принтер має бути неактивним. {reason}",
         "Printer rejected the selected file.": "Принтер відхилив вибраний файл.",
         "Printer rejected {command}.": "Принтер відхилив {command}.",
@@ -18078,7 +18787,7 @@ TRANSLATIONS = {
         "Profile changed": "Профіль змінено",
         "Purple": "Фіолетовий",
         "Range": "Діапазон",
-        "Reading materials…": "Матеріали для читання…",
+        "Reading materials…": "Зчитування даних про матеріали…",
         "Reading printer status…": "Читання стану принтера…",
         "Readings delayed": "Зчитування затримано",
         "Readings unavailable": "Показання недоступні",
@@ -18089,9 +18798,9 @@ TRANSLATIONS = {
         "Refresh": "Оновити",
         "Refresh the Creator printer's file list first.": "Спочатку оновіть список файлів принтера Creator.",
         "Refresh the file list and check the loaded materials.": "Оновіть список файлів і перевірте завантажені матеріали.",
-        "Release motors": "Відпустіть двигуни",
+        "Release motors": "Розблокувати двигуни",
         "Remove": "Видалити",
-        "Replace Printer tab": "Вкладка «Замінити принтер».",
+        "Replace Printer tab": "Замінити вміст вкладки «Принтер»",
         "Request failed.": "Помилка запиту.",
         "Restored the printer's original web page.": "Відновлено оригінальну веб-сторінку принтера.",
         "Result": "Результат",
@@ -18129,9 +18838,10 @@ TRANSLATIONS = {
         "Serial": "Серійний",
         "Serial number": "Серійний номер",
         "Serial number (required for Creator 5 / 5 Pro)": "Серійний номер (необхідний для Creator 5 / 5 Pro)",
-        "Set target": "Встановіть ціль",
+        "Set temperature": "Задати температуру",
+        "Heat": "Нагріти",
         "Set up your first printer": "Налаштуйте свій перший принтер",
-        "Setting light…": "Встановлення світла…",
+        "Setting light…": "Перемикання підсвічування…",
         "Settings": "Налаштування",
         "Settings are unavailable.": "Налаштування недоступні.",
         "Show file previews": "Показати попередній перегляд файлів",
@@ -18149,8 +18859,8 @@ TRANSLATIONS = {
         "Stored files": "Збережені файли",
         "System theme": "Тема системи",
         "Tab placement": "Розміщення вкладок",
-        "Tan": "Тан",
-        "Target": "Ціль",
+        "Tan": "Піщаний",
+        "Target": "Цільова температура",
         "Teal": "Бірюзовий",
         "Temperature change over the last 5 minutes": "Зміна температури за останні 5 хвилин",
         "Temperatures": "Температури",
@@ -18190,7 +18900,7 @@ TRANSLATIONS = {
         "The printer must be idle.": "Принтер має бути неактивним.",
         "The printer rejected the HTTP request (code {code}).": "Принтер відхилив запит HTTP (код {code}).",
         "The printer reported an active print. Check the printer before retrying.": "Принтер повідомив про активний друк. Перевірте принтер перед повторною спробою.",
-        "The printer requires homing before manual movement.": "Перед переміщенням вручну принтер вимагає переведення в початкове положення.",
+        "The printer requires homing before manual movement.": "Перед ручним переміщенням поверніть осі в нуль.",
         "The printer response is too large": "Відповідь принтера занадто велика",
         "The printer returned an invalid file list.": "Принтер повернув недійсний список файлів.",
         "The printer returned invalid HTTP data.": "Принтер повернув недійсні дані HTTP.",
@@ -18209,8 +18919,8 @@ TRANSLATIONS = {
         "Timer {minutes} min": "Таймер {minutes} хв",
         "Total pages: {count}": "Всього сторінок: {count}",
         "Totals": "Підсумки",
-        "Transport: {transport}": "Транспорт: {transport}",
-        "Travel limit": "Ліміт подорожі",
+        "Transport: {transport}": "Протокол: {transport}",
+        "Travel limit": "Межа ходу осі",
         "Trend unavailable": "Тренд недоступний",
         "Unavailable": "Недоступний",
         "Unexpected response from the printer": "Неочікувана відповідь від принтера",
@@ -18255,6 +18965,15 @@ TRANSLATIONS = {
         "{time} left": "Залишилося {time}",
     },
     "vi": {
+        "While this tab is open": "Khi thẻ này đang mở",
+        "Only during an active print": "Chỉ khi có tác vụ in đang chạy",
+        "Waiting for part removal": "Đang chờ lấy chi tiết ra",
+        "Wait for part removal": "Chờ lấy chi tiết ra",
+        "Bed is clear": "Bàn in đã trống",
+        "Chart layout": "Bố cục biểu đồ",
+        "Shared scale": "Thang đo chung",
+        "Separate scales": "Thang đo riêng",
+        "Select at least one temperature line.": "Chọn ít nhất một đường nhiệt độ.",
         " · Total print time: {time}": " · Tổng thời gian in: {time}",
         "0 min": "0 phút",
         "1 mm": "1mm",
@@ -18276,23 +18995,24 @@ TRANSLATIONS = {
         "Allow access to the printer, then reload the plugin.": "Cho phép truy cập vào máy in, sau đó tải lại plugin.",
         "Another print source is being read.": "Một nguồn in khác đang được đọc.",
         "Appearance": "Giao diện",
-        "Apply": "Nộp đơn",
+        "Apply": "Áp dụng",
         "Attention": "Chú ý",
         "Authenticated readings: {availability}": "Số đọc được xác thực: {availability}",
         "Auto shutdown": "Tự động tắt máy",
         "Axes": "Trục",
         "Axes busy": "Trục bận",
         "Axis movement step": "Bước chuyển động của trục",
+        "B": "Bàn in",
         "Basic readings received. CheckCode could not be verified.": "Đã nhận được các bài đọc cơ bản. CheckCode không thể được xác minh.",
         "Bed": "Bàn in",
         "Bed Target": "Nhiệt độ đặt của bàn in",
-        "Bed Z": "Giường Z",
+        "Bed Z": "Trục Z của bàn in",
         "Bed leveling": "Cân bằng bàn in",
         "Black": "Đen",
         "Blue": "Màu xanh",
         "Brown": "Nâu",
         "Browse files": "Duyệt tập tin",
-        "Build volume": "Xây dựng khối lượng",
+        "Build volume": "Thể tích in",
         "Busy": "Bận rộn",
         "Calibrating": "Hiệu chỉnh",
         "Calibration": "Hiệu chuẩn",
@@ -18308,10 +19028,10 @@ TRANSLATIONS = {
         "Cancel": "Hủy",
         "Cancel print?": "Hủy in?",
         "Canceled": "Đã hủy",
-        "Canceling": "Hủy bỏ",
+        "Canceling": "Đang hủy",
         "Card size": "Kích thước thẻ",
-        "Chamber": "Phòng",
-        "Chamber light": "Đèn buồng",
+        "Chamber": "Buồng in",
+        "Chamber light": "Đèn buồng in",
         "Chart nozzle": "Vòi biểu đồ",
         "Chart of actual and target temperatures for the nozzle and bed": "Biểu đồ nhiệt độ thực tế và mục tiêu của vòi và đáy",
         "Check connection": "Kiểm tra kết nối",
@@ -18335,20 +19055,20 @@ TRANSLATIONS = {
         "Choose a material and color supported by this printer.": "Chọn chất liệu và màu sắc được máy in này hỗ trợ.",
         "Choose a nonempty print file no larger than 128 MB.": "Chọn tệp in không trống có dung lượng không lớn hơn 128 MB.",
         "Choose a print file no larger than 128 MB.": "Chọn tệp in không lớn hơn 128 MB.",
-        "Choose a sliced .3mf with one plate and filament information.": "Chọn .3mf được cắt lát với một tấm và thông tin dây tóc.",
-        "Choose a sliced .3mf with one plate.": "Chọn .3mf cắt lát bằng một đĩa.",
+        "Choose a sliced .3mf with one plate and filament information.": "Chọn tệp .3mf có một bàn in đã cắt lớp và thông tin về sợi in.",
+        "Choose a sliced .3mf with one plate.": "Chọn tệp .3mf có đúng một bàn in đã cắt lớp.",
         "Choose a text .gcode file or a sliced .3mf.": "Chọn tệp .gcode văn bản hoặc .3mf được cắt lát.",
         "Choose delay…": "Chọn độ trễ…",
         "Choose material": "Chọn vật liệu",
-        "Choose the original .3mf with one sliced plate and the same file name.": "Chọn .3mf gốc có một tấm được cắt lát và có cùng tên tệp.",
+        "Choose the original .3mf with one sliced plate and the same file name.": "Chọn tệp .3mf gốc có đúng một bàn in đã cắt lớp và cùng tên tệp.",
         "Choose the original sliced .3mf for this Creator file.": "Chọn .3mf được cắt lát ban đầu cho tệp Trình tạo này.",
         "Choose the original sliced .3mf.": "Chọn .3mf được cắt lát ban đầu.",
         "Choose the sliced .3mf that matches the stored file name.": "Chọn .3mf được cắt lát phù hợp với tên tệp được lưu trữ.",
         "Clear error": "Xóa lỗi",
         "Clear filters": "Xóa bộ lọc",
         "Close": "Đóng",
-        "Closed": "Đã đóng cửa",
-        "Collecting readings…": "Thu thập bài đọc…",
+        "Closed": "Đóng",
+        "Collecting readings…": "Đang thu thập số đo…",
         "Color": "Màu sắc",
         "Color differs": "Màu sắc khác nhau",
         "Command accepted. The printer has not confirmed the change.": "Lệnh được chấp nhận. Máy in chưa xác nhận thay đổi.",
@@ -18417,7 +19137,7 @@ TRANSLATIONS = {
         "Empty camera stream": "Luồng camera trống",
         "Enable LAN-only mode on the printer.": "Bật chế độ chỉ LAN trên máy in.",
         "Ended: {time}": "Đã kết thúc: {time}",
-        "Endstops: {state}": "Điểm dừng cuối: {state}",
+        "Endstops: {state}": "Công tắc hành trình: {state}",
         "Enlarge camera": "Phóng to máy ảnh",
         "Enter a local IPv4 address for the printer.": "Nhập địa chỉ IPv4 cục bộ cho máy in.",
         "Enter a page number": "Nhập số trang",
@@ -18445,7 +19165,6 @@ TRANSLATIONS = {
         "Find printers": "Tìm máy in",
         "Finish": "Kết thúc",
         "Finish ≈ {time}": "Kết thúc ≈ {time}",
-        "Finished cleanly": "Đã hoàn thành sạch sẽ",
         "Finished. Printer ready.": "Đã hoàn thành. Máy in đã sẵn sàng.",
         "Firmware": "Phần mềm cơ sở",
         "FlashForge Device Tab is shutting down.": "FlashForge Device Tab sắp ngừng hoạt động.",
@@ -18455,13 +19174,13 @@ TRANSLATIONS = {
         "Heat nozzle to 180 °C": "Làm nóng vòi phun đến 180 °C",
         "Heat off": "Giảm nhiệt",
         "Heat the nozzle to at least 180 °C.": "Làm nóng vòi phun đến nhiệt độ ít nhất là 180 °C.",
-        "Heating": "Sưởi ấm",
-        "Heating nozzles: {count}": "Vòi làm nóng: {count}",
+        "Heating": "Đang gia nhiệt",
+        "Heating nozzles: {count}": "Đầu phun đang gia nhiệt: {count}",
         "History": "Lịch sử",
         "Home": "Về gốc tọa độ",
         "Home all axes": "Đưa mọi trục về gốc tọa độ",
         "Home required": "Cần đưa trục về gốc",
-        "Home sent. Waiting for the printer to confirm completion.": "Nhà gửi. Đang chờ máy in xác nhận hoàn thành.",
+        "Home sent. Waiting for the printer to confirm completion.": "Đã gửi lệnh đưa các trục về gốc. Đang chờ máy in xác nhận đã hoàn tất.",
         "Homing…": "Về nhà…",
         "Host notifications": "Thông báo của chủ nhà",
         "IPv4 address": "Địa chỉ IPv4",
@@ -18484,9 +19203,9 @@ TRANSLATIONS = {
         "Invalid printer list.": "Danh sách máy in không hợp lệ.",
         "Invalid request.": "Yêu cầu không hợp lệ.",
         "Invalid slice information.": "Thông tin lát cắt không hợp lệ.",
-        "Job details": "Chi tiết công việc",
-        "Job status unavailable": "Không có trạng thái công việc",
-        "Jobs": "Việc làm",
+        "Job details": "Chi tiết tác vụ in",
+        "Job status unavailable": "Không có thông tin về trạng thái tác vụ in",
+        "Jobs": "Tác vụ in",
         "Large": "Lớn",
         "Last completed": "Hoàn thành lần cuối",
         "Last reading: {seconds} s ago": "Lần đọc gần nhất: {seconds} giây trước",
@@ -18530,6 +19249,7 @@ TRANSLATIONS = {
         "Move sent to the printer.": "Di chuyển được gửi tới máy in.",
         "Move up": "Tiến lên",
         "Moving…": "Đang di chuyển…",
+        "N": "Đầu phun",
         "Name": "Tên",
         "Needs Attention": "Cần Chú Ý",
         "Network discovery unavailable. Enter the printer address manually.": "Khám phá mạng không khả dụng. Nhập địa chỉ máy in theo cách thủ công.",
@@ -18541,7 +19261,7 @@ TRANSLATIONS = {
         "No idle printers.": "Không có máy in nhàn rỗi.",
         "No loaded slot matches": "Không có kết quả phù hợp nào được tải",
         "No matching files": "Không có tệp phù hợp",
-        "No matching jobs.": "Không có công việc phù hợp.",
+        "No matching jobs.": "Không tìm thấy tác vụ in phù hợp.",
         "No new printers found.": "Không tìm thấy máy in mới.",
         "No preview": "Không có bản xem trước",
         "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.": "Chưa có lệnh in nào được ghi lại. Lịch sử in được ghi lại khi OrcaSlicer đang mở.",
@@ -18557,7 +19277,7 @@ TRANSLATIONS = {
         "Nozzle": "Đầu phun",
         "Nozzle Target": "Nhiệt độ đặt của đầu phun",
         "Nozzle T{tool}": "Vòi phun T{tool}",
-        "Nozzle Z": "Vòi Z",
+        "Nozzle Z": "Trục Z của đầu phun",
         "Nozzle {temperature} °C": "Vòi phun {temperature} °C",
         "Nozzles": "Vòi phun",
         "Nozzles: {count}": "Vòi phun: {count}",
@@ -18578,11 +19298,11 @@ TRANSLATIONS = {
         "Orange": "Cam",
         "OrcaSlicer is sending a print job. Monitoring will resume when the transfer is complete.": "OrcaSlicer đang gửi lệnh in. Quá trình giám sát sẽ tiếp tục khi quá trình truyền hoàn tất.",
         "OrcaSlicer is sending a print job. Try again when it finishes.": "OrcaSlicer đang gửi lệnh in. Hãy thử lại khi nó kết thúc.",
-        "Original sliced .3mf": ".3mf cắt lát nguyên bản",
+        "Original sliced .3mf": "Tệp .3mf gốc đã cắt lớp",
         "Other nozzles": "Đầu phun khác",
         "Page number": "Số trang",
         "Part Cooling Fan": "Quạt làm mát mẫu in",
-        "Part fan": "Một phần fan",
+        "Part fan": "Quạt làm mát mẫu in",
         "Pause": "Tạm dừng",
         "Paused": "Đã tạm dừng",
         "Paused, disconnected or reporting a problem": "Đã tạm dừng, ngắt kết nối hoặc báo cáo sự cố",
@@ -18616,6 +19336,7 @@ TRANSLATIONS = {
         "Print speed": "Tốc độ in",
         "Print started · {file}": "Đã bắt đầu in · {file}",
         "Print stored file": "In tập tin đã lưu trữ",
+        "Print success rate": "Tỷ lệ in thành công",
         "Print time": "Thời gian in",
         "Print time: {time}": "Thời gian in: {time}",
         "Printer": "Máy in",
@@ -18624,7 +19345,7 @@ TRANSLATIONS = {
         "Printer Readings": "Bài đọc trên máy in",
         "Printer accepted the command.": "Máy in chấp nhận lệnh.",
         "Printer accepted the command. Axis limits could not be checked.": "Máy in chấp nhận lệnh. Không thể kiểm tra giới hạn trục.",
-        "Printer camera feed": "Nguồn cấp dữ liệu máy in",
+        "Printer camera feed": "Video từ camera máy in",
         "Printer confirmed the nozzle target.": "Máy in đã xác nhận mục tiêu vòi phun.",
         "Printer confirmed the shutdown timer setting.": "Máy in đã xác nhận cài đặt hẹn giờ tắt máy.",
         "Printer confirmed {command} · {state}": "Máy in đã xác nhận {command} · {state}",
@@ -18642,7 +19363,7 @@ TRANSLATIONS = {
         "Printer has not confirmed the nozzle target. Check Printer Readings.": "Máy in chưa xác nhận mục tiêu đầu phun. Kiểm tra bài đọc của máy in.",
         "Printer jobs": "Công việc in ấn",
         "Printer must be idle.": "Máy in phải ở chế độ chờ.",
-        "Printer must be idle. Wait for movement or Home to finish.": "Máy in phải ở chế độ chờ. Đợi chuyển động hoặc Home kết thúc.",
+        "Printer must be idle. Wait for movement or Home to finish.": "Máy in phải ở chế độ chờ. Đợi các trục di chuyển xong hoặc trở về gốc.",
         "Printer must be idle. {reason}": "Máy in phải ở chế độ chờ. {reason}",
         "Printer rejected the selected file.": "Máy in từ chối tệp đã chọn.",
         "Printer rejected {command}.": "Máy in bị từ chối {command}.",
@@ -18658,7 +19379,7 @@ TRANSLATIONS = {
         "Profile changed": "Hồ sơ đã thay đổi",
         "Purple": "Tím",
         "Range": "Phạm vi",
-        "Reading materials…": "Đọc tài liệu…",
+        "Reading materials…": "Đang đọc dữ liệu vật liệu…",
         "Reading printer status…": "Đọc trạng thái máy in…",
         "Readings delayed": "Bài đọc bị trì hoãn",
         "Readings unavailable": "Không có bài đọc",
@@ -18669,9 +19390,9 @@ TRANSLATIONS = {
         "Refresh": "Làm mới",
         "Refresh the Creator printer's file list first.": "Trước tiên hãy làm mới danh sách tệp của máy in Creator.",
         "Refresh the file list and check the loaded materials.": "Làm mới danh sách tập tin và kiểm tra các tài liệu đã tải.",
-        "Release motors": "Phát hành động cơ",
+        "Release motors": "Mở khóa động cơ",
         "Remove": "Xóa",
-        "Replace Printer tab": "Thay thế tab Máy in",
+        "Replace Printer tab": "Thay nội dung thẻ Máy in",
         "Request failed.": "Yêu cầu không thành công.",
         "Restored the printer's original web page.": "Đã khôi phục trang web gốc của máy in.",
         "Result": "Kết quả",
@@ -18709,9 +19430,10 @@ TRANSLATIONS = {
         "Serial": "nối tiếp",
         "Serial number": "Số sê-ri",
         "Serial number (required for Creator 5 / 5 Pro)": "Số sê-ri (bắt buộc đối với Creator 5 / 5 Pro)",
-        "Set target": "Đặt mục tiêu",
+        "Set temperature": "Đặt nhiệt độ",
+        "Heat": "Gia nhiệt",
         "Set up your first printer": "Thiết lập máy in đầu tiên của bạn",
-        "Setting light…": "Đèn đang tắt…",
+        "Setting light…": "Đang chuyển trạng thái đèn…",
         "Settings": "Cài đặt",
         "Settings are unavailable.": "Cài đặt không khả dụng.",
         "Show file previews": "Hiển thị bản xem trước tệp",
@@ -18729,8 +19451,8 @@ TRANSLATIONS = {
         "Stored files": "Tệp được lưu trữ",
         "System theme": "Chủ đề hệ thống",
         "Tab placement": "Vị trí tab",
-        "Tan": "Tân",
-        "Target": "Mục tiêu",
+        "Tan": "Nâu nhạt",
+        "Target": "Nhiệt độ mục tiêu",
         "Teal": "Xanh mòng két",
         "Temperature change over the last 5 minutes": "Thay đổi nhiệt độ trong 5 phút qua",
         "Temperatures": "Nhiệt độ",
@@ -18770,7 +19492,7 @@ TRANSLATIONS = {
         "The printer must be idle.": "Máy in phải ở chế độ chờ.",
         "The printer rejected the HTTP request (code {code}).": "Máy in từ chối yêu cầu HTTP (mã {code}).",
         "The printer reported an active print. Check the printer before retrying.": "Máy in báo cáo bản in đang hoạt động. Kiểm tra máy in trước khi thử lại.",
-        "The printer requires homing before manual movement.": "Máy in cần được điều hướng trước khi di chuyển bằng tay.",
+        "The printer requires homing before manual movement.": "Đưa các trục về gốc trước khi di chuyển thủ công.",
         "The printer response is too large": "Phản hồi của máy in quá lớn",
         "The printer returned an invalid file list.": "Máy in trả về danh sách tập tin không hợp lệ.",
         "The printer returned invalid HTTP data.": "Máy in trả về dữ liệu HTTP không hợp lệ.",
@@ -18789,8 +19511,8 @@ TRANSLATIONS = {
         "Timer {minutes} min": "Hẹn giờ {minutes} phút",
         "Total pages: {count}": "Tổng số trang: {count}",
         "Totals": "Tổng số",
-        "Transport: {transport}": "Vận chuyển: {transport}",
-        "Travel limit": "Giới hạn hành trình",
+        "Transport: {transport}": "Giao thức: {transport}",
+        "Travel limit": "Giới hạn hành trình của trục",
         "Trend unavailable": "Xu hướng không có sẵn",
         "Unavailable": "Không có sẵn",
         "Unexpected response from the printer": "Phản hồi không mong đợi từ máy in",
@@ -18819,7 +19541,7 @@ TRANSLATIONS = {
         "Waiting for Home to finish…": "Đang chờ các trục về gốc tọa độ…",
         "Waiting for job status": "Đang chờ trạng thái công việc",
         "Waiting for printer…": "Đang chờ máy in…",
-        "Waiting for readings": "Đang chờ đọc",
+        "Waiting for readings": "Đang chờ số đo",
         "Waiting for temperature readings": "Đang chờ đọc nhiệt độ",
         "Waiting for the printer to confirm calibration.": "Đang chờ máy in xác nhận hiệu chuẩn.",
         "Waiting for the printer…": "Đang chờ máy in…",
@@ -18835,6 +19557,15 @@ TRANSLATIONS = {
         "{time} left": "Còn {time}",
     },
     "zh-CN": {
+        "While this tab is open": "此选项卡打开时",
+        "Only during an active print": "仅在有活动打印任务时",
+        "Waiting for part removal": "等待取下打印件",
+        "Wait for part removal": "等待取下打印件",
+        "Bed is clear": "热床已清空",
+        "Chart layout": "图表布局",
+        "Shared scale": "共用刻度",
+        "Separate scales": "分别设定刻度",
+        "Select at least one temperature line.": "请至少选择一条温度曲线。",
         " · Total print time: {time}": " ·总打印时间：{time}",
         "0 min": "0分钟",
         "1 mm": "1毫米",
@@ -18856,23 +19587,24 @@ TRANSLATIONS = {
         "Allow access to the printer, then reload the plugin.": "允许访问打印机，然后重新加载插件。",
         "Another print source is being read.": "正在读取另一个打印源。",
         "Appearance": "外观",
-        "Apply": "申请",
+        "Apply": "应用",
         "Attention": "注意",
         "Authenticated readings: {availability}": "认证读数：{availability}",
         "Auto shutdown": "自动关机",
         "Axes": "轴",
         "Axes busy": "轴忙",
-        "Axis movement step": "轴移动步数",
+        "Axis movement step": "轴移动步距",
+        "B": "热床",
         "Basic readings received. CheckCode could not be verified.": "收到基本读数。 CheckCode 无法验证。",
         "Bed": "热床",
         "Bed Target": "热床目标温度",
-        "Bed Z": "床Z",
+        "Bed Z": "热床 Z 轴",
         "Bed leveling": "热床调平",
         "Black": "黑色",
         "Blue": "蓝色",
         "Brown": "棕色",
         "Browse files": "浏览文件",
-        "Build volume": "构建体积",
+        "Build volume": "成型空间",
         "Busy": "忙",
         "Calibrating": "校准",
         "Calibration": "校准",
@@ -18888,10 +19620,10 @@ TRANSLATIONS = {
         "Cancel": "取消",
         "Cancel print?": "取消打印？",
         "Canceled": "取消",
-        "Canceling": "取消",
+        "Canceling": "正在取消",
         "Card size": "卡片尺寸",
-        "Chamber": "室",
-        "Chamber light": "箱体灯",
+        "Chamber": "打印腔",
+        "Chamber light": "打印腔照明",
         "Chart nozzle": "图表喷嘴",
         "Chart of actual and target temperatures for the nozzle and bed": "喷嘴和床的实际温度和目标温度图表",
         "Check connection": "检查连接",
@@ -18915,20 +19647,20 @@ TRANSLATIONS = {
         "Choose a material and color supported by this printer.": "选择本打印机支持的材料和颜色。",
         "Choose a nonempty print file no larger than 128 MB.": "选择不大于128 MB 的非空打印文件。",
         "Choose a print file no larger than 128 MB.": "选择不大于128 MB 的打印文件。",
-        "Choose a sliced .3mf with one plate and filament information.": "选择带有一块板和灯丝信息的切片.3mf。",
-        "Choose a sliced .3mf with one plate.": "选择一盘切片.3mf。",
+        "Choose a sliced .3mf with one plate and filament information.": "请选择包含一张已切片打印盘和耗材信息的 .3mf 文件。",
+        "Choose a sliced .3mf with one plate.": "请选择仅包含一张已切片打印盘的 .3mf 文件。",
         "Choose a text .gcode file or a sliced .3mf.": "选择文本.gcode 文件或切片.3mf 文件。",
         "Choose delay…": "选择延迟...",
         "Choose material": "选择材料",
-        "Choose the original .3mf with one sliced plate and the same file name.": "选择原版.3mf，切片一盘，文件名相同。",
+        "Choose the original .3mf with one sliced plate and the same file name.": "请选择同名的原始 .3mf 文件，该文件应仅包含一张已切片的打印盘。",
         "Choose the original sliced .3mf for this Creator file.": "为此Creator 文件选择原始切片.3mf。",
         "Choose the original sliced .3mf.": "选择原始切片.3mf。",
         "Choose the sliced .3mf that matches the stored file name.": "选择与存储的文件名匹配的切片.3mf。",
         "Clear error": "清除错误",
         "Clear filters": "清除过滤器",
         "Close": "关闭",
-        "Closed": "关闭",
-        "Collecting readings…": "收集读数...",
+        "Closed": "已关闭",
+        "Collecting readings…": "正在采集读数…",
         "Color": "颜色",
         "Color differs": "颜色不同",
         "Command accepted. The printer has not confirmed the change.": "命令已接受。打印机尚未确认更改。",
@@ -18997,7 +19729,7 @@ TRANSLATIONS = {
         "Empty camera stream": "空相机流",
         "Enable LAN-only mode on the printer.": "在打印机上启用仅LAN 模式。",
         "Ended: {time}": "结束：{time}",
-        "Endstops: {state}": "终点挡块：{state}",
+        "Endstops: {state}": "限位开关：{state}",
         "Enlarge camera": "放大相机",
         "Enter a local IPv4 address for the printer.": "输入打印机的本地IPv4 地址。",
         "Enter a page number": "输入页码",
@@ -19025,7 +19757,6 @@ TRANSLATIONS = {
         "Find printers": "查找打印机",
         "Finish": "完成",
         "Finish ≈ {time}": "表面处理 ≈ {time}",
-        "Finished cleanly": "干净利落地完成",
         "Finished. Printer ready.": "完成。打印机准备就绪。",
         "Firmware": "固件",
         "FlashForge Device Tab is shutting down.": "FlashForge Device Tab 正在关闭。",
@@ -19035,13 +19766,13 @@ TRANSLATIONS = {
         "Heat nozzle to 180 °C": "将喷嘴加热至180°C",
         "Heat off": "加热关闭",
         "Heat the nozzle to at least 180 °C.": "将喷嘴加热到至少180 °C。",
-        "Heating": "供暖",
-        "Heating nozzles: {count}": "加热喷嘴：{count}",
+        "Heating": "正在加热",
+        "Heating nozzles: {count}": "正在加热的喷嘴：{count}",
         "History": "历史记录",
         "Home": "回零",
         "Home all axes": "所有轴回零",
         "Home required": "请先回零",
-        "Home sent. Waiting for the printer to confirm completion.": "上门发送。等待打印机确认完成。",
+        "Home sent. Waiting for the printer to confirm completion.": "已发送回零命令，正在等待打印机确认完成。",
         "Homing…": "归位…",
         "Host notifications": "主机通知",
         "IPv4 address": "IPv4地址",
@@ -19064,9 +19795,9 @@ TRANSLATIONS = {
         "Invalid printer list.": "打印机列表无效。",
         "Invalid request.": "无效请求。",
         "Invalid slice information.": "切片信息无效。",
-        "Job details": "职位详情",
-        "Job status unavailable": "作业状态不可用",
-        "Jobs": "职位",
+        "Job details": "打印任务详情",
+        "Job status unavailable": "无法获取打印任务状态",
+        "Jobs": "打印任务",
         "Large": "大号",
         "Last completed": "最后完成",
         "Last reading: {seconds} s ago": "最后更新：{seconds} 秒前",
@@ -19110,6 +19841,7 @@ TRANSLATIONS = {
         "Move sent to the printer.": "移动发送至打印机。",
         "Move up": "向上移动",
         "Moving…": "移动…",
+        "N": "喷嘴",
         "Name": "姓名",
         "Needs Attention": "需要注意的事项",
         "Network discovery unavailable. Enter the printer address manually.": "网络发现不可用。手动输入打印机地址。",
@@ -19121,7 +19853,7 @@ TRANSLATIONS = {
         "No idle printers.": "没有空闲打印机。",
         "No loaded slot matches": "没有加载的插槽匹配",
         "No matching files": "没有匹配的文件",
-        "No matching jobs.": "没有匹配的职位。",
+        "No matching jobs.": "没有符合条件的打印任务。",
         "No new printers found.": "未找到新打印机。",
         "No preview": "无预览",
         "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.": "尚未记录打印作业。 OrcaSlicer 打开时会记录打印历史记录。",
@@ -19137,7 +19869,7 @@ TRANSLATIONS = {
         "Nozzle": "喷嘴",
         "Nozzle Target": "喷嘴目标温度",
         "Nozzle T{tool}": "喷嘴T{tool}",
-        "Nozzle Z": "喷嘴Z",
+        "Nozzle Z": "喷嘴 Z 轴",
         "Nozzle {temperature} °C": "喷嘴 {temperature} °C",
         "Nozzles": "喷嘴",
         "Nozzles: {count}": "喷嘴：{count}",
@@ -19145,7 +19877,7 @@ TRANSLATIONS = {
         "Offline for at least one minute": "离线至少一分钟",
         "On": "开",
         "One printer per line: address | CheckCode | name | serial number": "每行一台打印机：地址| CheckCode |名称 |序列号",
-        "Open": "打开",
+        "Open": "已打开",
         "Open FlashForge": "打开FlashForge",
         "Open FlashForge Device Tab for a FlashForge printer profile from Speed Dial.": "从快速拨号中打开FlashForge 打印机配置文件的FlashForge Device Tab。",
         "Open FlashForge Device Tab for the current printer profile from Speed Dial.": "从快速拨号中打开当前打印机配置文件的FlashForge Device Tab。",
@@ -19158,11 +19890,11 @@ TRANSLATIONS = {
         "Orange": "橙色",
         "OrcaSlicer is sending a print job. Monitoring will resume when the transfer is complete.": "OrcaSlicer 正在发送打印作业。传输完成后，监控将恢复。",
         "OrcaSlicer is sending a print job. Try again when it finishes.": "OrcaSlicer 正在发送打印作业。完成后重试。",
-        "Original sliced .3mf": "原切片.3mf",
+        "Original sliced .3mf": "已切片的原始 .3mf 文件",
         "Other nozzles": "其他喷嘴",
         "Page number": "页码",
         "Part Cooling Fan": "模型冷却风扇",
-        "Part fan": "部分风扇",
+        "Part fan": "模型风扇",
         "Pause": "暂停",
         "Paused": "暂停",
         "Paused, disconnected or reporting a problem": "暂停、断开连接或报告问题",
@@ -19196,6 +19928,7 @@ TRANSLATIONS = {
         "Print speed": "打印速度",
         "Print started · {file}": "打印开始·{file}",
         "Print stored file": "打印存储文件",
+        "Print success rate": "打印成功率",
         "Print time": "打印时间",
         "Print time: {time}": "打印时间：{time}",
         "Printer": "打印机",
@@ -19204,7 +19937,7 @@ TRANSLATIONS = {
         "Printer Readings": "打印机读数",
         "Printer accepted the command.": "打印机接受命令。",
         "Printer accepted the command. Axis limits could not be checked.": "打印机接受命令。无法检查轴限制。",
-        "Printer camera feed": "打印机摄像头进给",
+        "Printer camera feed": "打印机摄像头画面",
         "Printer confirmed the nozzle target.": "打印机已确认喷嘴目标。",
         "Printer confirmed the shutdown timer setting.": "打印机确认关机定时器设置。",
         "Printer confirmed {command} · {state}": "打印机确认{command}·{state}",
@@ -19222,7 +19955,7 @@ TRANSLATIONS = {
         "Printer has not confirmed the nozzle target. Check Printer Readings.": "打印机未确认喷嘴目标。检查打印机读数。",
         "Printer jobs": "打印机作业",
         "Printer must be idle.": "打印机必须处于空闲状态。",
-        "Printer must be idle. Wait for movement or Home to finish.": "打印机必须处于空闲状态。等待移动或主页完成。",
+        "Printer must be idle. Wait for movement or Home to finish.": "打印机必须处于空闲状态。请等待移动或回零完成。",
         "Printer must be idle. {reason}": "打印机必须处于空闲状态。 {reason}",
         "Printer rejected the selected file.": "打印机拒绝选择的文件。",
         "Printer rejected {command}.": "打印机拒绝{command}。",
@@ -19238,7 +19971,7 @@ TRANSLATIONS = {
         "Profile changed": "个人资料已更改",
         "Purple": "紫色",
         "Range": "范围",
-        "Reading materials…": "阅读材料……",
+        "Reading materials…": "正在读取耗材信息…",
         "Reading printer status…": "读取打印机状态...",
         "Readings delayed": "读数延迟",
         "Readings unavailable": "读数不可用",
@@ -19249,9 +19982,9 @@ TRANSLATIONS = {
         "Refresh": "刷新",
         "Refresh the Creator printer's file list first.": "首先刷新Creator打印机的文件列表。",
         "Refresh the file list and check the loaded materials.": "刷新文件列表，查看加载的素材。",
-        "Release motors": "释放电机",
+        "Release motors": "解除电机锁定",
         "Remove": "删除",
-        "Replace Printer tab": "更换打印机选项卡",
+        "Replace Printer tab": "替换“打印机”选项卡的内容",
         "Request failed.": "请求失败。",
         "Restored the printer's original web page.": "恢复了打印机的原始网页。",
         "Result": "结果",
@@ -19289,9 +20022,10 @@ TRANSLATIONS = {
         "Serial": "串口",
         "Serial number": "序列号",
         "Serial number (required for Creator 5 / 5 Pro)": "序列号（Creator 5 / 5 Pro 必需）",
-        "Set target": "设定目标",
+        "Set temperature": "设置目标温度",
+        "Heat": "加热",
         "Set up your first printer": "设置您的第一台打印机",
-        "Setting light…": "设置灯…",
+        "Setting light…": "正在切换照明…",
         "Settings": "设置",
         "Settings are unavailable.": "设置不可用。",
         "Show file previews": "显示文件预览",
@@ -19309,8 +20043,8 @@ TRANSLATIONS = {
         "Stored files": "存储的文件",
         "System theme": "系统主题",
         "Tab placement": "选项卡放置",
-        "Tan": "棕褐色",
-        "Target": "目标",
+        "Tan": "浅棕色",
+        "Target": "目标温度",
         "Teal": "青色",
         "Temperature change over the last 5 minutes": "最近5分钟温度变化",
         "Temperatures": "温度",
@@ -19350,7 +20084,7 @@ TRANSLATIONS = {
         "The printer must be idle.": "打印机必须处于空闲状态。",
         "The printer rejected the HTTP request (code {code}).": "打印机拒绝HTTP 请求（代码{code}）。",
         "The printer reported an active print. Check the printer before retrying.": "打印机报告正在进行打印。重试之前请检查打印机。",
-        "The printer requires homing before manual movement.": "手动移动前，打印机需要回零。",
+        "The printer requires homing before manual movement.": "手动移动各轴前，请先回零。",
         "The printer response is too large": "打印机响应太大",
         "The printer returned an invalid file list.": "打印机返回无效的文件列表。",
         "The printer returned invalid HTTP data.": "打印机返回无效的HTTP 数据。",
@@ -19369,8 +20103,8 @@ TRANSLATIONS = {
         "Timer {minutes} min": "定时器{minutes}分钟",
         "Total pages: {count}": "总页数：{count}",
         "Totals": "总计",
-        "Transport: {transport}": "交通：{transport}",
-        "Travel limit": "行程限制",
+        "Transport: {transport}": "协议：{transport}",
+        "Travel limit": "轴行程限制",
         "Trend unavailable": "趋势不可用",
         "Unavailable": "不可用",
         "Unexpected response from the printer": "打印机出现意外响应",
@@ -19399,7 +20133,7 @@ TRANSLATIONS = {
         "Waiting for Home to finish…": "正在等待回零完成…",
         "Waiting for job status": "等待作业状态",
         "Waiting for printer…": "等待打印机...",
-        "Waiting for readings": "等待读数",
+        "Waiting for readings": "正在等待读数",
         "Waiting for temperature readings": "等待温度读数",
         "Waiting for the printer to confirm calibration.": "等待打印机确认校准。",
         "Waiting for the printer…": "等待打印机...",
@@ -19415,6 +20149,15 @@ TRANSLATIONS = {
         "{time} left": "剩余 {time}",
     },
     "zh-TW": {
+        "While this tab is open": "此分頁開啟時",
+        "Only during an active print": "僅在有進行中的列印工作時",
+        "Waiting for part removal": "等待取下列印件",
+        "Wait for part removal": "等待取下列印件",
+        "Bed is clear": "熱床已清空",
+        "Chart layout": "圖表配置",
+        "Shared scale": "共用刻度",
+        "Separate scales": "個別刻度",
+        "Select at least one temperature line.": "請至少選擇一條溫度曲線。",
         " · Total print time: {time}": " ·總列印時間：{time}",
         "0 min": "0分鐘",
         "1 mm": "1毫米",
@@ -19436,23 +20179,24 @@ TRANSLATIONS = {
         "Allow access to the printer, then reload the plugin.": "允許存取印表機，然後重新載入插件。",
         "Another print source is being read.": "正在讀取另一個列印來源。",
         "Appearance": "外觀",
-        "Apply": "申請",
+        "Apply": "套用",
         "Attention": "注意",
         "Authenticated readings: {availability}": "認證讀數：{availability}",
         "Auto shutdown": "自動關機",
         "Axes": "軸",
         "Axes busy": "軸忙",
-        "Axis movement step": "軸移動步數",
+        "Axis movement step": "軸移動步距",
+        "B": "列印板",
         "Basic readings received. CheckCode could not be verified.": "收到基本讀數。 CheckCode 無法驗證。",
         "Bed": "列印板",
-        "Bed Target": "熱床目標溫度",
-        "Bed Z": "床Z",
+        "Bed Target": "列印板目標溫度",
+        "Bed Z": "列印板 Z 軸",
         "Bed leveling": "熱床調平",
         "Black": "黑色",
         "Blue": "藍色",
         "Brown": "棕色",
         "Browse files": "瀏覽文件",
-        "Build volume": "建構體積",
+        "Build volume": "成型空間",
         "Busy": "忙",
         "Calibrating": "校準",
         "Calibration": "校準",
@@ -19468,10 +20212,10 @@ TRANSLATIONS = {
         "Cancel": "取消",
         "Cancel print?": "取消列印？",
         "Canceled": "取消",
-        "Canceling": "取消",
+        "Canceling": "正在取消",
         "Card size": "卡片尺寸",
-        "Chamber": "室",
-        "Chamber light": "箱體燈",
+        "Chamber": "列印腔",
+        "Chamber light": "列印腔照明",
         "Chart nozzle": "圖表噴嘴",
         "Chart of actual and target temperatures for the nozzle and bed": "噴嘴和床的實際溫度和目標溫度圖表",
         "Check connection": "檢查連接",
@@ -19495,20 +20239,20 @@ TRANSLATIONS = {
         "Choose a material and color supported by this printer.": "選擇本印表機支援的材質和顏色。",
         "Choose a nonempty print file no larger than 128 MB.": "選擇不大於128 MB 的非空白列印檔案。",
         "Choose a print file no larger than 128 MB.": "選擇不大於128 MB 的列印檔案。",
-        "Choose a sliced .3mf with one plate and filament information.": "選擇一塊板和燈絲訊息的切片.3mf。",
-        "Choose a sliced .3mf with one plate.": "選擇一盤切片.3mf。",
+        "Choose a sliced .3mf with one plate and filament information.": "請選擇包含一張已切片列印板與線材資訊的 .3mf 檔案。",
+        "Choose a sliced .3mf with one plate.": "請選擇只包含一張已切片列印板的 .3mf 檔案。",
         "Choose a text .gcode file or a sliced .3mf.": "選擇文字.gcode 檔案或切片.3mf 檔案。",
         "Choose delay…": "選擇延遲...",
         "Choose material": "選擇材料",
-        "Choose the original .3mf with one sliced plate and the same file name.": "選擇原版.3mf，切片一盤，檔案名稱相同。",
+        "Choose the original .3mf with one sliced plate and the same file name.": "請選擇同名的原始 .3mf 檔案，且檔案須只包含一張已切片的列印板。",
         "Choose the original sliced .3mf for this Creator file.": "為此Creator 檔案選擇原始切片.3mf。",
         "Choose the original sliced .3mf.": "選擇原始切片.3mf。",
         "Choose the sliced .3mf that matches the stored file name.": "選擇與儲存的檔案名稱相符的切片.3mf。",
         "Clear error": "清除錯誤",
         "Clear filters": "清除過濾器",
         "Close": "關閉",
-        "Closed": "關閉",
-        "Collecting readings…": "收集讀數...",
+        "Closed": "已關閉",
+        "Collecting readings…": "正在收集讀數…",
         "Color": "顏色",
         "Color differs": "顏色不同",
         "Command accepted. The printer has not confirmed the change.": "指令已接受。印表機尚未確認更改。",
@@ -19577,7 +20321,7 @@ TRANSLATIONS = {
         "Empty camera stream": "空相機流",
         "Enable LAN-only mode on the printer.": "在印表機上啟用僅LAN 模式。",
         "Ended: {time}": "結束：{time}",
-        "Endstops: {state}": "終點擋塊：{state}",
+        "Endstops: {state}": "限位開關：{state}",
         "Enlarge camera": "放大相機",
         "Enter a local IPv4 address for the printer.": "輸入印表機的本機IPv4 位址。",
         "Enter a page number": "輸入頁碼",
@@ -19605,7 +20349,6 @@ TRANSLATIONS = {
         "Find printers": "尋找印表機",
         "Finish": "完成",
         "Finish ≈ {time}": "表面處理 ≈ {time}",
-        "Finished cleanly": "乾淨俐落地完成",
         "Finished. Printer ready.": "完成。印表機準備就緒。",
         "Firmware": "韌體",
         "FlashForge Device Tab is shutting down.": "FlashForge Device Tab 正在關閉。",
@@ -19615,13 +20358,13 @@ TRANSLATIONS = {
         "Heat nozzle to 180 °C": "將噴嘴加熱至180°C",
         "Heat off": "加熱關閉",
         "Heat the nozzle to at least 180 °C.": "將噴嘴加熱至至少180 °C。",
-        "Heating": "暖氣",
-        "Heating nozzles: {count}": "加熱噴嘴：{count}",
+        "Heating": "正在加熱",
+        "Heating nozzles: {count}": "正在加熱的噴嘴：{count}",
         "History": "歷史記錄",
         "Home": "回原點",
         "Home all axes": "所有軸回原點",
         "Home required": "請先回原點",
-        "Home sent. Waiting for the printer to confirm completion.": "上門發送。等待印表機確認完成。",
+        "Home sent. Waiting for the printer to confirm completion.": "已傳送回原點指令，正在等待印表機確認完成。",
         "Homing…": "歸位…",
         "Host notifications": "主機通知",
         "IPv4 address": "IPv4位址",
@@ -19644,9 +20387,9 @@ TRANSLATIONS = {
         "Invalid printer list.": "印表機清單無效。",
         "Invalid request.": "無效請求。",
         "Invalid slice information.": "切片資訊無效。",
-        "Job details": "職位詳情",
-        "Job status unavailable": "作業狀態不可用",
-        "Jobs": "職位",
+        "Job details": "列印工作詳細資料",
+        "Job status unavailable": "無法取得列印工作狀態",
+        "Jobs": "列印工作",
         "Large": "大號",
         "Last completed": "最後完成",
         "Last reading: {seconds} s ago": "最後更新：{seconds} 秒前",
@@ -19690,6 +20433,7 @@ TRANSLATIONS = {
         "Move sent to the printer.": "移動傳送至印表機。",
         "Move up": "向上移動",
         "Moving…": "移動…",
+        "N": "噴嘴",
         "Name": "姓名",
         "Needs Attention": "需要注意的事項",
         "Network discovery unavailable. Enter the printer address manually.": "網路發現不可用。手動輸入印表機地址。",
@@ -19701,7 +20445,7 @@ TRANSLATIONS = {
         "No idle printers.": "沒有空閒印表機。",
         "No loaded slot matches": "沒有載入的插槽匹配",
         "No matching files": "沒有符合的檔案",
-        "No matching jobs.": "沒有符合的職位。",
+        "No matching jobs.": "沒有符合條件的列印工作。",
         "No new printers found.": "未找到新印表機。",
         "No preview": "無預覽",
         "No print jobs recorded yet. Print history is recorded while OrcaSlicer is open.": "尚未記錄列印作業。 OrcaSlicer 開啟時會記錄列印歷史記錄。",
@@ -19717,7 +20461,7 @@ TRANSLATIONS = {
         "Nozzle": "噴嘴",
         "Nozzle Target": "噴嘴目標溫度",
         "Nozzle T{tool}": "噴嘴T{tool}",
-        "Nozzle Z": "噴嘴Z",
+        "Nozzle Z": "噴嘴 Z 軸",
         "Nozzle {temperature} °C": "噴嘴 {temperature} °C",
         "Nozzles": "噴嘴",
         "Nozzles: {count}": "噴嘴：{count}",
@@ -19725,7 +20469,7 @@ TRANSLATIONS = {
         "Offline for at least one minute": "離線至少一分鐘",
         "On": "開",
         "One printer per line: address | CheckCode | name | serial number": "每行一台印表機：位址| CheckCode |名稱 |序號",
-        "Open": "打開",
+        "Open": "已開啟",
         "Open FlashForge": "開啟FlashForge",
         "Open FlashForge Device Tab for a FlashForge printer profile from Speed Dial.": "從快速撥號開啟FlashForge 印表機設定檔的FlashForge Device Tab。",
         "Open FlashForge Device Tab for the current printer profile from Speed Dial.": "從快速撥號開啟目前印表機設定檔的FlashForge Device Tab。",
@@ -19738,11 +20482,11 @@ TRANSLATIONS = {
         "Orange": "橘色",
         "OrcaSlicer is sending a print job. Monitoring will resume when the transfer is complete.": "OrcaSlicer 正在傳送列印作業。傳輸完成後，監控將恢復。",
         "OrcaSlicer is sending a print job. Try again when it finishes.": "OrcaSlicer 正在傳送​​列印作業。完成後重試。",
-        "Original sliced .3mf": "原切片.3mf",
+        "Original sliced .3mf": "已切片的原始 .3mf 檔案",
         "Other nozzles": "其他噴嘴",
         "Page number": "頁碼",
         "Part Cooling Fan": "模型冷卻風扇",
-        "Part fan": "部分風扇",
+        "Part fan": "模型風扇",
         "Pause": "暫停",
         "Paused": "暫停",
         "Paused, disconnected or reporting a problem": "暫停、斷開連線或回報問題",
@@ -19776,6 +20520,7 @@ TRANSLATIONS = {
         "Print speed": "列印速度",
         "Print started · {file}": "列印開始·{file}",
         "Print stored file": "列印儲存文件",
+        "Print success rate": "列印成功率",
         "Print time": "列印時間",
         "Print time: {time}": "列印時間：{time}",
         "Printer": "印表機",
@@ -19784,7 +20529,7 @@ TRANSLATIONS = {
         "Printer Readings": "印表機讀數",
         "Printer accepted the command.": "印表機接受指令。",
         "Printer accepted the command. Axis limits could not be checked.": "印表機接受指令。無法檢查軸限制。",
-        "Printer camera feed": "印表機攝影機進給",
+        "Printer camera feed": "印表機攝影機畫面",
         "Printer confirmed the nozzle target.": "印表機已確認噴嘴目標。",
         "Printer confirmed the shutdown timer setting.": "印表機確認關機定​​時器設定。",
         "Printer confirmed {command} · {state}": "印表機確認{command}·{state}",
@@ -19802,7 +20547,7 @@ TRANSLATIONS = {
         "Printer has not confirmed the nozzle target. Check Printer Readings.": "印表機未確認噴嘴目標。檢查印表機讀數。",
         "Printer jobs": "印表機作業",
         "Printer must be idle.": "印表機必須處於閒置狀態。",
-        "Printer must be idle. Wait for movement or Home to finish.": "印表機必須處於閒置狀態。等待移動或主頁完成。",
+        "Printer must be idle. Wait for movement or Home to finish.": "印表機必須處於閒置狀態。請等待移動或回原點完成。",
         "Printer must be idle. {reason}": "印表機必須處於閒置狀態。 {reason}",
         "Printer rejected the selected file.": "印表機拒絕選擇的文件。",
         "Printer rejected {command}.": "印表機拒絕{command}。",
@@ -19818,7 +20563,7 @@ TRANSLATIONS = {
         "Profile changed": "個人資料已更改",
         "Purple": "紫色",
         "Range": "範圍",
-        "Reading materials…": "閱讀材料…",
+        "Reading materials…": "正在讀取線材資料…",
         "Reading printer status…": "讀取印表機狀態...",
         "Readings delayed": "讀數延遲",
         "Readings unavailable": "讀數不可用",
@@ -19829,9 +20574,9 @@ TRANSLATIONS = {
         "Refresh": "刷新",
         "Refresh the Creator printer's file list first.": "先刷新Creator印表機的文件清單。",
         "Refresh the file list and check the loaded materials.": "刷新文件列表，查看已載入的素材。",
-        "Release motors": "釋放電機",
+        "Release motors": "解除馬達鎖定",
         "Remove": "刪除",
-        "Replace Printer tab": "更換印表機標籤",
+        "Replace Printer tab": "取代「印表機」分頁的內容",
         "Request failed.": "請求失敗。",
         "Restored the printer's original web page.": "恢復了印表機的原始網頁。",
         "Result": "結果",
@@ -19869,9 +20614,10 @@ TRANSLATIONS = {
         "Serial": "串口",
         "Serial number": "序號",
         "Serial number (required for Creator 5 / 5 Pro)": "序號（Creator 5 / 5 Pro 必需）",
-        "Set target": "設定目標",
+        "Set temperature": "設定目標溫度",
+        "Heat": "加熱",
         "Set up your first printer": "設定您的第一台印表機",
-        "Setting light…": "設定燈…",
+        "Setting light…": "正在切換照明…",
         "Settings": "設定",
         "Settings are unavailable.": "設定不可用。",
         "Show file previews": "顯示文件預覽",
@@ -19889,8 +20635,8 @@ TRANSLATIONS = {
         "Stored files": "儲存的文件",
         "System theme": "系統主題",
         "Tab placement": "選項卡放置",
-        "Tan": "棕褐色",
-        "Target": "目標",
+        "Tan": "淺棕色",
+        "Target": "目標溫度",
         "Teal": "青色",
         "Temperature change over the last 5 minutes": "最近5分鐘溫度變化",
         "Temperatures": "溫度",
@@ -19930,7 +20676,7 @@ TRANSLATIONS = {
         "The printer must be idle.": "印表機必須處於閒置狀態。",
         "The printer rejected the HTTP request (code {code}).": "印表機拒絕HTTP 請求（代碼{code}）。",
         "The printer reported an active print. Check the printer before retrying.": "印表機報告正在進行列印。重試前請檢查印表機。",
-        "The printer requires homing before manual movement.": "手動移動前，印表機需要回零。",
+        "The printer requires homing before manual movement.": "手動移動各軸前，請先回原點。",
         "The printer response is too large": "印表機回應太大",
         "The printer returned an invalid file list.": "印表機傳回無效的文件清單。",
         "The printer returned invalid HTTP data.": "印表機傳回無效的HTTP 資料。",
@@ -19949,8 +20695,8 @@ TRANSLATIONS = {
         "Timer {minutes} min": "定時器{minutes}分鐘",
         "Total pages: {count}": "總頁數：{count}",
         "Totals": "總計",
-        "Transport: {transport}": "交通：{transport}",
-        "Travel limit": "行程限制",
+        "Transport: {transport}": "通訊協定：{transport}",
+        "Travel limit": "軸行程限制",
         "Trend unavailable": "趨勢不可用",
         "Unavailable": "不可用",
         "Unexpected response from the printer": "印表機出現意外回應",
@@ -19979,7 +20725,7 @@ TRANSLATIONS = {
         "Waiting for Home to finish…": "正在等待回原點完成…",
         "Waiting for job status": "等待作業狀態",
         "Waiting for printer…": "等待印表機...",
-        "Waiting for readings": "等待讀數",
+        "Waiting for readings": "正在等候讀數",
         "Waiting for temperature readings": "等待溫度讀數",
         "Waiting for the printer to confirm calibration.": "等待印表機確認校準。",
         "Waiting for the printer…": "等待印表機...",

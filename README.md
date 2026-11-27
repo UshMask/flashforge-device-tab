@@ -5,8 +5,8 @@ is left, check nozzle and bed temperatures, or open the printer camera.
 Switch between your local printers and review completed jobs after a restart.
 Printers with a working authenticated control API also offer pause, resume and cancel.
 
-**Version 1.13.0** brings printer status and print jobs together in **All printers**.
-Open **Monitor** for a single printer or **History** for past jobs.
+**Version 1.14.0** adds a bed-clear confirmation in **All printers**, configurable
+temperature plots, and print history across printers with a per-printer filter.
 
 [![Monitor with a print in progress](docs/orca-cloud/01-monitor.png)](docs/orca-cloud/01-monitor.png)
 
@@ -16,7 +16,7 @@ Open **Monitor** for a single printer or **History** for past jobs.
 
 The screenshots show the plugin running with demonstration data. Select an image for a closer look.
 
-[Appearance settings for theme, density and individual views](docs/orca-cloud/06-appearance.png)
+[Monitor settings for temperature plots and readings](docs/orca-cloud/06-monitor-settings.png)
 
 ## Manual control by model
 
@@ -58,8 +58,9 @@ unavailable, the panel stays open and commands are disabled until fresh readings
   appear first, and the catalog remembers that order across restarts.
 - **Material station** — view, then edit a slot's material and color while the
   printer and station are idle on supported AD5X and Creator 5 models.
-- **Print history** — jobs with start, end, duration and result, kept on disk so
-  it survives OrcaSlicer restarts.
+- **Print history** — jobs from all configured printers and archived printers
+  with local history files. Filter by printer or open a printer's own history
+  from **Monitor**. Each record includes the start, end, duration and result.
 - **Several printers** — **All printers** shows one row per configured printer,
   including idle and disconnected printers. Search by printer or job and
   filter by status. See progress, the model preview and the live camera for
@@ -73,10 +74,10 @@ unavailable, the panel stays open and commands are disabled until fresh readings
 - **Save snapshot** — one camera frame, saved by the browser.
 - **Host notifications** — “Print finished”, “Print cancelled”, “Printer error”
   appear in the 3D view, so you notice without watching the tab.
-- **Display settings** — choose a theme and layout density in **Settings →
-  Appearance**. Open **Printer Files** there to set card size, rows per page
-  and preview visibility. The other subsections control the temperature chart
-  and printer details, live cameras and job details, and print history totals.
+- **Settings** — **Appearance** offers theme and layout density. Open
+  **Monitor**, **All printers**, **Printer Files** or **Print History** directly
+  for settings specific to that area. **Connection** holds printer addresses
+  and credentials.
 
 ## Install
 

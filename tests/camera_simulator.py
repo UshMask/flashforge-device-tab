@@ -39,7 +39,8 @@ def main():
         class Camera(BaseHTTPRequestHandler):
             def do_GET(self):
                 nonlocal frames, sessions, direct_sessions, direct_frames
-                if self.path in {"/simulator/ready", "/simulator/printing"}:
+                if self.path in {"/simulator/busy", "/simulator/completed", "/simulator/paused",
+                                  "/simulator/ready", "/simulator/printing"}:
                     creator.detail["status"] = self.path.rsplit("/", 1)[1]
                     self.send_response(204)
                     self.end_headers()
