@@ -5,9 +5,8 @@ is left, check nozzle and bed temperatures, or open the printer camera.
 Switch between your local printers and review completed jobs after a restart.
 Printers with a working authenticated control API also offer pause, resume and cancel.
 
-**Version 1.14.2** adds a first-printer wizard, tab placement in Monitor settings
-and a taller Print job card by default. OrcaSlicer diagnostics now explain
-when the local monitor port is unavailable.
+**Version 1.14.3** resumes live monitoring after a successful connection check
+following an access failure and preserves the original error if startup fails.
 
 [![Monitor with a print in progress](docs/orca-cloud/01-monitor.png)](docs/orca-cloud/01-monitor.png)
 

@@ -4,7 +4,7 @@
 # name = "FlashForge Device Tab"
 # description = "Follow local FlashForge prints in OrcaSlicer's Device or FlashForge tab."
 # author = "Max"
-# version = "1.14.2"
+# version = "1.14.3"
 # ///
 import base64
 import errno
@@ -1330,7 +1330,7 @@ async function diagnose(host) {
     const url = host ? new URL('/' + encodeURIComponent(host) + '/diagnostics', location.origin) : endpoint('/diagnostics');
     const data = await postLocal('diagnostics', url);
     if (!current()) return;
-    showInfo(t("Connection check"), ['FlashForge Device Tab 1.14.2', t("Transport: {transport}", {transport:data.transport}), t("Status: received"),
+    showInfo(t("Connection check"), ['FlashForge Device Tab 1.14.3', t("Transport: {transport}", {transport:data.transport}), t("Status: received"),
       t("Authenticated readings: {availability}", {availability:data.authenticated ? t("available") : t("unavailable")}),
       t("Camera URL: {status}", {status:data.cameraReported ? t("reported; stream not tested") : t("not reported")})].join('\n'), true);
   } catch (error) { if (current()) showInfo(t("Connection check"), error.message, true); }
@@ -6131,6 +6131,12 @@ class MonitorHandler(BaseHTTPRequestHandler):
             try:
                 with self.server.printer_io():
                     status = FlashForge(endpoint, entry["code"], entry["serial"]).status(True)
+                    monitor = self.server.monitors.get(endpoint)
+                    if monitor is not None:
+                        with monitor.state_lock:
+                            if monitor.permission_denied:
+                                monitor.permission_denied = False
+                                monitor.next_due = 0.0
                 self.reply_json({"transport": status["transport"], "authenticated": status["jobControls"],
                                  "cameraReported": bool(status["cameraUrl"]), "telemetry": True})
             except UploadInProgress:
@@ -6737,6 +6743,7 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         except Exception:
             server.server_close()
             raise
+        self._server = server
         for port in LEGACY_WEB_PORTS:
             try:
                 alias = LoopbackHTTPServer((WEB_HOST, port), AliasRedirectHandler)
@@ -6746,7 +6753,6 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                              name=f'FlashForge Device Tab alias {port}', daemon=True).start()
             self._aliases = getattr(self, "_aliases", [])
             self._aliases.append(alias)
-        self._server = server
         FlashForgeService.instance = self
         # Preset transactions block while Orca dispatches to the UI. Never run
         # them inside on_load or a lifecycle callback, which may own that UI.
@@ -6834,6 +6840,8 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             pass
 
     def on_unload(self):
+        if self._server is None:
+            return
         self._stopping.set()
         self._view_refresh.set()
         self.sync_next_placement()
@@ -6843,10 +6851,9 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             alias.shutdown()
             alias.server_close()
         self._aliases = []
-        if self._server is not None:
-            self._server.shutdown()
-            self._server.server_close()
-            self._server = None
+        self._server.shutdown()
+        self._server.server_close()
+        self._server = None
 
     def on_lifecycle_event(self, event, context):
         server = self._server
