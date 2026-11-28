@@ -5,7 +5,8 @@ is left, check nozzle and bed temperatures, or open the printer camera.
 Switch between your local printers and review completed jobs after a restart.
 Printers with a working authenticated control API also offer pause, resume and cancel.
 
-**Version 1.14.4** ships a smaller plugin file and keeps all interface languages.
+**Version 1.14.5** checks the observed print job before sending commands, keeps
+the Home requirement across address changes, and lets you retry first-printer setup.
 
 [![Monitor with a print in progress](docs/orca-cloud/01-monitor.png)](docs/orca-cloud/01-monitor.png)
 

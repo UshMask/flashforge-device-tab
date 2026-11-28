@@ -136,6 +136,33 @@ function section(from, until) {
   return script.slice(start, end);
 }
 
+test('Monitor cancels only the job that was armed', async () => {
+  const armed = new Set();
+  const cancelPrint = {dataset:{}, classList: {
+    add: name => armed.add(name), remove: name => armed.delete(name), contains: name => armed.has(name),
+  }};
+  const buttons = [cancelPrint, {}, {}];
+  const nodes = {cancelPrint, pausePrint:buttons[1], resumePrint:buttons[2],
+    actionStatus:{}, jobActions:{querySelectorAll:()=>buttons}};
+  const requests = [];
+  const context = panelContext({
+    el:id=>nodes[id], setTimeout:()=>{}, renderManual:()=>{}, endpoint:value=>value,
+    jobActionLabel:value=>value, stateLabel:value=>value, updateStatus:async()=>{},
+    fetch:async (_url, options) => { requests.push(JSON.parse(options.body)); return {ok:true, json:async()=>({state:'CANCELING'})}; },
+  });
+  vm.runInContext("let manual, manualMotion, calibration, observedJob = ''", context);
+  vm.runInContext(section('function updateActions', 'function saveCameraBlob'), context);
+  vm.runInContext(section("el('cancelPrint').onclick =", "el('cameraSnapshot').onclick"), context);
+  context.updateActions({active:true, jobControls:true, file:'same.3mf', jobToken:'old'});
+  cancelPrint.onclick();
+  context.updateActions({active:true, jobControls:true, file:'same.3mf', jobToken:'new'});
+  assert.equal(armed.has('armed'), false);
+  cancelPrint.onclick();
+  assert.deepEqual(requests, []);
+  cancelPrint.onclick();
+  assert.deepEqual(requests, [{action:'cancel', job:'new'}]);
+});
+
 test('temperature trend compares recent readings with the selected nozzle five minutes earlier', () => {
   const nodes = {chartTrend:{}, chartTrendCompact:{}};
   const now = Date.now();

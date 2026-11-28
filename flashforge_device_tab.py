@@ -4,7 +4,7 @@
 # name = "FlashForge Device Tab"
 # description = "Follow local FlashForge prints in OrcaSlicer's Device or FlashForge tab."
 # author = "Max"
-# version = "1.14.4"
+# version = "1.14.5"
 # ///
 import base64
 import errno
@@ -1330,7 +1330,7 @@ async function diagnose(host) {
     const url = host ? new URL('/' + encodeURIComponent(host) + '/diagnostics', location.origin) : endpoint('/diagnostics');
     const data = await postLocal('diagnostics', url);
     if (!current()) return;
-    showInfo(t("Connection check"), ['FlashForge Device Tab 1.14.4', t("Transport: {transport}", {transport:data.transport}), t("Status: received"),
+    showInfo(t("Connection check"), ['FlashForge Device Tab 1.14.5', t("Transport: {transport}", {transport:data.transport}), t("Status: received"),
       t("Authenticated readings: {availability}", {availability:data.authenticated ? t("available") : t("unavailable")}),
       t("Camera URL: {status}", {status:data.cameraReported ? t("reported; stream not tested") : t("not reported")})].join('\n'), true);
   } catch (error) { if (current()) showInfo(t("Connection check"), error.message, true); }
@@ -1480,6 +1480,7 @@ let page = 0;
 let renderVersion = 0;
 let polling = false;
 let jobFile = '';
+let observedJob = '';
 let lastCompletedFile = '';
 let jobReady = false;
 let previewKey = '';
@@ -2447,22 +2448,23 @@ function updateActions(data, preserveManual = false) {
     : data.manual || null;
   renderManual();
   const state = data.state || '';
-  const paused = data.jobControls && state === 'PAUSED';
-  const running = data.jobControls && data.active && !paused;
+  observedJob = data.active && data.jobControls ? data.jobToken || '' : '';
+  const paused = observedJob && state === 'PAUSED';
+  const running = observedJob && !paused && state !== 'PAUSING';
   el('pausePrint').hidden = !running;
   el('resumePrint').hidden = !paused;
   el('cancelPrint').hidden = !(running || paused);
   const cancel = el('cancelPrint');
-  if (cancel.classList.contains('armed') && (!data.jobControls || !data.active || cancel.dataset.job !== data.file)) {
+  if (cancel.classList.contains('armed') && cancel.dataset.job !== observedJob) {
     cancel.classList.remove('armed');
     cancel.textContent = t("Cancel");
   }
 }
 
-async function runAction(action) {
+async function runAction(action, job = observedJob) {
   const status = el('actionStatus');
   const buttons = el('jobActions').querySelectorAll('button');
-  if (Array.from(buttons).some(button => button.disabled)) return;
+  if (!job || job !== observedJob || Array.from(buttons).some(button => button.disabled)) return;
   for (const button of buttons) button.disabled = true;
   status.hidden = false;
   status.textContent = t("Checking the result of {command}…", {command:jobActionLabel(action)});
@@ -2470,7 +2472,7 @@ async function runAction(action) {
     const response = await fetch(endpoint('/action'), {
       method: 'POST',
       headers: {'Content-Type': 'application/json', 'X-FlashForge-Tab-Action': 'action'},
-      body: JSON.stringify({action}),
+      body: JSON.stringify({action, job}),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || t("The printer did not accept the command."));
@@ -3184,20 +3186,20 @@ async function loadJobTilePreview(tile, item) {
 }
 
 async function runJobTileAction(tile, action) {
-  if (tile.pending || !tile.active || !tile.item.jobControls || tile.item.error || !tile.file) return;
+  if (tile.pending || !tile.active || !tile.item.jobControls || tile.item.error || !tile.job) return;
   const buttons = tile.node.querySelectorAll('[data-print-action],[data-print-cancel]');
   const result = tile.node.querySelector('[data-job-result]');
   tile.pending = true;
   buttons.forEach(button => { button.disabled = true; });
   result.textContent = t("Checking printer…");
-  const filename = tile.file;
+  const job = tile.job;
   try {
-    const data = await postLocal('action', jobEndpoint('/action', tile.item.host), {action, file:filename});
-    if (tile.active && tile.file === filename)
+    const data = await postLocal('action', jobEndpoint('/action', tile.item.host), {action, job});
+    if (tile.active && tile.job === job)
       result.textContent = t("Printer confirmed · {state}", {state:stateLabel(data.state)});
     await updateStatus();
   } catch (error) {
-    if (tile.active && tile.file === filename)
+    if (tile.active && tile.job === job)
       result.textContent = error.message || t("Command result unavailable.");
   } finally {
     tile.pending = false;
@@ -3278,10 +3280,12 @@ function createJobTile(item) {
 function updateTileJob(tile, item) {
   const active = Boolean(item.printing);
   const file = active ? item.file : '';
-  if (tile.active === active && tile.file === file) return;
+  const job = active ? item.jobToken || '' : '';
+  if (tile.active === active && tile.file === file && tile.job === job) return;
   const {node} = tile;
   tile.active = active;
   tile.file = file;
+  tile.job = job;
   tile.cancelUntil = 0;
   tile.controlState = null;
   node.querySelector('details').open = false;
@@ -3333,7 +3337,7 @@ function updateJobTile(tile, item) {
   for (const selector of ['[data-files]', '[data-repeat]']) node.querySelector(selector).hidden = true;
   set('.jobs-state', item.error ? t("Disconnected") : stateLabel(item.status) || t("Printing"));
   set('.jobs-file', item.file || t("Active print"));
-  const canControl = Boolean(item.jobControls && !item.error && item.file && item.state !== 'PAUSING');
+  const canControl = Boolean(item.jobControls && !item.error && tile.job && item.state !== 'PAUSING');
   node.querySelector('[data-print-action]').hidden = !canControl;
   node.querySelector('[data-print-action]').dataset.icon = item.state === 'PAUSED' ? 'play' : 'pause';
   node.querySelector('[data-print-cancel]').hidden = !canControl;
@@ -3536,12 +3540,14 @@ el('pausePrint').onclick = () => runAction('pause');
 el('resumePrint').onclick = () => runAction('resume');
 el('cancelPrint').onclick = () => {
   const button = el('cancelPrint');
+  if (!observedJob) return;
   if (!button.classList.contains('armed')) {
     button.classList.add('armed');
-    button.dataset.job = jobFile;
+    button.dataset.job = observedJob;
     button.textContent = t("Cancel print?");
+    const armedJob = observedJob;
     setTimeout(() => {
-      if (button.classList.contains('armed')) {
+      if (button.classList.contains('armed') && button.dataset.job === armedJob) {
         button.classList.remove('armed');
         button.textContent = t("Cancel");
       }
@@ -3550,7 +3556,7 @@ el('cancelPrint').onclick = () => {
   }
   button.classList.remove('armed');
   button.textContent = t("Cancel");
-  runAction('cancel');
+  runAction('cancel', button.dataset.job);
 };
 el('cameraSnapshot').onclick = downloadSnapshot;
 
@@ -5333,6 +5339,19 @@ class PrintHistory:
             self.save(now)
 
 
+def same_observed_job(previous, current):
+    if not previous or not previous.get("active") or not current.get("active"):
+        return False
+    if (not current.get("file") or previous.get("file") != current["file"]
+            or previous.get("info", {}).get("serial") != current.get("info", {}).get("serial")):
+        return False
+    for key in ("layer", "elapsed", "percent"):
+        before, after = previous.get(key), current.get(key)
+        if before is not None and after is not None and after < before:
+            return False
+    return True
+
+
 class PrinterMonitor:
     def __init__(self, adapter, history_path):
         self.adapter = adapter
@@ -5351,8 +5370,12 @@ class PrinterMonitor:
         self.next_camera_probe = 0
         self.error = "Connecting to the printer…"
         self.permission_denied = False
+        self.poll_worker = None
         self.state_lock = threading.Lock()
-        self.manual_release_marker = history_path.with_suffix(".manual-home-required")
+        self.manual_release_marker = None
+        self.manual_storage = history_path.parent
+        self.manual_serial = ""
+        self.homing_legacy = ""
         self.expected_manual_position = None
         self.manual_target_deadline = 0
         self.manual_home_until = 0
@@ -5381,6 +5404,52 @@ class PrinterMonitor:
                     pass
             return ordered
 
+    def bind_manual_printer(self, status):
+        serial = status.get("info", {}).get("serial") or ""
+        if serial == self.manual_serial:
+            return
+        self.manual_serial = serial
+        self.manual_home_until = 0
+        self.expected_manual_position = None
+        self.homing_park_observation = None
+        digest = hashlib.sha256(serial.encode("utf-8")).hexdigest()
+        self.manual_release_marker = self.manual_storage / f"serial-{digest}.manual-home-required" if serial else None
+
+    def legacy_home_fingerprint(self):
+        # Old empty markers identify an address, so any one could belong to a moved printer.
+        markers = []
+        try:
+            for path in sorted(self.manual_storage.iterdir()):
+                if not (path.name.startswith("flashforge-") and path.name.endswith("-history.manual-home-required")):
+                    continue
+                try:
+                    markers.append((path.name, path.stat().st_mtime_ns))
+                except FileNotFoundError:
+                    continue
+        except OSError:
+            return "unreadable"
+        return hashlib.sha256(repr(markers).encode("utf-8")).hexdigest() if markers else ""
+
+    def manual_home_required(self):
+        if self.manual_release_marker is None:
+            return True
+        try:
+            self.manual_release_marker.stat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return True
+        else:
+            return True
+        legacy = self.legacy_home_fingerprint()
+        if not legacy:
+            return False
+        try:
+            receipt = self.manual_release_marker.with_suffix(".legacy-homed").read_text(encoding="ascii")
+        except (OSError, UnicodeError):
+            return True
+        return legacy == "unreadable" or receipt != legacy
+
     def manual_controls_view(self, controls, status=None):
         sensors = (status or {}).get("sensors") or {}
         if (controls and controls.get("tcpMotion") and "release" in controls["groups"]
@@ -5390,7 +5459,7 @@ class PrinterMonitor:
                        or key in {"level", "shaper"}]
             hint = "Press Home to restore axis control" if can_home else "Checking axis position…"
             controls = {**controls, "allowed": allowed, "description": "Motion · " + hint, "checkingPosition": not can_home}
-        if not controls or "release" not in controls["groups"] or not self.manual_release_marker.is_file():
+        if not controls or "release" not in controls["groups"] or not self.manual_home_required():
             return controls
         homing = self.manual_home_until > time.monotonic()
         sensors = (status or {}).get("sensors") or {}
@@ -5435,6 +5504,7 @@ class PrinterMonitor:
         return None
 
     def update_manual_home(self, status):
+        self.bind_manual_printer(status)
         now = time.monotonic()
         sensors = status.get("sensors") or {}
         parked = sensors.get("stationaryCandidate") or sensors.get("homingPark")
@@ -5469,7 +5539,10 @@ class PrinterMonitor:
         elif idle and (parked_after_home or idle_after_home):
             self.manual_home_until = 0
             try:
-                self.manual_release_marker.unlink(missing_ok=True)
+                if self.manual_release_marker is not None:
+                    if self.homing_legacy and self.homing_legacy != "unreadable":
+                        self.manual_release_marker.with_suffix(".legacy-homed").write_text(self.homing_legacy, encoding="ascii")
+                    self.manual_release_marker.unlink(missing_ok=True)
             except OSError:
                 # Keep the interlock if its saved state could not be cleared.
                 pass
@@ -5525,6 +5598,9 @@ class PrinterMonitor:
             with self.state_lock:
                 self.error = ""
                 status["observedAt"] = now
+                if status.get("active") and status.get("file") and status.get("info", {}).get("serial"):
+                    previous_token = self.latest.get("jobToken") if same_observed_job(self.latest, status) else None
+                    status["jobToken"] = previous_token or secrets.token_hex(16)
                 self.update_manual_home(status)
                 observation = self.homing_park_observation
                 if (self.manual_target_deadline > time.monotonic() or
@@ -5679,13 +5755,16 @@ class LoopbackServer(LoopbackHTTPServer):
             names = {}
         self.history_names = ({host: name[:60] for host, name in names.items() if isinstance(name, str) and name}
                               if isinstance(names, dict) else {})
-        self.printer_lock = threading.Lock()
+        self.printer_locks = {}
+        self.upload_gate = threading.Condition()
+        self.active_printer_io = 0
+        self.uploads = {}
         self.discovery_lock = threading.Lock()
         self.source_lock = threading.Lock()
         self.source_transfer = threading.Lock()
         self.upload_generation = 0
         self.file_catalog_revision = 0
-        self.file_transfer_lock = threading.Lock()
+        self.file_transfer_locks = {}
         self.source_path = storage / "print-sources.json"
         try:
             saved_sources = json.loads(self.source_path.read_text(encoding="utf-8"))
@@ -5694,8 +5773,6 @@ class LoopbackServer(LoopbackHTTPServer):
             self.sources = {}
         self.apply_settings = None
         self.notify = None
-        self.uploading = threading.Event()
-        self.uploaded_at = 0.0
         self.stopping = threading.Event()
         self.viewed_host = ""
         try:
@@ -5838,7 +5915,7 @@ class LoopbackServer(LoopbackHTTPServer):
                             printing=bool(data.get("active")), complete=bool(data.get("complete")))
                 item.update({key: data.get(key) for key in (
                     "layer", "layerTotal", "elapsed", "filament", "nozzleTarget", "bedTarget",
-                    "tools", "speed", "fan", "managedCamera", "jobControls",
+                    "tools", "speed", "fan", "managedCamera", "jobControls", "jobToken",
                 )})
             elif job and error:
                 item.update(printing=True, file=job["file"], layer=job.get("layer"))
@@ -5849,11 +5926,9 @@ class LoopbackServer(LoopbackHTTPServer):
         return items
 
     def upload_active(self):
-        # A cancelled or crashed Orca upload may never deliver UploadFinished;
-        # without this the monitor would answer 503 until the plugin reloads.
-        if self.uploading.is_set() and time.monotonic() - self.uploaded_at > UPLOAD_TIMEOUT:
-            self.uploading.clear()
-        return self.uploading.is_set()
+        with self.upload_gate:
+            now = time.monotonic()
+            return any(deadlines[-1] > now for deadlines in self.uploads.values())
 
     def save_sources(self):
         try:
@@ -5884,29 +5959,70 @@ class LoopbackServer(LoopbackHTTPServer):
                         self.save_sources()
 
     @contextmanager
-    def printer_io(self):
-        if self.upload_active() or self.stopping.is_set():
-            raise UploadInProgress
-        with self.printer_lock:
+    def printer_io(self, host):
+        with self.upload_gate:
             if self.upload_active() or self.stopping.is_set():
                 raise UploadInProgress
-            yield
+            lock = self.printer_locks.setdefault(host, threading.Lock())
+        with lock:
+            with self.upload_gate:
+                if self.upload_active() or self.stopping.is_set():
+                    raise UploadInProgress
+                self.active_printer_io += 1
+            try:
+                yield
+            finally:
+                with self.upload_gate:
+                    self.active_printer_io -= 1
+                    self.upload_gate.notify_all()
 
-    def begin_upload(self):
+    def begin_upload(self, name=""):
         # The Orca upload worker calls this before opening its printer connection.
         # Drain the in-flight request, but never hold the caller for long: the
         # port has a single client, so a bounded wait is better than a GUI stall.
-        self.uploading.set()
-        self.uploaded_at = time.monotonic()
-        with self.source_lock:
-            self.upload_generation += 1
-            # Orca reports the local temporary filename, not the destination.
-            if self.sources:
-                self.sources.clear()
-                self.save_sources()
-        acquired = self.printer_lock.acquire(timeout=UPLOAD_DRAIN)
-        if acquired:
-            self.printer_lock.release()
+        with self.upload_gate:
+            now = time.monotonic()
+            self.uploads = {key: deadlines for key, deadlines in self.uploads.items()
+                            if key == name or deadlines[-1] > now}
+            self.uploads.setdefault(name, deque()).append(now + UPLOAD_TIMEOUT)
+            with self.source_lock:
+                self.upload_generation += 1
+                # Orca reports the local temporary filename, not the destination.
+                if self.sources:
+                    self.sources.clear()
+                    self.save_sources()
+            self.upload_gate.wait_for(lambda: not self.active_printer_io, timeout=UPLOAD_DRAIN)
+
+    def finish_upload(self, name=""):
+        with self.upload_gate:
+            deadlines = self.uploads.get(name)
+            if deadlines:
+                deadlines.popleft()
+                if not deadlines:
+                    del self.uploads[name]
+            self.file_catalog_revision += 1
+
+    def poll_device(self, entry, monitor):
+        try:
+            with self.printer_io(entry["host"]):
+                monitor.adapter.configure(entry["code"], entry["serial"])
+                monitor.sample(int(time.time()))
+                self.confirm_print_source(monitor)
+            if self.notify is not None and not self.stopping.is_set():
+                monitor.notifications = self.notifications
+                try:
+                    self.notify(monitor)
+                except Exception:
+                    pass
+        except UploadInProgress:
+            monitor.next_due = 0
+        except Exception:
+            with monitor.state_lock:
+                monitor.latest = None
+                monitor.error = "Could not update printer data."
+        finally:
+            if self.stopping.is_set():
+                monitor.history.save(int(time.time()))
 
     def poll_printer(self):
         try:
@@ -5919,7 +6035,16 @@ class LoopbackServer(LoopbackHTTPServer):
                     hosts = {entry["host"] for entry in entries}
                     with self.state_lock:
                         for host in [name for name in self.monitors if name not in hosts]:
-                            self.monitors.pop(host).history.save(now)
+                            monitor = self.monitors[host]
+                            if monitor.poll_worker and monitor.poll_worker.is_alive():
+                                continue
+                            with self.upload_gate:
+                                lock = self.printer_locks.setdefault(host, threading.Lock())
+                            if lock.acquire(blocking=False):
+                                try:
+                                    self.monitors.pop(host).history.save(now)
+                                finally:
+                                    lock.release()
                         for entry in entries:
                             monitor = self.monitors.get(entry["host"])
                             if monitor is None:
@@ -5935,34 +6060,27 @@ class LoopbackServer(LoopbackHTTPServer):
                             monitor.name = entry["name"]
                     for entry in entries:
                         monitor = self.monitors.get(entry["host"])
-                        if monitor is None or mono < getattr(monitor, "next_due", 0.0):
+                        if (monitor is None or mono < getattr(monitor, "next_due", 0.0)
+                                or (monitor.poll_worker and monitor.poll_worker.is_alive())
+                                or self.upload_active()):
                             continue
                         priority = self.viewed_host if self.viewed_host in hosts else entries[0]["host"]
                         interval = POLL_INTERVAL if entry["host"] == priority or len(entries) <= 3 else IDLE_POLL_INTERVAL
                         if monitor.manual_home_until:
                             interval = 1
                         monitor.next_due = mono + interval
-                        with self.printer_io():
-                            monitor.adapter.configure(entry["code"], entry["serial"])
-                            monitor.sample(int(time.time()))
-                            self.confirm_print_source(monitor)
-                        if self.notify is not None:
-                            try:
-                                monitor.notifications = self.notifications
-                                self.notify(monitor)
-                            except Exception:
-                                pass
-                except UploadInProgress:
-                    pass
+                        monitor.poll_worker = threading.Thread(
+                            target=self.poll_device, args=(entry, monitor), daemon=True,
+                            name=f"FlashForge poll {entry['host']}")
+                        monitor.poll_worker.start()
                 except Exception:
-                    for monitor in list(self.monitors.values()):
-                        with monitor.state_lock:
-                            monitor.latest = None
-                            monitor.error = "Could not update printer data."
+                    # A settings read failure must not discard unrelated snapshots.
+                    pass
                 self.stopping.wait(0.5)
         finally:
             for monitor in list(self.monitors.values()):
-                monitor.history.save(int(time.time()))
+                if not monitor.poll_worker or not monitor.poll_worker.is_alive():
+                    monitor.history.save(int(time.time()))
 
     def serve_forever(self, poll_interval=0.5):
         worker = threading.Thread(target=self.poll_printer, name="FlashForge Device Tab poller", daemon=True)
@@ -6129,7 +6247,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 self.reply_json({"error": "Save this printer before checking the connection."}, 409)
                 return
             try:
-                with self.server.printer_io():
+                with self.server.printer_io(endpoint):
                     status = FlashForge(endpoint, entry["code"], entry["serial"]).status(True)
                     monitor = self.server.monitors.get(endpoint)
                     if monitor is not None:
@@ -6153,7 +6271,8 @@ class MonitorHandler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def upload_file(self, endpoint):
-        lock = self.server.file_transfer_lock
+        with self.server.upload_gate:
+            lock = self.server.file_transfer_locks.setdefault(endpoint, threading.Lock())
         if not lock.acquire(blocking=False):
             self.reply_json({"error": "A file transfer is already in progress."}, 409)
             return
@@ -6202,7 +6321,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
             if self.server.upload_active() or self.server.stopping.is_set():
                 raise UploadInProgress
 
-        with self.server.printer_io():
+        with self.server.printer_io(endpoint):
             monitor = self.server.monitors.get(endpoint)
             entry = next((item for item in self.server.printers() if item["host"] == endpoint), None)
             if not monitor or not entry or not entry["code"]:
@@ -6246,7 +6365,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
             if not 0 < length <= 1024:
                 raise ValueError("Invalid printer entry.")
             host, code, serial = printer_credentials(json.loads(self.rfile.read(length)))
-            with self.server.printer_io():
+            with self.server.printer_io(host):
                 status = FlashForge(host, code, serial).status(True)
             if code and status.get("transport") == "TCP":
                 raise ValueError("Basic readings received. CheckCode could not be verified.")
@@ -6298,7 +6417,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 requirements = saved.get("requirements")
                 if saved.get("name") != stored[0] or not isinstance(requirements, list) or not requirements:
                     raise ValueError("Choose the original sliced .3mf.")
-            with self.server.printer_io():
+            with self.server.printer_io(endpoint):
                 if generation != self.server.upload_generation or monitor.adapter.files().get(file_id) != stored:
                     raise ValueError("The file list changed. Refresh Printer Files.")
                 preview = preview_digest(monitor.adapter, stored[1])
@@ -6395,11 +6514,11 @@ class MonitorHandler(BaseHTTPRequestHandler):
             self.reply_json({"error": "Printer control is unavailable."}, 503)
             return
         try:
-            expected_file = payload.get("file") if isinstance(payload, dict) else None
-            if expected_file is not None:
-                if not isinstance(expected_file, str) or not expected_file or command not in ("pause", "resume", "cancel"):
-                    raise ValueError("Invalid print job.")
-                state = act(endpoint, command, expected_file=expected_file)
+            if command in ("pause", "resume", "cancel"):
+                job = payload.get("job")
+                if not isinstance(job, str) or not re.fullmatch(r"[0-9a-f]{32}", job):
+                    raise ValueError("The print job changed. Refresh its status and try again.")
+                state = act(endpoint, command, expected_job=job)
             else:
                 state = act(endpoint, str(command or ""))
         except (TimeoutError, ConnectionError) as error:
@@ -6564,7 +6683,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 self.reply_json({**data, "calibration": calibration, "fileCatalogRevision": self.server.file_catalog_revision})
                 return
             if route == "files":
-                with self.server.printer_io():
+                with self.server.printer_io(endpoint):
                     files = monitor.update_file_catalog(monitor.adapter.files())
                     revision = self.server.file_catalog_revision
                 family = manual_family(data["info"].get("model"))
@@ -6587,7 +6706,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 if not camera:
                     self.reply_json({"error": "This printer has no camera."}, 404)
                     return
-                with self.server.printer_io():
+                with self.server.printer_io(endpoint):
                     image = read_snapshot(camera)
                 if not image:
                     self.reply_json({"error": "Could not read the camera."}, 503)
@@ -6606,7 +6725,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 with monitor.state_lock:
                     entry = monitor.files.get(key)
                 if entry is not None:
-                    with self.server.printer_io():
+                    with self.server.printer_io(endpoint):
                         image = monitor.adapter.preview(entry[1])
                     media_type = preview_type(image)
                     self.reply(image if media_type else b"", media_type or "image/png", 200 if media_type else 404)
@@ -6860,10 +6979,9 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         if server is None:
             return
         if event == orca.LifecycleEvent.UploadStarted:
-            server.begin_upload()
+            server.begin_upload(getattr(context, "name", ""))
         elif event == orca.LifecycleEvent.UploadFinished:
-            server.file_catalog_revision += 1
-            server.uploading.clear()
+            server.finish_upload(getattr(context, "name", ""))
         elif event in (orca.LifecycleEvent.PresetSelected, orca.LifecycleEvent.ProjectOpened,
                        orca.LifecycleEvent.NewProject):
             self.refresh_host_language()
@@ -6991,9 +7109,13 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             raise ValueError("Add at least one printer address.")
         with self._placement_lock:
             previous_host = self._server.settings_for()[0]
-            if first and previous_host:
-                raise RuntimeError("A printer is already configured.")
             config = self.config()
+            retry_first = first and bool(previous_host)
+            if retry_first:
+                # A previous attempt can save config before a later write fails.
+                # Retry the same setup only while its previous result still matches.
+                if (config.get("printers") != clean or config.get("placement") != placement):
+                    raise RuntimeError("A printer is already configured.")
             if placement is not None:
                 config["placement"] = placement
             host = previous_host
@@ -7001,10 +7123,11 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                 host = clean[0]["host"]
                 config.update(printers=clean, flashforge_host=host, check_code=clean[0]["code"],
                               serial_number=clean[0].get("serial", ""))
-            self.save_config(json.dumps(config, ensure_ascii=False))
+            if not retry_first:
+                self.save_config(json.dumps(config, ensure_ascii=False))
             if placement is not None:
                 self.write_next_placement(placement)
-        if self.active_placement == "device" and host != previous_host:
+        if self.active_placement == "device" and (host != previous_host or first):
             self._point_device_tab(host)
         self._view_refresh.set()
         return host
@@ -7224,7 +7347,7 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         monitor.next_due = 0
         return "Print requested."
 
-    def act(self, host, action, expected_file=None):
+    def act(self, host, action, expected_file=None, *, expected_job=None):
         target = self.ACTIONS.get(action)
         manual = action.startswith("manual/")
         stored = re.fullmatch(r"print/([0-9a-f]{32})/([01])/([0-4]{4}|)(?:/([0-9a-f]{32}))?", action)
@@ -7232,15 +7355,17 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         slot = re.fullmatch(r"slot/([1-4])/([A-Za-z0-9-]{1,16})/([0-9A-F]{6})", action)
         if target is None and not (manual or stored or light or slot):
             raise ValueError("Unknown printer command.")
-        printers = self._server.printers()
-        entry = next((item for item in printers if item["host"] == host), None)
-        if entry is None:
-            raise ValueError("This printer is not in the plugin settings.")
         monitor = self._server.monitors.get(host)
         if monitor is None:
             raise ValueError("The printer is not connected yet.")
         try:
-            with self._server.printer_io():
+            with self._server.printer_io(host):
+                entry = next((item for item in self._server.printers() if item["host"] == host), None)
+                if entry is None:
+                    raise ValueError("This printer is not in the plugin settings.")
+                if self._server.monitors.get(host) is not monitor:
+                    raise ValueError("The printer is not connected yet.")
+                monitor.adapter.configure(entry["code"], entry["serial"])
                 if light or slot:
                     return self.set_accessory(monitor, entry, light, slot)
                 if stored:
@@ -7249,6 +7374,7 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                     current = monitor.adapter.status(include_details=True)
                     key = action[7:]
                     with monitor.state_lock:
+                        monitor.bind_manual_printer(current)
                         controls = monitor.manual_controls_view(current.get("manual"), current)
                         settled_homing = monitor.settled_homing_position(current, for_home=key == "home")
                     jog = re.fullmatch(r"[xyze][+-](?:1|10)", key)
@@ -7261,11 +7387,15 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                     if controls["tcpMotion"] and (key in {"home", "release"} or key.startswith("heat") or jog):
                         if entry["serial"] and entry["serial"] != current["info"].get("serial"):
                             raise ValueError("Check the printer serial number.")
+                        if key == "release" and monitor.manual_release_marker is None:
+                            raise ValueError("Check the printer serial number.")
                         if self._server.upload_active() or self._server.stopping.is_set():
                             raise UploadInProgress
                         info = current["info"]
                         may_move = key in {"home", "release"} or bool(jog and key[0] in "xyz" and settled_homing)
                         track_home = monitor.track_manual_home if key == "home" and controls.get("released") else None
+                        if track_home:
+                            monitor.homing_legacy = monitor.legacy_home_fingerprint()
                         try:
                             result = tcp_manual_move(host, key, info.get("volume"), info.get("model", ""),
                                                      monitor.manual_release_marker, settled_homing, track_home,
@@ -7320,21 +7450,29 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                         return "Printer accepted the command. Axis limits could not be checked."
                     return "Printer accepted the command."
                 with monitor.state_lock:
-                    data = monitor.latest
-                if expected_file is not None:
-                    data = monitor.adapter.status(include_details=True)
-                    state = data.get("state")
-                    wrong_state = (action == "resume" and state != "PAUSED"
-                                   or action == "pause" and state in {"PAUSED", "PAUSING"})
-                    if (data.get("file") != expected_file or not data.get("active")
-                            or not data.get("jobControls") or wrong_state):
+                    previous = monitor.latest
+                    if expected_job is not None and (previous or {}).get("jobToken") != expected_job:
                         raise ValueError("The print job changed. Refresh its status and try again.")
-                    if self._server.upload_active() or self._server.stopping.is_set():
-                        raise UploadInProgress
+                data = monitor.adapter.status(include_details=True)
+                if not same_observed_job(previous, data):
+                    with monitor.state_lock:
+                        if previous is not None:
+                            monitor.latest = {**previous, "jobToken": None}
+                        monitor.next_due = 0
+                    raise ValueError("The print job changed. Refresh its status and try again.")
+                state = data.get("state")
+                wrong_state = (action == "resume" and state != "PAUSED"
+                               or action == "pause" and state in {"PAUSED", "PAUSING"})
+                if (not data.get("jobControls") or wrong_state
+                        or (expected_file is not None and data.get("file") != expected_file)):
+                    monitor.next_due = 0
+                    raise ValueError("The print job changed. Refresh its status and try again.")
+                if self._server.upload_active() or self._server.stopping.is_set():
+                    raise UploadInProgress
                 serial = ((data or {}).get("info") or {}).get("serial") or ""
                 if not serial:
                     raise ValueError("The printer did not report its serial number.")
-                pinned_serial = monitor.adapter.http_only or expected_file is not None and bool(entry["serial"])
+                pinned_serial = monitor.adapter.http_only or bool(entry["serial"])
                 if pinned_serial and serial != entry["serial"]:
                     raise ValueError("Wait for the printer to reconnect with the new settings.")
                 control_job(host, serial, entry["code"], target)

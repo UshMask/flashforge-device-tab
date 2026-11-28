@@ -469,6 +469,41 @@ class LoopbackStartupTests(unittest.TestCase):
                 HTTPServer(address, BaseHTTPRequestHandler)
 
 
+class FleetPollingTests(unittest.TestCase):
+    def test_stalled_poll_and_failure_do_not_block_the_other_printer(self):
+        slow, fast = "127.0.0.1", "127.0.0.2"
+        entered, unblock, fast_sampled = (threading.Event() for _ in range(3))
+
+        def sample(monitor, now):
+            if monitor.endpoint == slow:
+                entered.set()
+                unblock.wait(5)
+                raise RuntimeError("failed slow poll")
+            monitor.latest = {"state": "READY"}
+            fast_sampled.set()
+
+        with tempfile.TemporaryDirectory() as folder:
+            with plugin.LoopbackServer(("127.0.0.1", 0), plugin.MonitorHandler) as server:
+                config = {"printers": [{"host": slow}, {"host": fast}]}
+                server.configure(lambda: config, Path(folder))
+                with patch.object(plugin.PrinterMonitor, "sample", sample):
+                    dispatcher = threading.Thread(target=server.poll_printer)
+                    dispatcher.start()
+                    try:
+                        self.assertTrue(entered.wait(2))
+                        self.assertTrue(fast_sampled.wait(2))
+                        with server.printer_io(fast):
+                            self.assertEqual(server.monitors[fast].latest["state"], "READY")
+                        unblock.set()
+                        server.monitors[slow].poll_worker.join(2)
+                        self.assertEqual(server.monitors[slow].error, "Could not update printer data.")
+                        self.assertEqual(server.monitors[fast].latest["state"], "READY")
+                    finally:
+                        unblock.set()
+                        server.stopping.set()
+                        dispatcher.join(3)
+
+
 class ServerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -509,7 +544,7 @@ class ServerTests(unittest.TestCase):
         self.server.apply_settings = apply_settings
         self.acted = []
 
-        def act(host, action):
+        def act(host, action, *, expected_job=None):
             if action not in ("pause", "resume", "cancel"):
                 raise ValueError("Unknown printer command.")
             self.acted.append((host, action))
@@ -670,14 +705,47 @@ class ServerTests(unittest.TestCase):
         status, body, _ = request(plugin.WEB_PORT, self.url("status"))
         self.assertEqual(status, 503)
         self.assertIn("sending a print job", json.loads(body)["error"])
-        self.server.uploading.clear()
+        self.server.finish_upload()
         self.wait_for_status()
 
     def test_stale_upload_self_heals(self):
-        self.server.begin_upload()
-        self.server.uploaded_at -= plugin.UPLOAD_TIMEOUT + 1
+        with patch.object(plugin.time, "monotonic", return_value=time.monotonic() - plugin.UPLOAD_TIMEOUT - 1):
+            self.server.begin_upload()
         status, _, _ = request(plugin.WEB_PORT, self.url("status"))
         self.assertEqual(status, 200)
+
+    def test_late_finish_cannot_release_another_upload(self):
+        with patch.object(plugin.time, "monotonic", return_value=time.monotonic() - plugin.UPLOAD_TIMEOUT - 1):
+            self.server.begin_upload("earlier.3mf")
+        self.server.begin_upload("current.3mf")
+        self.server.finish_upload("earlier.3mf")
+        self.assertTrue(self.server.upload_active())
+        with self.assertRaises(plugin.UploadInProgress):
+            with self.server.printer_io("127.0.0.2"):
+                self.fail("printer I/O started during upload")
+        self.server.finish_upload("current.3mf")
+        self.assertFalse(self.server.upload_active())
+
+    def test_upload_start_blocks_new_io_while_draining(self):
+        starting = threading.Event()
+        original = self.server.upload_gate.wait_for
+
+        def wait_for_idle(*args, **kwargs):
+            starting.set()
+            return original(*args, **kwargs)
+
+        with patch.object(self.server.upload_gate, "wait_for", side_effect=wait_for_idle):
+            with self.server.printer_io("127.0.0.2"):
+                worker = threading.Thread(target=self.server.begin_upload, args=("new.3mf",))
+                worker.start()
+                self.assertTrue(starting.wait(2))
+                self.assertTrue(self.server.upload_active())
+                with self.assertRaises(plugin.UploadInProgress):
+                    with self.server.printer_io("127.0.0.3"):
+                        self.fail("unrelated network operation started during upload")
+            worker.join(2)
+            self.assertFalse(worker.is_alive())
+        self.server.finish_upload("new.3mf")
 
     def test_discover_and_test_unsaved_printer_are_loopback_actions(self):
         origin = f"http://127.0.0.1:{plugin.WEB_PORT}"
@@ -765,7 +833,7 @@ class ServerTests(unittest.TestCase):
 
     def test_successful_connection_check_resumes_polling_after_permission_denial(self):
         monitor = self.server.monitors["127.0.0.1"]
-        with self.server.printer_io():
+        with self.server.printer_io("127.0.0.1"):
             with patch.object(monitor.adapter, "status", side_effect=PermissionError):
                 monitor.sample(int(time.time()))
         error = self.wait_for_status(503)
@@ -845,14 +913,23 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.acted, [])
 
     def test_action_pauses(self):
+        job = "1" * 32
         status, body, _ = request(plugin.WEB_PORT, self.url("action"), method="POST",
                                   headers={"Origin": f"http://{plugin.WEB_HOST}:{plugin.WEB_PORT}",
                                            "Content-Type": "application/json",
                                            "X-FlashForge-Tab-Action": "action"},
-                                  body=json.dumps({"action": "pause"}))
+                                  body=json.dumps({"action": "pause", "job": job}))
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["state"], "PAUSED")
         self.assertEqual(self.acted, [("127.0.0.1", "pause")])
+
+    def test_job_action_rejects_request_without_an_observed_job(self):
+        status, _, _ = request(plugin.WEB_PORT, self.url("action"), method="POST",
+                               headers={"Origin": f"http://{plugin.WEB_HOST}:{plugin.WEB_PORT}",
+                                        "Content-Type": "application/json", "X-FlashForge-Tab-Action": "action"},
+                               body=json.dumps({"action": "cancel"}))
+        self.assertEqual(status, 400)
+        self.assertEqual(self.acted, [])
 
     def test_out_of_range_manual_action_reports_travel_limit(self):
         def act(host, action):
@@ -1072,6 +1149,7 @@ class ManualTransportTests(unittest.TestCase):
 
         monitor = plugin.PrinterMonitor(self.adapter, monitor.history.path)
         self.server.monitors[host] = monitor
+        monitor.bind_manual_printer(status)
         controls = status["manual"]
         self.assertTrue(monitor.manual_controls_view(controls)["released"])
         self.assertIn("home", monitor.manual_controls_view(controls)["allowed"])
@@ -1101,6 +1179,36 @@ class ManualTransportTests(unittest.TestCase):
         self.assertFalse(monitor.manual_release_marker.is_file())
         self.act("x+1")
         self.assertEqual(self.commands[-2:], ["G1 X101.000 F300", "M602"])
+
+    def test_home_requirement_follows_serial_to_a_new_address(self):
+        old = self.server.monitors["127.0.0.1"]
+        self.act("release")
+        new_host = "127.0.0.2"
+        moved = plugin.PrinterMonitor(self.adapter, old.history.path.with_name("moved.json"))
+        self.entry["host"] = new_host
+        self.server.monitors = {new_host: moved}
+        with patch.object(plugin, "tcp_manual_move") as motion:
+            with self.assertRaises(plugin.ManualHomeRequired):
+                self.service.act(new_host, "manual/x+1")
+            motion.assert_not_called()
+        self.assertEqual(moved.manual_release_marker, old.manual_release_marker)
+        status = self.adapter.status(True)
+        other = plugin.PrinterMonitor(self.adapter, old.history.path)
+        other.bind_manual_printer({**status, "info": {**status["info"], "serial": "OTHER"}})
+        self.assertFalse(other.manual_home_required())
+
+    def test_old_address_only_marker_requires_verified_home_after_move(self):
+        (self.server.storage / "flashforge-127.0.0.9-history.manual-home-required").touch()
+        status = self.adapter.status(True)
+        with self.assertRaises(plugin.ManualHomeRequired):
+            self.act("x+1")
+        self.act("home")
+        monitor = self.server.monitors["127.0.0.1"]
+        monitor.update_manual_home({**status, "state": "BUSY", "sensors": {"moveMode": "HOMING"}})
+        monitor.update_manual_home(status)
+        restored = plugin.PrinterMonitor(self.adapter, monitor.history.path.with_name("new-address.json"))
+        restored.bind_manual_printer(status)
+        self.assertFalse(restored.manual_home_required())
 
     def test_5m_release_checks_idle_and_does_not_clear_lock_after_failed_home(self):
         monitor = self.server.monitors["127.0.0.1"]
@@ -1770,6 +1878,31 @@ class CreatorHTTPTests(unittest.TestCase):
         self.assertEqual(self.act_with_readbacks(
             "pause", ["pause"], expected_file=self.detail["printFileName"]), "PAUSED")
 
+    def test_cancel_rechecks_the_observed_run_before_sending(self):
+        host = "127.0.0.1"
+        with tempfile.TemporaryDirectory() as folder:
+            with plugin.LoopbackServer((host, 0), plugin.MonitorHandler) as server:
+                entry = {"host": host, "code": "abc01234", "serial": "SN-C5P"}
+                server.configure(lambda: {"printers": [entry]}, Path(folder))
+                monitor = plugin.PrinterMonitor(self.adapter, Path(folder) / "history.json")
+                server.monitors[host] = monitor
+                service = plugin.FlashForgeService()
+                service._server = server
+                monitor.sample(int(time.time()))
+                original = monitor.latest
+                job = original["jobToken"]
+                fresh = self.adapter.status(True)
+                with patch.object(plugin, "control_job") as command:
+                    for update in ({"file": "Next.3mf"}, {"layer": 1}):
+                        monitor.latest = original.copy()
+                        with self.subTest(update=update), patch.object(self.adapter, "status", return_value={**fresh, **update}):
+                            with self.assertRaisesRegex(ValueError, "print job changed"):
+                                service.act(host, "cancel", expected_job=job)
+                        self.assertIsNone(monitor.latest["jobToken"])
+                        with self.assertRaisesRegex(ValueError, "print job changed"):
+                            service.act(host, "cancel", expected_job=job)
+                    command.assert_not_called()
+
     def test_ignored_cancel_reports_observed_state_and_sends_once(self):
         with self.assertRaisesRegex(RuntimeError, "did not confirm cancel.*PRINTING"):
             self.act_with_readbacks("cancel", [])
@@ -1873,7 +2006,9 @@ class CreatorHTTPTests(unittest.TestCase):
                         break
                     time.sleep(0.05)
                 self.assertEqual(status, 200, body)
-                self.assertEqual(json.loads(body)["file"], "Тест 5.3mf")
+                current = json.loads(body)
+                self.assertEqual(current["file"], "Тест 5.3mf")
+                job = current["jobToken"]
                 status, body, _ = request(web_port, path + "telemetry")
                 self.assertEqual(status, 200)
                 newest = json.loads(body)["temperatures"][-1]
@@ -1886,7 +2021,7 @@ class CreatorHTTPTests(unittest.TestCase):
                 self.assertEqual((status, body, headers["Content-Type"]), (200, PNG, "image/png"))
                 for action, state in (("pause", "PAUSED"), ("resume", "PRINTING"), ("cancel", "CANCELING")):
                     status, body, _ = request(
-                        web_port, path + "action", method="POST", body=json.dumps({"action": action}),
+                        web_port, path + "action", method="POST", body=json.dumps({"action": action, "job": job}),
                         headers={"Origin": f"http://127.0.0.1:{web_port}", "Content-Type": "application/json",
                                  "X-FlashForge-Tab-Action": "action"})
                     self.assertEqual(status, 200, body)
@@ -2032,6 +2167,22 @@ class SwitchViewTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "already configured"):
             self.service.apply_settings([{"host": "192.168.1.4"}], first=True)
         self.assertEqual(len(saved), 1)
+
+    def test_first_setup_retries_the_same_save_after_a_placement_write_failure(self):
+        self.config.clear()
+        self.service._server.settings_for = lambda: (self.config.get("flashforge_host", ""), "")
+        self.service.save_config = lambda value: self.config.update(json.loads(value))
+        printers = [{"host": "192.168.1.4", "name": "Fixture"}]
+        with patch.object(self.service, "write_next_placement", side_effect=PermissionError):
+            with self.assertRaises(PermissionError):
+                self.service.apply_settings(printers, placement="flashforge", first=True)
+        self.assertEqual(self.config["flashforge_host"], "192.168.1.4")
+        with self.assertRaisesRegex(RuntimeError, "already configured"):
+            self.service.apply_settings([{"host": "192.168.1.5"}], placement="flashforge", first=True)
+        with patch.object(self.service, "_point_device_tab") as open_view:
+            self.assertEqual(self.service.apply_settings(printers, placement="flashforge", first=True), "192.168.1.4")
+            open_view.assert_called_once_with("192.168.1.4")
+        self.assertEqual(plugin.PLACEMENT_FILE.read_text(encoding="ascii"), "flashforge")
 
     def test_restore_supports_second_configured_printer(self):
         self.service._server.printers = lambda: [{"host": "192.168.1.37", "code": "first"},
