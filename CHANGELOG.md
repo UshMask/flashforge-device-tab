@@ -1,5 +1,10 @@
 ﻿# Changelog
 
+## 1.14.4
+
+- Reduced the size of the single-file plugin by sharing translation keys and compacting the release file.
+- Kept all interface languages. Twelve translations remain complete. The other eleven cover the main screens, controls and warnings, with English for some help text and detailed diagnostics.
+
 ## 1.14.3
 
 - Resume live printer polling after a successful connection check clears an earlier access failure.

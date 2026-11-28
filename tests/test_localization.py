@@ -1,3 +1,4 @@
+import json
 import re
 import threading
 import unittest
@@ -29,6 +30,12 @@ class LocalizationTests(unittest.TestCase):
         required.update(plugin.STATES.values())
         required.update(plugin.ERROR_TEMPLATES)
         required.add(plugin.MONITOR_BIND_ERROR)
+        self.assertFalse(plugin.CORE_MESSAGES.keys() & plugin.EXTENDED_MESSAGES.keys())
+        self.assertFalse(required.difference(plugin.CORE_MESSAGES, plugin.EXTENDED_MESSAGES))
+        self.assertEqual(len(plugin.FULL_TRANSLATION_LOCALES), 12)
+        for messages, locales in ((plugin.CORE_MESSAGES, plugin.TRANSLATION_LOCALES),
+                                  (plugin.EXTENDED_MESSAGES, plugin.FULL_TRANSLATION_LOCALES)):
+            self.assertTrue(all(len(values) == len(locales) for values in messages.values()))
         for language in plugin.LANGUAGES:
             with self.subTest(language=language):
                 config = plugin.render_page(plugin.CONFIG_PAGE, language, placement="flashforge", languageOptions="")
@@ -38,12 +45,30 @@ class LocalizationTests(unittest.TestCase):
                 self.assertNotRegex(config + monitor, r"\{\{(?:t:|translations|placement|language)")
                 if language != "en":
                     catalog = plugin.TRANSLATIONS[language]
-                    self.assertFalse(required.difference(catalog))
+                    expected = plugin.CORE_MESSAGES.keys()
+                    if language in plugin.FULL_TRANSLATION_LOCALES:
+                        expected = expected | plugin.EXTENDED_MESSAGES.keys()
+                    self.assertEqual(catalog.keys(), expected)
                     self.assertNotEqual(catalog["All printers"], "All printers")
                     for key, value in catalog.items():
                         self.assertTrue(value.strip(), key)
                         fields = r"\{[a-z]+\}"
                         self.assertEqual(Counter(re.findall(fields, key)), Counter(re.findall(fields, value)), key)
+
+    def test_reduced_locale_keeps_controls_and_falls_back_for_extended_text(self):
+        language = "ca"
+        help_text = "The new language appears when you reopen the monitor."
+        config = plugin.render_page(plugin.CONFIG_PAGE, language, placement="flashforge", languageOptions="")
+        self.assertIn(f'id="languageHelp" hidden>{help_text}</p>', config)
+        monitor = plugin.render_page(plugin.PAGE, language, printer="FlashForge")
+        raw = re.search(r'<script id="plugin-translations" type="application/json">(.*?)</script>', monitor)
+        messages = json.loads(raw[1])["messages"]
+        self.assertNotEqual(messages["Cancel print?"], "Cancel print?")
+        self.assertIn("Press Home before moving the axes.", messages)
+        template = "The printer HTTP API returned status {code}."
+        self.assertNotIn(template, messages)
+        message = template.format(code=503)
+        self.assertEqual(plugin.translate_error(language, message), message)
 
     def test_rendered_axis_heading_uses_motion_terminology(self):
         for language, heading in [("ru", "Оси"), ("fr", "Axes"), ("uk", "Осі")]:
