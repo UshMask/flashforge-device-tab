@@ -5,8 +5,7 @@ is left, check nozzle and bed temperatures, or open the printer camera.
 Switch between your local printers and review completed jobs after a restart.
 Printers with a working authenticated control API also offer pause, resume and cancel.
 
-**Version 1.14.3** resumes live monitoring after a successful connection check
-following an access failure and preserves the original error if startup fails.
+**Version 1.14.4** ships a smaller plugin file and keeps all interface languages.
 
 [![Monitor with a print in progress](docs/orca-cloud/01-monitor.png)](docs/orca-cloud/01-monitor.png)
 
@@ -100,6 +99,10 @@ when it loads for the configured FlashForge profile.
 ## Settings
 
 The plugin includes 24 interface languages and follows OrcaSlicer by default.
+Full translations are available in Simplified and Traditional Chinese, French,
+German, Italian, Japanese, Korean, Polish, Brazilian Portuguese, Russian,
+Spanish, and Ukrainian. The other translated languages cover the main screens
+and controls, with English used for some help text and detailed diagnostics.
 Use **Plugins → FlashForge Device Tab → Config → Interface language** to choose
 a language explicitly. Save and reopen the monitor. Some OrcaSlicer 2.5.x builds
 report a reduced set of languages through the plugin API, so an explicit
@@ -199,7 +202,8 @@ status read. Creator cameras use a separate MJPEG stream on port 8080.
 - Talks to the local network: the printers you configure, nothing else.
 - Serves one page on `127.0.0.1`, checks `Host`, `Origin` and `Sec-Fetch-Site`,
   refuses framing from other origins and sends `no-store`.
-- The OrcaSlicer plugin catalogue rates the plugin **low risk**.
+- See the [Orca Cloud listing](https://cloud.orcaslicer.com/p/32eab7181ea9)
+  for the catalogue's automated security assessment of the current release.
 
 ## Development
 
@@ -221,8 +225,10 @@ the browser tab.
 ## Releasing
 
 1. Bump `# version` in `flashforge_device_tab.py` and add a `CHANGELOG.md` entry.
-2. Commit, tag `vX.Y.Z`, push the tag.
-3. Publish a GitHub release for the tag. `.github/workflows/publish-orcacloud.yml`
+2. Create the `dist` directory and build the release asset with
+   `python tools/build_release.py flashforge_device_tab.py dist/flashforge_device_tab.py`.
+   Commit, tag `vX.Y.Z`, and push the tag.
+3. Publish a GitHub release for the tag with the compact asset. `.github/workflows/publish-orcacloud.yml`
    uploads the plugin to the OrcaSlicer catalogue through GitHub OIDC — the tag
    becomes the published version and the release notes become the changelog.
    The workflow also updates the catalogue description and screenshots from
