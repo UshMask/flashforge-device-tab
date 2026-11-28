@@ -432,6 +432,18 @@ class BedConfirmationTests(unittest.TestCase):
 
 
 class LoopbackStartupTests(unittest.TestCase):
+    def test_unload_after_cloud_storage_startup_failure(self):
+        def unavailable_storage():
+            raise RuntimeError("Cloud storage unavailable")
+
+        service = plugin.FlashForgeService()
+        host = SimpleNamespace(plugin=SimpleNamespace(storage=unavailable_storage))
+        with patch.object(plugin.orca, "host", host):
+            with self.assertRaisesRegex(RuntimeError, "Cloud storage unavailable"):
+                service.on_load()
+        service.on_unload()
+        self.assertIsNone(service._server)
+
     def test_start_reports_unavailable_monitor_address(self):
         service = plugin.FlashForgeService()
         with socket.socket() as occupied:
@@ -750,6 +762,19 @@ class ServerTests(unittest.TestCase):
                                            "cameraReported": False, "telemetry": True})
         code, _, _ = request(plugin.WEB_PORT, "/127.0.0.2/diagnostics", method="POST", headers=headers)
         self.assertEqual(code, 409)
+
+    def test_successful_connection_check_resumes_polling_after_permission_denial(self):
+        monitor = self.server.monitors["127.0.0.1"]
+        with self.server.printer_io():
+            with patch.object(monitor.adapter, "status", side_effect=PermissionError):
+                monitor.sample(int(time.time()))
+        error = self.wait_for_status(503)
+        self.assertIn("Allow access to the printer", json.loads(error)["error"])
+        headers = {"Origin": f"http://{plugin.WEB_HOST}:{plugin.WEB_PORT}",
+                   "X-FlashForge-Tab-Action": "diagnostics"}
+        status, _, _ = request(plugin.WEB_PORT, self.url("diagnostics"), method="POST", headers=headers)
+        self.assertEqual(status, 200)
+        self.assertIn("observedAt", self.wait_for_status())
 
     def test_notifications_validate_and_persist(self):
         headers = {"Origin": f"http://{plugin.WEB_HOST}:{plugin.WEB_PORT}",

@@ -1,5 +1,10 @@
 ﻿# Changelog
 
+## 1.14.3
+
+- Resume live printer polling after a successful connection check clears an earlier access failure.
+- Preserve the startup error in OrcaSlicer diagnostics when the plugin fails before initialization.
+
 ## 1.14.2
 
 - Prevent two Windows instances from serving the FlashForge monitor on the same
