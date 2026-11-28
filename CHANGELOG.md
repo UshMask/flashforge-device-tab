@@ -1,5 +1,13 @@
 ﻿# Changelog
 
+## 1.14.5
+
+- Check that the observed print job is still current before sending pause, resume, or cancel from Monitor or All printers.
+- Keep the Home requirement after releasing the motors when a printer changes IP address.
+- Let the first-printer wizard retry the same save if writing the tab preference failed.
+- Keep a late upload completion from releasing another upload's lock.
+- Poll each printer independently so a slow or failed printer does not block the others.
+
 ## 1.14.4
 
 - Reduced the size of the single-file plugin by sharing translation keys and compacting the release file.
