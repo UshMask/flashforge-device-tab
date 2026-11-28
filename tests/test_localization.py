@@ -28,6 +28,7 @@ class LocalizationTests(unittest.TestCase):
         required.update(re.findall(r'\bt\("([^"]+)"', plugin.PAGE + plugin.CONFIG_PAGE))
         required.update(plugin.STATES.values())
         required.update(plugin.ERROR_TEMPLATES)
+        required.add(plugin.MONITOR_BIND_ERROR)
         for language in plugin.LANGUAGES:
             with self.subTest(language=language):
                 config = plugin.render_page(plugin.CONFIG_PAGE, language, placement="flashforge", languageOptions="")

@@ -431,6 +431,32 @@ class BedConfirmationTests(unittest.TestCase):
             self.assertNotIn("bedClearToken", server.fleet_payload()[0])
 
 
+class LoopbackStartupTests(unittest.TestCase):
+    def test_start_reports_unavailable_monitor_address(self):
+        service = plugin.FlashForgeService()
+        with socket.socket() as occupied:
+            occupied.bind((plugin.WEB_HOST, 0))
+            occupied.listen()
+            port = occupied.getsockname()[1]
+            host = SimpleNamespace(plugin=SimpleNamespace(storage=tempfile.gettempdir))
+            with patch.object(plugin.orca, "host", host), patch.object(plugin, "WEB_PORT", port):
+                message = rf"127\.0\.0\.1:{port}\) is in use or reserved\. Close all OrcaSlicer"
+                with self.assertRaisesRegex(RuntimeError, message) as raised:
+                    service.on_load()
+        self.assertIsInstance(raised.exception.__cause__, OSError)
+        self.assertIsNone(service._server)
+
+    @unittest.skipUnless(hasattr(socket, "SO_EXCLUSIVEADDRUSE"), "Windows socket sharing")
+    def test_old_listener_and_new_listener_cannot_share_the_address(self):
+        with HTTPServer((plugin.WEB_HOST, 0), BaseHTTPRequestHandler) as old:
+            address = old.server_address
+            with self.assertRaises(OSError):
+                plugin.LoopbackServer(address, plugin.MonitorHandler)
+        with plugin.LoopbackServer(address, plugin.MonitorHandler):
+            with self.assertRaises(OSError):
+                HTTPServer(address, BaseHTTPRequestHandler)
+
+
 class ServerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -668,7 +694,8 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(data["printers"][0]["host"], "127.0.0.1")
         self.assertEqual(data["printers"][0]["code"], "code")
         self.assertEqual(data["endpoint"], "127.0.0.1")
-        self.assertEqual(data["placement"], "flashforge")
+        self.assertEqual(data["placement"], "device")
+        self.assertEqual(data["savedPlacement"], "device")
 
     def test_history_endpoint_keeps_archived_jobs_without_a_configured_printer(self):
         archive = Path(self.folder.name) / "flashforge-192.168.1.7-history.json"
@@ -1855,6 +1882,9 @@ class SwitchViewTests(unittest.TestCase):
         plugin.API_PORT = free_port()
         plugin.WEB_PORT = free_port()
         self.folder = tempfile.TemporaryDirectory()
+        placement = patch.object(plugin, "PLACEMENT_FILE", Path(self.folder.name) / "monitor-placement.txt")
+        placement.start()
+        self.addCleanup(placement.stop)
         self.preset = SimpleNamespace(
             name="Adventurer 5M",
             values={"host_type": "flashforge", "print_host": "127.0.0.1", "print_host_webui": ""},
@@ -1876,6 +1906,8 @@ class SwitchViewTests(unittest.TestCase):
         self.service.get_config = lambda: json.dumps(self.config)
         self.service._page_store = Path(self.folder.name) / "device-pages.json"
         self.service._switch_lock = threading.Lock()
+        self.service._placement_lock = threading.Lock()
+        self.service._next_placement = None
         self.service._stopping = threading.Event()
         self.service._view_refresh = threading.Event()
         self.service._server = SimpleNamespace(
@@ -1943,6 +1975,39 @@ class SwitchViewTests(unittest.TestCase):
             self.assertEqual(self.preset.values["print_host_webui"], "")
         self.assertEqual(self.transaction.values, {})
 
+    def test_first_printer_setup_can_open_without_a_profile_address(self):
+        self.service._server.printers = lambda: []
+        self.service._server.settings_for = lambda: ("", "")
+        self.preset.values["print_host"] = ""
+        self.service.restore_selected_view()
+        url = self.preset.values["print_host_webui"]
+        self.assertEqual(url, plugin.monitor_url(plugin.SETUP_PAGE))
+        self.assertEqual(plugin.monitor_identity(url), "")
+        self.service.save_config = lambda value: self.config.update(json.loads(value))
+        self.service.apply_settings([{"host": "127.0.0.1"}], placement="flashforge", first=True)
+        self.assertEqual(self.preset.values["print_host"], "127.0.0.1")
+        self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("127.0.0.1"))
+        self.assertEqual(self.service.active_placement, "device")
+        self.assertEqual(plugin.startup_placement(), "flashforge")
+
+    def test_flashforge_model_can_use_monitor_without_rewriting_other_transport(self):
+        self.preset.values.update(host_type="octoprint", printer_model="Flashforge Creator 5 Pro", print_host="")
+        self.service.restore_selected_view()
+        self.assertEqual(self.preset.values["print_host_webui"], plugin.monitor_url("127.0.0.1"))
+        self.assertEqual(self.service.check_view("127.0.0.1"), "127.0.0.1")
+        self.assertEqual(self.preset.values["print_host"], "")
+        self.assertEqual(self.preset.values["host_type"], "octoprint")
+
+    def test_placement_only_preserves_printers_and_first_setup_cannot_overwrite(self):
+        saved = []
+        self.service.save_config = lambda value: saved.append(json.loads(value))
+        self.service.apply_settings(placement="flashforge")
+        self.assertEqual(saved[0]["flashforge_host"], "127.0.0.1")
+        self.assertEqual(saved[0]["placement"], "flashforge")
+        with self.assertRaisesRegex(RuntimeError, "already configured"):
+            self.service.apply_settings([{"host": "192.168.1.4"}], first=True)
+        self.assertEqual(len(saved), 1)
+
     def test_restore_supports_second_configured_printer(self):
         self.service._server.printers = lambda: [{"host": "192.168.1.37", "code": "first"},
                                                   {"host": "127.0.0.1", "code": "code"}]
@@ -2004,13 +2069,13 @@ class SwitchViewTests(unittest.TestCase):
 
     def test_plugin_settings_register_flashforge_page_only_after_reload(self):
         self.service._placement_lock = threading.Lock()
-        self.service._next_placement = "flashforge"
+        self.service._next_placement = None
         self.config.pop("placement")
         path = Path(self.folder.name) / "monitor-placement.txt"
         with patch.object(plugin, "PLACEMENT_FILE", path), patch.object(orca, "register_capability") as register, \
-                patch.object(plugin.FlashForgeService, "active_placement", "flashforge"):
+                patch.object(plugin.FlashForgeService, "active_placement", "device"):
             package = plugin.FlashForgeDeviceTab()
-            for index, choice in enumerate(("flashforge", "device", "flashforge")):
+            for index, choice in enumerate(("device", "flashforge", "device")):
                 if index:
                     previous = plugin.FlashForgeService.active_placement
                     self.config["placement"] = choice

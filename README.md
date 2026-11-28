@@ -5,8 +5,9 @@ is left, check nozzle and bed temperatures, or open the printer camera.
 Switch between your local printers and review completed jobs after a restart.
 Printers with a working authenticated control API also offer pause, resume and cancel.
 
-**Version 1.14.1** fixes camera connection and model detection on Creator 5 and
-Creator 5 Pro and adjusts manual controls for older AD5X firmware.
+**Version 1.14.2** adds a first-printer wizard, tab placement in Monitor settings
+and a taller Print job card by default. OrcaSlicer diagnostics now explain
+when the local monitor port is unavailable.
 
 [![Monitor with a print in progress](docs/orca-cloud/01-monitor.png)](docs/orca-cloud/01-monitor.png)
 
@@ -105,10 +106,14 @@ a language explicitly. Save and reopen the monitor. Some OrcaSlicer 2.5.x builds
 report a reduced set of languages through the plugin API, so an explicit
 selection can be needed for languages such as Euskara or Traditional Chinese.
 
-In **Plugins → FlashForge Device Tab → Config**, set **Tab placement** and
-save, then restart OrcaSlicer. **Separate FlashForge tab (default)** shows the
-monitor in its own tab and keeps the native Printer page. **Replace Printer tab**
-uses the built-in tab for configured FlashForge profiles and hides the separate tab.
+FlashForge uses the built-in **Printer** tab for FlashForge profiles by default.
+Choose the separate **FlashForge** tab in **Settings → Monitor → Tab placement**,
+save, then restart OrcaSlicer. Monitor settings also include the taller Print job
+card, which is enabled by default.
+
+On the first visit, the setup wizard asks where to show FlashForge and helps you
+connect your first printer. If no FlashForge profile is selected, open the
+**FlashForge Device Tab** action from Speed Dial to start setup.
 
 Open **Settings** and enter the printer address, optional display name, CheckCode
 and serial number. **Find printers** can fill the model, address, and reported
