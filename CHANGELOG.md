@@ -1,5 +1,14 @@
 ﻿# Changelog
 
+## 1.14.2
+
+- Prevent two Windows instances from serving the FlashForge monitor on the same
+  local port. Show the address and a restart hint in OrcaSlicer diagnostics
+  when the port is unavailable.
+- Enable the taller Print job card by default and let users switch it off in Monitor settings.
+- Add a two-step first-printer wizard and let users change tab placement in Monitor settings.
+  Use the built-in Printer tab by default.
+
 ## 1.14.1
 
 - Connect to the built-in camera on both Creator 5 models even when the printer

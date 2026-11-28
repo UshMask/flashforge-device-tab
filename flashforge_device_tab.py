@@ -4,9 +4,10 @@
 # name = "FlashForge Device Tab"
 # description = "Follow local FlashForge prints in OrcaSlicer's Device or FlashForge tab."
 # author = "Max"
-# version = "1.14.1"
+# version = "1.14.2"
 # ///
 import base64
+import errno
 import hashlib
 import http.client
 import ipaddress
@@ -652,6 +653,17 @@ details.panel:not([open]) > summary.panel-title {border-radius:11px}
 }
 
 #jobPanel {grid-column:1 / -1}
+:root[data-tall-job-card="on"] #jobPanel {min-block-size:210px}
+:root[data-tall-job-card="on"] #jobPanel .jobs-body {align-content:center;gap:8px}
+#placementNotice {margin:0 0 12px;color:var(--warn)}
+#setupDialog {width:min(520px,calc(100vw - 24px))}
+#setupDialog form {max-height:calc(90dvh - 2px);overflow:auto}
+#setupDialog select,#displayPlacement {max-width:100%;min-width:0}
+#setupDialog .settings-actions {flex-wrap:wrap}
+#setupCandidates button {margin-top:4px}
+#setupDialog .printer-fields {border:0;padding:0}
+#setupDialog .printer-fields .caption {grid-column:1 / -1}
+#setupStatus:empty,#setupCandidates:empty {display:none}
 #cameraSettings .tool-body {padding:14px 16px;overflow-wrap:anywhere}
 #cameraSettings .camera-form {padding:0;flex-direction:row}
 #cameraSettings .caption:empty {display:none}
@@ -796,16 +808,13 @@ main:has(.dashboard.stale) #job > * {opacity:.65}
     <div class="view-tabs"><button id="monitorTab" data-icon="monitor">{{t:Monitor}}</button><button id="fleetToggle" data-icon="fleet">{{t:All printers}}</button><button id="historyTab" data-icon="history">{{t:History}}</button>
     </div><div class="view-actions"><select id="devicePicker" aria-label="{{t:Open printer}}" hidden></select><button id="notificationsButton" data-icon="bell">{{t:Notifications}}</button><button id="settingsButton" data-icon="settings" aria-haspopup="dialog">{{t:Settings}}</button>
   </div></nav>
+  <p class="caption" id="placementNotice" role="status" hidden></p>
 
   <section class="panel" id="setup" hidden>
     <h2 class="panel-title">{{t:Set up your first printer}}</h2>
     <div class="tool-body setup">
-      <ol>
-        <li>{{t:Press Settings in the panel header.}}</li>
-        <li>{{t:Choose Find printers or enter the address. The CheckCode is in the printer's network settings.}}</li>
-        <li>{{t:Save and wait a few seconds: temperatures and progress appear here.}}</li>
-      </ol>
-      <p class="caption">{{t:Connect to FlashForge printers on your local network.}}</p>
+      <button id="openSetup" type="button" data-icon="plus">{{t:Add printer}}</button>
+      <p class="caption" id="setupOutcome" role="status" hidden></p>
     </div>
   </section>
   <section id="jobs" aria-label="{{t:All printers}}" hidden>
@@ -1075,6 +1084,33 @@ main:has(.dashboard.stale) #job > * {opacity:.65}
     </div>
   </details>
 </main>
+<dialog class="settings" id="setupDialog" aria-labelledby="setupTitle">
+  <form id="setupForm" novalidate>
+    <h2 id="setupTitle">{{t:Set up your first printer}}</h2>
+    <section id="setupPlacementStep">
+      <label for="setupPlacement">{{t:Tab placement}}</label>
+      <select id="setupPlacement" aria-describedby="setupPlacementHint">
+        <option value="device">{{t:Replace Printer tab}}</option><option value="flashforge">FlashForge</option>
+      </select>
+      <p id="setupPlacementHint" class="caption" hidden>{{t:Save this setting, then restart OrcaSlicer to switch tabs.}}</p>
+    </section>
+    <section id="setupPrinterStep" hidden>
+      <div class="row">
+        <button type="button" id="setupFind" data-icon="find">{{t:Find printers}}</button>
+        <button type="button" id="setupManual">{{t:Enter IP manually}}</button>
+      </div>
+      <div class="row" id="setupCandidates"></div>
+      <div id="setupPrinterFields" hidden></div>
+    </section>
+    <p id="setupStatus" class="caption" role="status"></p>
+    <div class="settings-actions">
+      <button type="button" id="setupCancel">{{t:Cancel}}</button>
+      <button type="button" id="setupBack" hidden>{{t:Back}}</button>
+      <button type="button" id="setupNext" data-icon="arrow">{{t:Next}}</button>
+      <button type="submit" id="setupSave" data-icon="check" hidden>{{t:Save}}</button>
+    </div>
+  </form>
+</dialog>
 <dialog class="settings" id="settingsDialog" aria-labelledby="settingsTitle">
   <form id="settingsForm" novalidate>
     <h2 id="settingsTitle">{{t:Settings}}</h2>
@@ -1100,6 +1136,11 @@ main:has(.dashboard.stale) #job > * {opacity:.65}
           </select></label>
         </section>
         <section class="settings-fields" id="settingsMonitor" aria-labelledby="settingsMonitorTab" hidden>
+          <label for="displayPlacement">{{t:Tab placement}}<select id="displayPlacement" aria-describedby="displayPlacementHint" disabled>
+            <option value="device">{{t:Replace Printer tab}}</option><option value="flashforge">FlashForge</option>
+          </select></label>
+          <p id="displayPlacementHint" class="caption" role="status" hidden></p>
+          <label for="displayTallJobCard">{{t:Taller print job card}}<input type="checkbox" id="displayTallJobCard"></label>
           <label for="displayMonitorChart">{{t:Temperatures}}<input type="checkbox" id="displayMonitorChart"></label>
           <label for="displayChartLayout">{{t:Chart layout}}<select id="displayChartLayout">
             <option value="shared">{{t:Shared scale}}</option>
@@ -1208,7 +1249,7 @@ const systemTheme = matchMedia('(prefers-color-scheme: dark)');
 const chartLineKeys = ['nozzle','nozzleTarget','bed','bedTarget'];
 const defaults = {
   theme:'system', density:'standard', cardSize:'medium', rows:3, previews:true,
-  monitorChart:true, chartLayout:'shared', chartRange:30, chartLines:chartLineKeys,
+  tallJobCard:true, monitorChart:true, chartLayout:'shared', chartRange:30, chartLines:chartLineKeys,
   printerDetails:true, fleetDetails:true, fleetWaitForRemoval:true, historyTotals:true
 };
 function readDisplaySettings() {
@@ -1222,6 +1263,7 @@ function readDisplaySettings() {
     cardSize:['small','medium','large'].includes(saved.cardSize) ? saved.cardSize : defaults.cardSize,
     rows:Number.isInteger(saved.rows) && saved.rows >= 1 && saved.rows <= 6 ? saved.rows : defaults.rows,
     previews:typeof saved.previews === 'boolean' ? saved.previews : defaults.previews,
+    tallJobCard:saved.tallJobCard !== false,
     monitorChart:saved.monitorChart !== false,
     chartLayout:saved.chartLayout === 'separate' ? 'separate' : 'shared',
     chartRange:[5,15,30].includes(saved.chartRange) ? saved.chartRange : defaults.chartRange,
@@ -1238,6 +1280,7 @@ function applyDisplayStyles() {
   root.dataset.theme = display.theme === 'system' ? (systemTheme.matches ? 'dark' : 'light') : display.theme;
   root.dataset.density = display.density;
   root.dataset.cardSize = display.cardSize;
+  root.dataset.tallJobCard = display.tallJobCard ? 'on' : 'off';
   root.dataset.fleetDetails = display.fleetDetails ? 'on' : 'off';
   el('temperaturesPanel').hidden = !display.monitorChart;
   el('printerDetails').hidden = !display.printerDetails;
@@ -1287,7 +1330,7 @@ async function diagnose(host) {
     const url = host ? new URL('/' + encodeURIComponent(host) + '/diagnostics', location.origin) : endpoint('/diagnostics');
     const data = await postLocal('diagnostics', url);
     if (!current()) return;
-    showInfo(t("Connection check"), ['FlashForge Device Tab 1.14.1', t("Transport: {transport}", {transport:data.transport}), t("Status: received"),
+    showInfo(t("Connection check"), ['FlashForge Device Tab 1.14.2', t("Transport: {transport}", {transport:data.transport}), t("Status: received"),
       t("Authenticated readings: {availability}", {availability:data.authenticated ? t("available") : t("unavailable")}),
       t("Camera URL: {status}", {status:data.cameraReported ? t("reported; stream not tested") : t("not reported")})].join('\n'), true);
   } catch (error) { if (current()) showInfo(t("Connection check"), error.message, true); }
@@ -1419,6 +1462,7 @@ setInterval(updateAge,1000);
 
 const selectedPrinter = new URL(location.href).searchParams.get('printer');
 const separateTab = location.pathname === '/flashforge/';
+const setupTab = location.pathname === '/setup/';
 const nativePage = el('nativePage');
 function endpoint(path) {
   const url = new URL(path.replace(/^\//, ''), location.href);
@@ -1451,7 +1495,7 @@ async function getJson(path) {
   return data;
 }
 
-if (!separateTab && !selectedPrinter) {
+if (!separateTab && !setupTab && !selectedPrinter) {
   getJson('/native').then(({url}) => {
     if (url) {
       nativePage.href = url;
@@ -1681,6 +1725,7 @@ for (const canvas of [chart, chartBed]) {
   canvas.onpointerleave = () => {el('chartSample').textContent = '';};
 }
 async function updateTools() {
+  if (setupTab) return;
   updateHistory();
   try {
     const data = await getJson('/telemetry');
@@ -2126,7 +2171,7 @@ function updateJob(data) {
 }
 
 async function updateStatus() {
-  if (polling || document.visibilityState !== 'visible') return;
+  if (setupTab || polling || document.visibilityState !== 'visible') return;
   polling = true;
   const connection = el('status');
   try {
@@ -3388,7 +3433,7 @@ function applyView() {
   el('status').hidden = !showMonitor;
   el('monitorHistory').hidden = !showMonitor || !current;
   el('jobs').hidden = !showFleet;
-  el('setup').hidden = hasPrinters || showHistory;
+  el('setup').hidden = !setupTab && (hasPrinters || showHistory);
   el('history').hidden = !showHistory;
   if (showHistory) el('history').open = true;
   for (const id of ['monitor','printerTools','files-section']) el(id).hidden = !showMonitor;
@@ -3509,15 +3554,24 @@ el('cancelPrint').onclick = () => {
 };
 el('cameraSnapshot').onclick = downloadSnapshot;
 
-function printerRow(entry = {}) {
+function printerRow(entry = {}, wizard = false) {
   const row = document.createElement('fieldset');
   row.className = 'printer-fields';
-  for (const [key,title] of [['name',t("Name")],['host',t("IPv4 address")],['serial',t("Serial number")],['code','CheckCode']]) {
+  const fields = {name:t("Name"),host:t("IPv4 address"),serial:t("Serial number"),code:'CheckCode'};
+  if (wizard) fields.name = t("Name (optional)");
+  for (const key of wizard ? ['host','code','serial','name'] : Object.keys(fields)) {
     const label = document.createElement('label'), input = document.createElement('input');
-    label.textContent = title; input.dataset.key = key; input.value = entry[key] || '';
+    label.textContent = fields[key]; input.dataset.key = key; input.value = entry[key] || '';
     input.type = key === 'code' ? 'password' : 'text';input.autocomplete = 'off';
     if (key === 'host') input.required = true;
     label.append(input);row.append(label);
+  }
+  if (wizard) {
+    const hint = document.createElement('p');
+    hint.className = 'caption';
+    hint.textContent = t("Find the IP address and CheckCode in the printer’s network settings, and the serial number in its device information or on its label.")
+      + ' ' + t("For Creator 5 and 5 Pro, enable LAN-only mode and enter both CheckCode and serial number.");
+    row.append(hint);
   }
   const check=document.createElement('button'), remove=document.createElement('button'), status=document.createElement('p');
   check.type=remove.type='button';check.textContent=t("Check connection");remove.textContent=t("Remove");
@@ -3528,8 +3582,8 @@ function printerRow(entry = {}) {
   row.oninput = () => { revision++; status.textContent = ''; };
   check.onclick = async () => {
     const attempt = ++revision;
-    const current = () => row.isConnected && settingsDialog.open && revision === attempt;
-    const values = Object.fromEntries(Array.from(row.querySelectorAll('input'), input => [input.dataset.key,input.value.trim()]));
+    const current = () => row.isConnected && row.closest('dialog')?.open && revision === attempt;
+    const values = printerValues(row);
     check.disabled = true;
     status.dataset.result = '';
     status.textContent = t("Checking connection…");
@@ -3548,26 +3602,26 @@ function printerRow(entry = {}) {
     finally { check.disabled = false; }
   };
   remove.onclick=()=>row.remove();
-  row.append(check,remove,status);return row;
+  row.append(check);
+  if (!wizard) row.append(remove);
+  row.append(status);
+  return row;
+}
+function printerValues(row) {
+  return Object.fromEntries(Array.from(row.querySelectorAll('input'), input=>[input.dataset.key,input.value.trim()]));
 }
 function fieldPrinters() {
-  return Array.from(el('printerFields').children,row => Object.fromEntries(
-    Array.from(row.querySelectorAll('input'), input=>[input.dataset.key,input.value.trim()])));
+  return Array.from(el('printerFields').children, printerValues);
 }
-function setRows(entries) {el('printerFields').replaceChildren(...entries.map(printerRow));}
+function setRows(entries) {el('printerFields').replaceChildren(...entries.map(entry => printerRow(entry)));}
 el('addPrinter').onclick=()=>el('printerFields').append(printerRow());
-let settingsRevision = 0;
-el('findPrinters').onclick = async () => {
-  const revision = settingsRevision;
-  const button = el('findPrinters'), list = el('discoveredPrinters'), status = el('settingsStatus');
-  const current = () => settingsDialog.open && revision === settingsRevision && !el('bulk').open;
-  button.disabled = true;
+async function printerCandidates(list, status, current, choose, exclude = () => []) {
   list.replaceChildren();
   status.textContent = t("Searching…");
   try {
     const {printers} = await postLocal('discover');
     if (!current()) return;
-    const configured = new Set(fieldPrinters().map(printer => printer.host));
+    const configured = new Set(exclude());
     const found = printers.filter(printer => !configured.has(printer.host));
     status.textContent = found.length ? t("Select a printer to add.") : t("No new printers found.");
     list.replaceChildren(...found.map(printer => {
@@ -3575,21 +3629,155 @@ el('findPrinters').onclick = async () => {
       add.type = 'button';
       add.dataset.icon = 'plus';
       add.textContent = printer.name + ' · ' + printer.host;
-      add.onclick = () => {
-        if (fieldPrinters().some(entry => entry.host === printer.host)) { add.remove(); return; }
-        const row = printerRow(printer);
-        const empty = [...el('printerFields').children].find(fieldset => [...fieldset.querySelectorAll('input')].every(input => !input.value.trim()));
-        if (empty) empty.replaceWith(row);
-        else el('printerFields').append(row);
-        add.remove();
-        status.textContent = '';
-        row.querySelector('[data-key="code"]').focus();
-      };
+      add.onclick = () => { choose(printer); add.remove(); status.textContent = ''; };
       return add;
     }));
   } catch (error) { if (current()) status.textContent = error.message; }
-  finally { if (revision === settingsRevision) button.disabled = false; }
+}
+let settingsRevision = 0;
+el('findPrinters').onclick = async () => {
+  const revision = settingsRevision;
+  const button = el('findPrinters');
+  const current = () => settingsDialog.open && revision === settingsRevision && !el('bulk').open;
+  button.disabled = true;
+  try {
+    await printerCandidates(el('discoveredPrinters'), el('settingsStatus'), current, printer => {
+      if (fieldPrinters().some(entry => entry.host === printer.host)) return;
+      const row = printerRow(printer);
+      const empty = [...el('printerFields').children].find(fieldset => Object.values(printerValues(fieldset)).every(value => !value));
+      if (empty) empty.replaceWith(row);
+      else el('printerFields').append(row);
+      row.querySelector('[data-key="code"]').focus();
+    }, () => fieldPrinters().map(printer => printer.host));
+  } finally {
+    if (revision === settingsRevision) button.disabled = false;
+  }
 };
+
+let placementState = {active:'device',saved:'device'};
+function readPlacement(data) {
+  if (!['device','flashforge'].includes(data.placement)) return;
+  placementState = {active:data.placement,saved:data.savedPlacement || data.placement};
+  const notice = el('placementNotice');
+  notice.hidden = placementState.saved === placementState.active;
+  notice.textContent = notice.hidden ? '' : t("Saved. Restart OrcaSlicer to apply the change.");
+}
+function placementHint(select, hint) {
+  hint.hidden = select.value === placementState.active;
+  hint.textContent = hint.hidden ? '' : select.value === placementState.saved
+    ? t("Saved. Restart OrcaSlicer to apply the change.")
+    : t("Save this setting, then restart OrcaSlicer to switch tabs.");
+}
+el('displayPlacement').onchange = () => placementHint(el('displayPlacement'), el('displayPlacementHint'));
+el('setupPlacement').onchange = () => placementHint(el('setupPlacement'), el('setupPlacementHint'));
+
+const setupDialog = el('setupDialog');
+const setupFields = el('setupPrinterFields');
+const setupStatus = el('setupStatus');
+const setupSeenKey = 'ff-first-printer-setup-seen';
+let setupRevision = 0;
+let savingSetup = false;
+function setupStep(printer) {
+  el('setupPlacementStep').hidden = printer;
+  el('setupPrinterStep').hidden = !printer;
+  el('setupNext').hidden = printer;
+  el('setupBack').hidden = !printer;
+  el('setupSave').hidden = !printer || setupFields.hidden;
+  setupStatus.textContent = '';
+  if (printer) (setupFields.hidden ? el('setupFind') : setupFields.querySelector('[data-key="host"]')).focus();
+  else el('setupPlacement').focus();
+}
+function openSetup(data) {
+  if (setupDialog.open || settingsDialog.open || data.printers.length) return;
+  setupRevision++;
+  readPlacement(data);
+  el('setupPlacement').value = placementState.saved;
+  placementHint(el('setupPlacement'), el('setupPlacementHint'));
+  setupFields.replaceChildren(printerRow({host:data.setupHost || ''}, true));
+  setupFields.hidden = !data.setupHost;
+  el('setupCandidates').replaceChildren();
+  el('setupFind').disabled = false;
+  setupDialog.showModal();
+  setupStep(false);
+  try { localStorage.setItem(setupSeenKey, '1'); } catch {}
+}
+async function startSetup(manual = false) {
+  try {
+    const data = await getJson('/settings');
+    readPlacement(data);
+    if (data.printers.length) {
+      el('openSetup').hidden = true;
+      if (setupTab && placementState.active === 'device' && placementState.saved === 'device') {
+        el('setupOutcome').hidden = false;
+        el('setupOutcome').textContent = t("Select a printer profile that uses the FlashForge host.");
+      }
+      return;
+    }
+    if (manual || new URL(location.href).searchParams.has('wizard') || !localStorage.getItem(setupSeenKey)) openSetup(data);
+  } catch (error) {
+    if (manual) {
+      el('setupOutcome').hidden = false;
+      el('setupOutcome').textContent = error.message || t("Could not read the settings.");
+    }
+  }
+}
+el('openSetup').onclick = () => startSetup(true);
+el('setupCancel').onclick = () => setupDialog.close();
+setupDialog.addEventListener('cancel', event => { if (savingSetup) event.preventDefault(); });
+el('setupNext').onclick = () => setupStep(true);
+el('setupBack').onclick = () => setupStep(false);
+el('setupManual').onclick = () => {
+  setupFields.hidden = false;
+  el('setupSave').hidden = false;
+  setupFields.querySelector('[data-key="host"]').focus();
+};
+el('setupFind').onclick = async () => {
+  const revision = setupRevision;
+  const button = el('setupFind');
+  const current = () => setupDialog.open && revision === setupRevision && !savingSetup;
+  button.disabled = true;
+  try {
+    await printerCandidates(el('setupCandidates'), setupStatus, current, printer => {
+      setupFields.replaceChildren(printerRow(printer, true));
+      setupFields.hidden = false;
+      el('setupSave').hidden = false;
+      setupFields.querySelector('[data-key="code"]').focus();
+    });
+  } finally {
+    if (revision === setupRevision) button.disabled = false;
+  }
+};
+el('setupForm').onsubmit = async event => {
+  event.preventDefault();
+  if (!setupDialog.open || savingSetup || el('setupSave').hidden) return;
+  const host = setupFields.querySelector('[data-key="host"]');
+  if (!host.value.trim()) { host.focus(); host.reportValidity(); return; }
+  savingSetup = true;
+  const form = el('setupForm');
+  form.inert = true;
+  setupStatus.textContent = t("Saving…");
+  try {
+    const data = await postLocal('settings', endpoint('/settings'), {
+      printers:[printerValues(setupFields)], placement:el('setupPlacement').value, first:true
+    });
+    readPlacement(data);
+    setupDialog.close();
+    if (setupTab && !new URL(location.href).searchParams.has('wizard') && data.setupHost === data.endpoint) {
+      location.replace('/' + encodeURIComponent(data.endpoint) + '/');
+    } else if (setupTab) {
+      await startSetup();
+    } else {
+      await updateTools();
+      await updateStatus();
+    }
+  } catch (error) {
+    setupStatus.textContent = error.message || t("Could not save the settings.");
+  } finally {
+    form.inert = false;
+    savingSetup = false;
+  }
+};
+
 let bulkActive=false;
 el('bulk').ontoggle=()=>{
   const open=el('bulk').open;
@@ -3634,6 +3822,9 @@ el('settingsButton').onclick = async () => {
   el('settingsSaveStatus').textContent = '';
   el('findPrinters').disabled = true;
   el('addPrinter').disabled = true;
+  el('displayPlacement').disabled = true;
+  el('displayPlacement').value = placementState.saved;
+  placementHint(el('displayPlacement'), el('displayPlacementHint'));
   el('discoveredPrinters').replaceChildren();
   el('printerFields').replaceChildren();
   el('printersText').value = '';
@@ -3642,6 +3833,7 @@ el('settingsButton').onclick = async () => {
   el('displayCardSize').value = display.cardSize;
   el('displayRows').value = display.rows;
   el('displayPreviews').checked = display.previews;
+  el('displayTallJobCard').checked = display.tallJobCard;
   el('displayMonitorChart').checked = display.monitorChart;
   el('displayChartLayout').value = display.chartLayout;
   el('displayChartRange').value = String(display.chartRange);
@@ -3656,6 +3848,10 @@ el('settingsButton').onclick = async () => {
   try {
     const data = await getJson('/settings');
     if (!settingsDialog.open || revision !== settingsRevision) return;
+    readPlacement(data);
+    el('displayPlacement').value = placementState.saved;
+    el('displayPlacement').disabled = !data.savedPlacement;
+    placementHint(el('displayPlacement'), el('displayPlacementHint'));
     printerSettingsSnapshot = formatPrinters(data.printers);
     el('printersText').value = printerSettingsSnapshot;
     setRows(data.printers.length ? data.printers : [{}]);
@@ -3689,15 +3885,18 @@ el('settingsForm').onsubmit = async event => {
     }
     let printers, data;
     if (printerSettingsSnapshot !== null) {
+      const payload = {};
       try {
         printers = el('bulk').open ? parsePrinters(el('printersText').value)
           : fieldPrinters().filter(printer => Object.values(printer).some(Boolean));
-        if (formatPrinters(printers) !== printerSettingsSnapshot) {
-          data = await postLocal('settings', endpoint('/settings'), {printers});
-          printerSettingsSnapshot = formatPrinters(printers);
-        }
+        if (formatPrinters(printers) !== printerSettingsSnapshot) payload.printers = printers;
+        const placement = el('displayPlacement');
+        if (!placement.disabled && placement.value !== placementState.saved) payload.placement = placement.value;
+        if (Object.keys(payload).length) data = await postLocal('settings', endpoint('/settings'), payload);
+        if (data) readPlacement(data);
+        if (payload.printers) printerSettingsSnapshot = formatPrinters(printers);
       } catch (error) {
-        showSettingsSection('settingsPrinters');
+        showSettingsSection(payload.placement && !payload.printers ? 'settingsMonitor' : 'settingsPrinters');
         throw error;
       }
     }
@@ -3705,6 +3904,7 @@ el('settingsForm').onsubmit = async event => {
       theme:el('displayTheme').value, density:el('displayDensity').value,
       cardSize:el('displayCardSize').value, rows:Number(el('displayRows').value),
       previews:el('displayPreviews').checked,
+      tallJobCard:el('displayTallJobCard').checked,
       monitorChart:el('displayMonitorChart').checked,
       chartLayout:el('displayChartLayout').value,
       chartRange:Number(el('displayChartRange').value),
@@ -3726,7 +3926,11 @@ el('settingsForm').onsubmit = async event => {
     setFleetCameraMode(el('displayFleetCameras').value);
     settingsDialog.close();
     if (!data) return;
-    if (!separateTab && data.moved && !printers.some(p => location.pathname === '/' + p.host + '/')) {
+    if (setupTab) {
+      if (data.setupHost && !new URL(location.href).searchParams.has('wizard')) {
+        location.replace('/' + encodeURIComponent(data.setupHost) + '/');
+      } else await startSetup(false);
+    } else if (!separateTab && data.moved && !printers.some(p => location.pathname === '/' + p.host + '/')) {
       location.assign('/' + encodeURIComponent(data.endpoint) + '/');
     } else if (selectedPrinter && !printers.some(p => p.host === selectedPrinter)) {
       location.assign(location.pathname);
@@ -3741,6 +3945,7 @@ el('settingsForm').onsubmit = async event => {
   }
 };
 applyView();
+startSetup();
 let nextPanelPoll = 0;
 setInterval(() => {
   const now = performance.now();
@@ -3785,7 +3990,7 @@ button:disabled {opacity:.55;cursor:default}
 <main>
   <section class="config-group" aria-labelledby="placementTitle">
     <h2 id="placementTitle"><svg class="config-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 5h18v14H3z M3 10h18 M9 5v5 M15 5v5"/></svg>{{t:Tab placement}}</h2>
-    <select id="tabPlacement" aria-labelledby="placementTitle" aria-describedby="placementHelp"><option value="flashforge">{{t:Separate FlashForge tab (default)}}</option><option value="device">{{t:Replace Printer tab}}</option></select>
+    <select id="tabPlacement" aria-labelledby="placementTitle" aria-describedby="placementHelp"><option value="device">{{t:Replace Printer tab}}</option><option value="flashforge">FlashForge</option></select>
     <p id="placementHelp" role="status" hidden></p>
   </section>
   <section class="config-group">
@@ -3832,7 +4037,7 @@ function updatePlacementNotice() {
 placement.onchange = updatePlacementNotice;
 window.orca.onConfig(config => {
   printers = Array.isArray(config.printers) ? config.printers : [];
-  placement.value = config.placement === 'device' ? 'device' : 'flashforge';
+  placement.value = ['device','flashforge'].includes(config.placement) ? config.placement : activePlacement;
   language.value = [...language.options].some(option => option.value === config.language) ? config.language : '';
   const first = printers[0];
   fields.flashforge_host.value = first?.host || config.flashforge_host || '';
@@ -5356,24 +5561,34 @@ class UploadInProgress(Exception):
 WEB_HOST = "127.0.0.1"
 WEB_PORT = 18771
 LEGACY_WEB_PORTS = (18769, 18765)
+MONITOR_BIND_ERROR = "The local FlashForge port ({address}) is in use or reserved. Close all OrcaSlicer windows and reopen OrcaSlicer."
 DEVICE_UI_KEY = "print_host_webui"
 MONITOR_TITLE = "FlashForge"
 # OrcaSlicer reads registered capabilities before capability config is available.
 PLACEMENT_FILE = Path(__file__).with_name("monitor-placement.txt")
+SETUP_PAGE = "setup"
 
 
-DEFAULT_PLACEMENT = "flashforge"
+DEFAULT_PLACEMENT = "device"
 
 
-def normalize_placement(value):
-    return "device" if value == "device" else DEFAULT_PLACEMENT
+def normalize_placement(value, fallback=DEFAULT_PLACEMENT):
+    return value if value in ("device", "flashforge") else fallback
 
 
 def startup_placement():
     try:
-        return normalize_placement(PLACEMENT_FILE.read_text(encoding="ascii").strip())
-    except (OSError, UnicodeError):
-        return DEFAULT_PLACEMENT
+        storage = Path(orca.host.plugin.storage())
+    except (AttributeError, OSError, RuntimeError):
+        storage = PLACEMENT_FILE.parent
+    for path in (storage / PLACEMENT_FILE.name, PLACEMENT_FILE):
+        try:
+            choice = normalize_placement(path.read_text(encoding="ascii").strip(), None)
+        except (OSError, UnicodeError):
+            continue
+        if choice is not None:
+            return choice
+    return DEFAULT_PLACEMENT
 
 
 def monitor_url(endpoint=""):
@@ -5389,7 +5604,7 @@ def monitor_identity(url):
     if url.scheme != "http" or url.netloc not in {f"{WEB_HOST}:{port}" for port in (WEB_PORT, *LEGACY_WEB_PORTS)}:
         return None
     parts = url.path.strip("/").split("/")
-    if not parts[0]:
+    if parts in ([""], [SETUP_PAGE]):
         return ""
     try:
         return local_address(parts[0]) if len(parts) == 1 else None
@@ -5405,10 +5620,29 @@ def printer_endpoint(print_host):
     return local_address(url.hostname)
 
 
-class LoopbackServer(ThreadingMixIn, HTTPServer):
+def is_flashforge_profile(preset):
+    return (preset.config_value("host_type") == "flashforge"
+            or (preset.config_value("printer_model") or "").casefold().startswith("flashforge "))
+
+
+class LoopbackHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
+    allow_reuse_address = not hasattr(socket, "SO_EXCLUSIVEADDRUSE")
+
+    def server_bind(self):
+        # Winsock's SO_REUSEADDR can let two servers listen on the same port.
+        if not self.allow_reuse_address:
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        # The numeric loopback address does not need a hostname lookup.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address
+
+
+class LoopbackServer(LoopbackHTTPServer):
+    poller = None
     native_page = None
     check_view = None
+    setup_profile = None
 
     placement = DEFAULT_PLACEMENT
     host_language = "en"
@@ -5463,7 +5697,6 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
         self.uploading = threading.Event()
         self.uploaded_at = 0.0
         self.stopping = threading.Event()
-        self.poller = None
         self.viewed_host = ""
         try:
             saved = json.loads((storage / "notifications.json").read_text(encoding="utf-8"))
@@ -5506,7 +5739,9 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
     def settings_payload(self):
         printers = self.printers()
         return {"printers": printers, "endpoint": printers[0]["host"] if printers else "",
-                "notifications": self.notifications, "placement": self.placement}
+                "notifications": self.notifications, "placement": self.placement,
+                "savedPlacement": normalize_placement(self.get_config().get("placement"), self.placement),
+                "setupHost": self.setup_profile() if not printers and self.setup_profile else ""}
 
     def remember_history_names(self, entries):
         names = {**self.history_names, **{entry["host"]: entry["name"] for entry in entries}}
@@ -5746,20 +5981,10 @@ class LoopbackServer(ThreadingMixIn, HTTPServer):
         if self.poller is not None:
             self.poller.join(timeout=3)
 
-    def server_bind(self):
-        # HTTPServer.server_bind() resolves the host name. A numeric loopback
-        # listener only needs the socket permission for its configured address.
-        TCPServer.server_bind(self)
-        self.server_name, self.server_port = self.server_address
-
     def get_request(self):
         connection, address = super().get_request()
         connection.settimeout(2)
         return connection, address
-
-
-class AliasServer(ThreadingMixIn, HTTPServer):
-    daemon_threads = True
 
 
 class AliasRedirectHandler(BaseHTTPRequestHandler):
@@ -5805,6 +6030,8 @@ class MonitorHandler(BaseHTTPRequestHandler):
         return requested[0]
 
     def checked_printer(self, endpoint):
+        if endpoint == SETUP_PAGE:
+            raise ValueError("This printer is not configured yet.")
         if endpoint == "flashforge":
             if self.server.placement != "flashforge":
                 raise ValueError("The monitor is in the Printer tab.")
@@ -6211,14 +6438,29 @@ class MonitorHandler(BaseHTTPRequestHandler):
             return
         try:
             previous = self.server.settings_for()[0]
-            endpoint = apply(payload.get("printers"))
+            if "placement" in payload or "first" in payload:
+                if ("placement" in payload and payload["placement"] not in ("device", "flashforge")
+                        or "first" in payload and type(payload["first"]) is not bool
+                        or "printers" in payload and not isinstance(payload["printers"], list)
+                        or payload.get("first") and not payload.get("printers")):
+                    raise ValueError("Invalid request.")
+                endpoint = apply(payload.get("printers"), placement=payload.get("placement"),
+                                 first=payload.get("first", False))
+            else:
+                if not isinstance(payload.get("printers"), list):
+                    raise ValueError("Invalid printer list.")
+                endpoint = apply(payload["printers"])
         except ValueError as error:
             self.reply_json({"error": str(error)}, 400)
             return
         except (OSError, RuntimeError) as error:
             self.reply_json({"error": str(error)}, 409)
             return
-        self.reply_json({"endpoint": endpoint, "moved": endpoint != previous})
+        self.reply_json({"endpoint": endpoint, "moved": endpoint != previous,
+                         "placement": self.server.placement,
+                         "savedPlacement": normalize_placement(self.server.get_config().get("placement"),
+                                                               self.server.placement),
+                         "setupHost": self.server.setup_profile() if self.server.setup_profile else ""})
 
     def do_GET(self):
         if self.headers.get("Host") != f"{WEB_HOST}:{WEB_PORT}":
@@ -6260,7 +6502,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
             return
         if route == "native":
             try:
-                url = self.server.native_page(endpoint) if self.server.native_page and endpoint != "flashforge" else ""
+                url = self.server.native_page(endpoint) if self.server.native_page and endpoint not in ("flashforge", SETUP_PAGE) else ""
             except (OSError, RuntimeError, ValueError) as error:
                 self.reply_json({"error": str(error)}, 409)
             else:
@@ -6409,6 +6651,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
 
 class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
     _server = None
+    _setup_window = None
     instance = None
     active_placement = DEFAULT_PLACEMENT
     host_language = "en"
@@ -6418,7 +6661,7 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
 
     def get_default_config(self):
         return {"printers": [], "flashforge_host": "", "check_code": "", "serial_number": "",
-                "placement": DEFAULT_PLACEMENT, "language": ""}
+                "placement": self.active_placement, "language": ""}
 
     def has_config_ui(self):
         return True
@@ -6455,7 +6698,7 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         result = {name: config[name].strip() if isinstance(config.get(name), str) else ""
                   for name in ("flashforge_host", "check_code", "serial_number")}
         result["printers"] = config.get("printers") if isinstance(config.get("printers"), list) else []
-        result["placement"] = normalize_placement(config.get("placement"))
+        result["placement"] = normalize_placement(config.get("placement"), self.active_placement)
         result["language"] = normalize_language(config.get("language"), "")
         return result
 
@@ -6467,10 +6710,17 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         self._page_store = storage / "device-pages.json"
         self._switch_lock = threading.Lock()
         self._placement_lock = threading.Lock()
-        self._next_placement = self.active_placement
+        self._next_placement = None
         self._stopping = threading.Event()
         self._view_refresh = threading.Event()
-        server = LoopbackServer((WEB_HOST, WEB_PORT), MonitorHandler)
+        try:
+            server = LoopbackServer((WEB_HOST, WEB_PORT), MonitorHandler)
+        except OSError as error:
+            # Windows also reports an exclusively bound or reserved port as WSAEACCES.
+            if error.errno != errno.EADDRINUSE and getattr(error, "winerror", None) not in (10013, 10048):
+                raise
+            message = translate(self.host_language, MONITOR_BIND_ERROR)
+            raise RuntimeError(message.format(address=f"{WEB_HOST}:{WEB_PORT}")) from error
         worker = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': 0.2},
                                   name='FlashForge Device Tab HTTP', daemon=True)
         try:
@@ -6481,6 +6731,7 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             server.act = self.act
             server.notify = self.notify
             server.check_view = self.check_view
+            server.setup_profile = self.setup_profile
             server.apply_settings = self.apply_settings
             worker.start()
         except Exception:
@@ -6488,7 +6739,7 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             raise
         for port in LEGACY_WEB_PORTS:
             try:
-                alias = AliasServer((WEB_HOST, port), AliasRedirectHandler)
+                alias = LoopbackHTTPServer((WEB_HOST, port), AliasRedirectHandler)
             except OSError:
                 continue
             threading.Thread(target=alias.serve_forever, kwargs={'poll_interval': 0.5},
@@ -6497,10 +6748,6 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             self._aliases.append(alias)
         self._server = server
         FlashForgeService.instance = self
-        try:
-            self.adopt_profile_address()
-        except Exception:
-            pass
         # Preset transactions block while Orca dispatches to the UI. Never run
         # them inside on_load or a lifecycle callback, which may own that UI.
         self._view_worker = threading.Thread(target=self._restore_views,
@@ -6532,45 +6779,56 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         if server is None or self._stopping.is_set():
             return
         preset = orca.host.preset_bundle().current_printer_preset()
-        if preset.config_value("host_type") != "flashforge":
-            return
-        endpoint = printer_endpoint(preset.config_value("print_host") or "")
-        current_url = preset.config_value(DEVICE_UI_KEY) or ""
-        show_monitor = self.active_placement == "device"
-        if show_monitor and (current_url == monitor_url(endpoint)
-                             or not any(item["host"] == endpoint for item in server.printers())):
-            return
-        if not show_monitor and monitor_identity(current_url) is None:
-            return
-        expected = (preset.name, endpoint, current_url)
-        self.switch_view(expected_profile=expected)
-
-    def adopt_profile_address(self):
-        """First run after an upgrade: take the address from the active profile."""
-        config = self.config()
-        if config.get("flashforge_host") or config.get("printers"):
-            return
-        preset = orca.host.preset_bundle().current_printer_preset()
-        if preset.config_value("host_type") != "flashforge":
+        if not is_flashforge_profile(preset):
             return
         print_host = preset.config_value("print_host") or ""
-        if not print_host:
+        current_url = preset.config_value(DEVICE_UI_KEY) or ""
+        if self.active_placement == "device":
+            target = self.device_monitor_url(print_host)
+            if not target or current_url == target:
+                return
+        elif monitor_identity(current_url) is None:
             return
-        host = printer_endpoint(print_host)
-        config["flashforge_host"] = host
-        self.save_config(json.dumps(config, ensure_ascii=False))
+        expected = (preset.name, print_host, current_url)
+        self.switch_view(expected_profile=expected)
+
+    def device_monitor_url(self, print_host):
+        printers = self._server.printers()
+        if not printers:
+            return monitor_url(SETUP_PAGE)
+        endpoint = printer_endpoint(print_host) if print_host else printers[0]["host"]
+        return monitor_url(endpoint) if any(item["host"] == endpoint for item in printers) else None
+
+    def setup_profile(self):
+        try:
+            preset = orca.host.preset_bundle().current_printer_preset()
+            if is_flashforge_profile(preset):
+                print_host = preset.config_value("print_host") or ""
+                if print_host:
+                    return printer_endpoint(print_host)
+                if self.active_placement == "device":
+                    return monitor_identity(self.device_monitor_url("") or "") or ""
+        except (AttributeError, OSError, RuntimeError, ValueError):
+            pass
+        return ""
+
+    def write_next_placement(self, placement):
+        if placement == self._next_placement:
+            return
+        # Registration can run before the host exposes plugin storage. Keep a
+        # copy next to the script as well as in the persistent plugin directory.
+        for path in dict.fromkeys((self._page_store.with_name(PLACEMENT_FILE.name), PLACEMENT_FILE)):
+            staged = path.with_suffix(".tmp")
+            staged.write_text(placement, encoding="ascii")
+            os.replace(staged, path)
+        self._next_placement = placement
 
     def sync_next_placement(self):
         # The host's settings iframe only writes capability config. Mirror the
         # saved preference so it is available before the next registration.
         try:
             with self._placement_lock:
-                placement = self.config()["placement"]
-                if placement != self._next_placement:
-                    staged = PLACEMENT_FILE.with_suffix(".tmp")
-                    staged.write_text(placement, encoding="ascii")
-                    os.replace(staged, PLACEMENT_FILE)
-                    self._next_placement = placement
+                self.write_next_placement(self.config()["placement"])
         except (OSError, RuntimeError):
             # A later check or shutdown can retry a transient host/write failure.
             pass
@@ -6611,11 +6869,12 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
     def check_profile_view(self, preset, endpoint):
         if self.active_placement != "device":
             raise ValueError("Open the FlashForge tab to see the monitor.")
-        if preset.config_value("host_type") != "flashforge":
+        if not is_flashforge_profile(preset):
             raise ValueError("Open FlashForge Device Tab for a FlashForge printer profile from Speed Dial.")
         if monitor_identity(preset.config_value(DEVICE_UI_KEY) or "") != endpoint:
             raise ValueError("Open FlashForge Device Tab for the current printer profile from Speed Dial.")
-        current = printer_endpoint(preset.config_value("print_host") or "")
+        print_host = preset.config_value("print_host") or ""
+        current = printer_endpoint(print_host) if print_host else endpoint
         if endpoint and endpoint != current:
             raise ValueError("The printer address changed. Reopen FlashForge Device Tab for the current printer.")
         return current
@@ -6661,23 +6920,25 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                 raise ValueError("FlashForge Device Tab is shutting down.")
             presets = orca.host.preset_bundle().printers
             preset = presets.edited_preset()
-            if preset.config_value("host_type") != "flashforge":
+            if not is_flashforge_profile(preset):
                 raise ValueError("Select a printer profile that uses the FlashForge host.")
             current_url = preset.config_value(DEVICE_UI_KEY) or ""
             print_host = preset.config_value("print_host") or ""
-            endpoint = printer_endpoint(print_host)
-            if expected_profile is not None and expected_profile != (preset.name, endpoint, current_url):
+            if expected_profile is not None and expected_profile != (preset.name, print_host, current_url):
                 raise ValueError("The active printer profile changed. Try again.")
             current_view = monitor_identity(current_url)
             show_monitor = self.active_placement == "device"
-            if (show_monitor and current_url == monitor_url(endpoint)
+            target = self.device_monitor_url(print_host) if show_monitor else None
+            if show_monitor and target is None:
+                raise ValueError("The printer address in the plugin settings does not match the active profile.")
+            if (show_monitor and current_url == target
                     or not show_monitor and current_view is None):
                 return ("FlashForge Device Tab is in the Printer tab." if show_monitor
                         else "Open the FlashForge tab to see the monitor.")
             transaction = orca.host.preset.printer.begin_update()
             edited = presets.edited_preset()
             if (edited.name != transaction.target_name or edited.name != preset.name
-                    or edited.config_value("host_type") != "flashforge"
+                    or not is_flashforge_profile(edited)
                     or edited.config_value("print_host") != print_host
                     or (edited.config_value(DEVICE_UI_KEY) or "") != current_url):
                 raise ValueError("The active printer profile changed. Try again.")
@@ -6686,10 +6947,6 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                 target = self.original_page(preset.name, fallback)
                 message = "Open the FlashForge tab to see the monitor."
             else:
-                entry = next((item for item in self._server.printers() if item["host"] == endpoint), None)
-                if entry is None:
-                    raise ValueError("The printer address in the plugin settings does not match the active profile.")
-                FlashForge(endpoint, entry.get("code", ""))
                 try:
                     pages = self.saved_pages()
                 except ValueError:
@@ -6701,7 +6958,6 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                 pending = self._page_store.with_suffix(".tmp")
                 pending.write_text(json.dumps(pages, ensure_ascii=False), encoding="utf-8")
                 os.replace(pending, self._page_store)
-                target = monitor_url(endpoint)
                 message = "Opened FlashForge Device Tab in the Printer tab."
 
             if self._stopping.is_set():
@@ -6712,11 +6968,11 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
         finally:
             self._switch_lock.release()
 
-    def apply_settings(self, printers):
-        if not isinstance(printers, list):
+    def apply_settings(self, printers=None, *, placement=None, first=False):
+        if printers is not None and not isinstance(printers, list):
             raise ValueError("Invalid printer list.")
         clean = []
-        for entry in printers:
+        for entry in printers or []:
             host, code, serial = printer_credentials(entry)
             if any(item["host"] == host for item in clean):
                 continue
@@ -6724,14 +6980,23 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
                           "name": str(entry.get("name") or host)[:60]})
             if serial:
                 clean[-1]["serial"] = serial
-        if not clean:
+        if printers is not None and not clean:
             raise ValueError("Add at least one printer address.")
-        host, check_code = clean[0]["host"], clean[0]["code"]
-        previous_host = self._server.settings_for()[0]
-        config = self.config()
-        config.update(printers=clean, flashforge_host=host, check_code=check_code,
-                      serial_number=clean[0].get("serial", ""))
-        self.save_config(json.dumps(config, ensure_ascii=False))
+        with self._placement_lock:
+            previous_host = self._server.settings_for()[0]
+            if first and previous_host:
+                raise RuntimeError("A printer is already configured.")
+            config = self.config()
+            if placement is not None:
+                config["placement"] = placement
+            host = previous_host
+            if clean:
+                host = clean[0]["host"]
+                config.update(printers=clean, flashforge_host=host, check_code=clean[0]["code"],
+                              serial_number=clean[0].get("serial", ""))
+            self.save_config(json.dumps(config, ensure_ascii=False))
+            if placement is not None:
+                self.write_next_placement(placement)
         if self.active_placement == "device" and host != previous_host:
             self._point_device_tab(host)
         self._view_refresh.set()
@@ -6743,12 +7008,15 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
             preset = orca.host.preset_bundle().current_printer_preset()
             if preset.config_value("host_type") != "flashforge":
                 return
-            current = printer_endpoint(preset.config_value("print_host") or "")
+            print_host = preset.config_value("print_host") or ""
+            current = printer_endpoint(print_host) if print_host else ""
             if current == host:
                 return
             transaction = orca.host.preset.printer.begin_update()
             edited = orca.host.preset_bundle().printers.edited_preset()
-            if edited.name != transaction.target_name:
+            if (edited.name != transaction.target_name or edited.name != preset.name
+                    or edited.config_value("host_type") != "flashforge"
+                    or (edited.config_value("print_host") or "") != print_host):
                 return
             if monitor_identity(edited.config_value(DEVICE_UI_KEY) or "") == current:
                 transaction.set(DEVICE_UI_KEY, monitor_url(host))
@@ -7086,7 +7354,17 @@ class FlashForgeService(orca.script.ScriptPluginCapabilityBase):
     def execute(self):
         language = self.interface_language()
         try:
-            message = self.switch_view()
+            preset = orca.host.preset_bundle().current_printer_preset()
+            if self._server is not None and not self._server.printers() and (
+                    self.active_placement == "flashforge" or not is_flashforge_profile(preset)):
+                if self._setup_window is None or not self._setup_window.is_open():
+                    url = monitor_url(SETUP_PAGE) + "?wizard=1"
+                    html = f'<script>location.replace({json.dumps(url)})</script>'
+                    self._setup_window = orca.host.ui.create_window(
+                        html, translate(language, "Set up your first printer"), width=560, height=640)
+                message = "Set up your first printer"
+            else:
+                message = self.switch_view()
         except (OSError, RuntimeError, ValueError) as error:
             return orca.ExecutionResult.failure(orca.PluginResult.RecoverableError, translate_error(language, str(error)))
         return orca.ExecutionResult.success(translate(language, message))
@@ -7127,6 +7405,14 @@ class FlashForgePage(orca.pages.PagesPluginCapabilityBase):
 # Embedded so installing the single .py file also installs its translations.
 TRANSLATIONS = {
     "ca": {
+        "Back": "Enrere",
+        "Next": "Següent",
+        "Enter IP manually": "Introduïu l’IP manualment",
+        "Name (optional)": "Nom (opcional)",
+        "Find the IP address and CheckCode in the printer’s network settings, and the serial number in its device information or on its label.": "Trobareu l’IP i el CheckCode als ajustos de xarxa, i el número de sèrie a la informació o l’etiqueta de la impressora.",
+        "For Creator 5 and 5 Pro, enable LAN-only mode and enter both CheckCode and serial number.": "Per a Creator 5 i 5 Pro, activeu el mode només LAN i introduïu el CheckCode i el número de sèrie.",
+        MONITOR_BIND_ERROR: "El port local de FlashForge ({address}) està ocupat o reservat. Tanqueu totes les finestres de l’OrcaSlicer i torneu-lo a obrir.",
+        "Taller print job card": "Targeta de tasca d’impressió més alta",
         "Remove the print and close the completion dialog on the printer, if shown.": "Retira la peça i tanca el diàleg de finalització a la impressora, si apareix.",
         "While this tab is open": "Mentre aquesta pestanya estigui oberta",
         "Only during an active print": "Només durant una impressió activa",
@@ -7719,6 +8005,14 @@ TRANSLATIONS = {
         "{time} left": "Queden {time}",
     },
     "cs": {
+        "Back": "Zpět",
+        "Next": "Další",
+        "Enter IP manually": "Zadat IP ručně",
+        "Name (optional)": "Název (nepovinný)",
+        "Find the IP address and CheckCode in the printer’s network settings, and the serial number in its device information or on its label.": "IP adresu a CheckCode najdete v nastavení sítě tiskárny, sériové číslo v informacích o zařízení nebo na štítku.",
+        "For Creator 5 and 5 Pro, enable LAN-only mode and enter both CheckCode and serial number.": "U Creator 5 a 5 Pro zapněte režim pouze LAN a zadejte CheckCode i sériové číslo.",
+        MONITOR_BIND_ERROR: "Místní port FlashForge ({address}) se už používá nebo je rezervovaný. Zavřete všechna okna OrcaSliceru a znovu jej spusťte.",
+        "Taller print job card": "Vyšší karta tiskové úlohy",
         "Remove the print and close the completion dialog on the printer, if shown.": "Sejměte výtisk a zavřete dialog o dokončení na tiskárně, pokud se zobrazuje.",
         "While this tab is open": "Když je tato karta otevřená",
         "Only during an active print": "Pouze během aktivního tisku",
@@ -8311,6 +8605,14 @@ TRANSLATIONS = {
         "{time} left": "Zbývá {time}",
     },
     "de": {
+        "Back": "Zurück",
+        "Next": "Weiter",
+        "Enter IP manually": "IP manuell eingeben",
+        "Name (optional)": "Name (optional)",
+        "Find the IP address and CheckCode in the printer’s network settings, and the serial number in its device information or on its label.": "IP-Adresse und CheckCode stehen in den Netzwerkeinstellungen, die Seriennummer in den Geräteinformationen oder auf dem Typenschild.",
+        "For Creator 5 and 5 Pro, enable LAN-only mode and enter both CheckCode and serial number.": "Aktivieren Sie beim Creator 5 und 5 Pro den LAN-only-Modus und geben Sie CheckCode und Seriennummer ein.",
+        MONITOR_BIND_ERROR: "Der lokale FlashForge-Port ({address}) ist belegt oder reserviert. Schließen Sie alle OrcaSlicer-Fenster und starten Sie OrcaSlicer neu.",
+        "Taller print job card": "Höhere Druckauftragskarte",
         "Remove the print and close the completion dialog on the printer, if shown.": "Entferne das Druckteil und schließe den Abschlussdialog am Drucker, falls er angezeigt wird.",
         "While this tab is open": "Solange dieser Tab geöffnet ist",
         "Only during an active print": "Nur bei einem aktiven Druckauftrag",
@@ -8903,6 +9205,14 @@ TRANSLATIONS = {
         "{time} left": "Noch {time}",
     },
     "es": {
+        "Back": "Atrás",
+        "Next": "Siguiente",
+        "Enter IP manually": "Introducir IP manualmente",
+        "Name (optional)": "Nombre (opcional)",
+        "Find the IP address and CheckCode in the printer’s network settings, and the serial number in its device information or on its label.": "Busca la IP y el CheckCode en los ajustes de red de la impresora, y el número de serie en la información del dispositivo o en su etiqueta.",
+        "For Creator 5 and 5 Pro, enable LAN-only mode and enter both CheckCode and serial number.": "Para Creator 5 y 5 Pro, activa el modo solo LAN e introduce el CheckCode y el número de serie.",
+        MONITOR_BIND_ERROR: "El puerto local de FlashForge ({address}) está ocupado o reservado. Cierra todas las ventanas de OrcaSlicer y vuelve a abrirlo.",
+        "Taller print job card": "Tarjeta de trabajo de impresión más alta",
         "Remove the print and close the completion dialog on the printer, if shown.": "Retira la pieza y cierra el aviso de finalización en la impresora si aparece.",
         "While this tab is open": "Mientras esta pestaña esté abierta",
         "Only during an active print": "Solo con una impresión activa",
@@ -9495,6 +9805,14 @@ TRANSLATIONS = {
         "{time} left": "Quedan {time}",
     },
     "eu": {
+        "Back": "Atzera",
+        "Next": "Hurrengoa",
+        "Enter IP manually": "Sartu IPa eskuz",
+        "Name (optional)": "Izena (aukerakoa)",
+        "Find the IP address and CheckCode in the printer’s network settings, and the serial number in its device information or on its label.": "IP helbidea eta CheckCodea sare-ezarpenetan daude, eta serie-zenbakia gailuaren informazioan edo etiketaren gainean.",
+        "For Creator 5 and 5 Pro, enable LAN-only mode and enter both CheckCode and serial number.": "Creator 5 eta 5 Pro modeloetan, gaitu LAN soilik modua eta sartu CheckCodea eta serie-zenbakia.",
+        MONITOR_BIND_ERROR: "FlashForge-ren ataka lokala ({address}) erabilita edo erreserbatuta dago. Itxi OrcaSlicer-en leiho guztiak eta ireki berriro OrcaSlicer.",
+        "Taller print job card": "Inprimatze-lanaren txartel altuagoa",
         "Remove the print and close the completion dialog on the printer, if shown.": "Kendu inprimatutako pieza eta itxi amaierako elkarrizketa inprimagailuan, agertzen bada.",
         "While this tab is open": "Fitxa hau irekita dagoen bitartean",
         "Only during an active print": "Inprimaketa aktiboan soilik",
@@ -10087,6 +10405,14 @@ TRANSLATIONS = {
         "{time} left": "{time} geratzen da",
     },
     "fr": {
+        "Back": "Retour",
+        "Next": "Suivant",
+        "Enter IP manually": "Saisir l’IP manuellement",
+        "Name (optional)": "Nom (facultatif)",
+        "Find the IP address and CheckCode in the printer’s network settings, and the serial number in its device information or on its label.": "L’adresse IP et le CheckCode figurent dans les paramètres réseau, et le numéro de série dans les informations de l’imprimante ou sur son étiquette.",
+        "For Creator 5 and 5 Pro, enable LAN-only mode and enter both CheckCode and serial number.": "Sur Creator 5 et 5 Pro, activez le mode LAN uniquement et saisissez le CheckCode et le numéro de série.",
+        MONITOR_BIND_ERROR: "Le port local de FlashForge ({address}) est déjà utilisé ou réservé. Fermez toutes les fenêtres d’OrcaSlicer, puis relancez OrcaSlicer.",
+        "Taller print job card": "Carte de tâche d’impression plus haute",
         "Remove the print and close the completion dialog on the printer, if shown.": "Retirez la pièce et fermez la boîte de dialogue de fin sur l’imprimante si elle s’affiche.",
         "While this tab is open": "Tant que cet onglet est ouvert",
         "Only during an active print": "Uniquement pendant une impression active",
@@ -10679,6 +11005,14 @@ TRANSLATIONS = {
         "{time} left": "Reste {time}",
     },
     "hu": {
+        "Back": "Vissza",
+        "Next": "Tovább",
+        "Enter IP manually": "IP-cím megadása kézzel",
+        "Name (optional)": "Név (opcionális)",
+        "Find the IP address and CheckCode in the printer’s network settings, and the serial number in its device information or on its label.": "Az IP-cím és a CheckCode a hálózati beállításokban, a sorozatszám az eszközadatoknál vagy a címkén található.",
+        "For Creator 5 and 5 Pro, enable LAN-only mode and enter both CheckCode and serial number.": "Creator 5 és 5 Pro esetén kapcsolja be a csak LAN módot, és adja meg a CheckCode-ot és a sorozatszámot.",
+        MONITOR_BIND_ERROR: "A FlashForge helyi portja ({address}) használatban van vagy le van foglalva. Zárja be az OrcaSlicer összes ablakát, majd indítsa újra az alkalmazást.",
+        "Taller print job card": "Magasabb nyomtatási feladatkártya",
         "Remove the print and close the completion dialog on the printer, if shown.": "Vedd le a nyomatot, és zárd be a nyomtatón a befejezési ablakot, ha megjelenik.",
         "While this tab is open": "Amíg ez a lap nyitva van",
         "Only during an active print": "Csak aktív nyomtatás közben",
@@ -11271,6 +11605,14 @@ TRANSLATIONS = {
         "{time} left": "Hátralévő idő: {time}",
     },
     "it": {
+        "Back": "Indietro",
+        "Next": "Avanti",
+        "Enter IP manually": "Inserisci IP manualmente",
+        "Name (optional)": "Nome (facoltativo)",
+        "Find the IP address and CheckCode in the printer’s network settings, and the serial number in its device information or on its label.": "Trovi IP e CheckCode nelle impostazioni di rete, e il numero di serie nelle informazioni della stampante o sull’etichetta.",
+        "For Creator 5 and 5 Pro, enable LAN-only mode and enter both CheckCode and serial number.": "Per Creator 5 e 5 Pro abilita la modalità solo LAN e inserisci CheckCode e numero di serie.",
+        MONITOR_BIND_ERROR: "La porta locale di FlashForge ({address}) è in uso o riservata. Chiudi tutte le finestre di OrcaSlicer e riaprilo.",
+        "Taller print job card": "Scheda del lavoro di stampa più alta",
         "Remove the print and close the completion dialog on the printer, if shown.": "Rimuovi il pezzo e chiudi l’avviso di fine stampa sulla stampante, se visualizzato.",
         "While this tab is open": "Finché questa scheda è aperta",
         "Only during an active print": "Solo con una stampa attiva",
@@ -11863,6 +12205,14 @@ TRANSLATIONS = {
         "{time} left": "Tempo rimasto: {time}",
     },
     "ja": {
+        "Back": "戻る",
+        "Next": "次へ",
+        "Enter IP manually": "IPを手動入力",
+        "Name (optional)": "名前（任意）",
+        "Find the IP address and CheckCode in the printer’s network settings, and the serial number in its device information or on its label.": "IPアドレスとCheckCodeはプリンターのネットワーク設定で、シリアル番号は機器情報または本体ラベルで確認できます。",
+        "For Creator 5 and 5 Pro, enable LAN-only mode and enter both CheckCode and serial number.": "Creator 5と5 ProではLAN専用モードを有効にし、CheckCodeとシリアル番号を入力してください。",
+        MONITOR_BIND_ERROR: "FlashForge のローカルポート ({address}) は使用中か予約済みです。OrcaSlicer のすべてのウィンドウを閉じてから、OrcaSlicer を起動し直してください。",
+        "Taller print job card": "印刷ジョブカードを高くする",
         "Remove the print and close the completion dialog on the printer, if shown.": "造形物を取り外し、プリンターに完了ダイアログが表示されていれば閉じてください。",
         "While this tab is open": "このタブを開いている間",
         "Only during an active print": "印刷ジョブが進行中のときのみ",
@@ -12455,6 +12805,14 @@ TRANSLATIONS = {
         "{time} left": "残り {time}",
     },
     "ko": {
+        "Back": "뒤로",
+        "Next": "다음",
+        "Enter IP manually": "IP 직접 입력",
+        "Name (optional)": "이름(선택 사항)",
+        "Find the IP address and CheckCode in the printer’s network settings, and the serial number in its device information or on its label.": "IP 주소와 CheckCode는 프린터의 네트워크 설정에서, 일련번호는 기기 정보 또는 라벨에서 확인하세요.",
+        "For Creator 5 and 5 Pro, enable LAN-only mode and enter both CheckCode and serial number.": "Creator 5와 5 Pro는 LAN 전용 모드를 켜고 CheckCode와 일련번호를 모두 입력하세요.",
+        MONITOR_BIND_ERROR: "FlashForge의 로컬 포트({address})가 사용 중이거나 예약되어 있습니다. OrcaSlicer 창을 모두 닫고 OrcaSlicer를 다시 여세요.",
+        "Taller print job card": "인쇄 작업 카드 높이 늘리기",
         "Remove the print and close the completion dialog on the printer, if shown.": "출력물을 제거하고 프린터에 완료 창이 표시되면 닫으세요.",
         "While this tab is open": "이 탭이 열려 있는 동안",
         "Only during an active print": "인쇄 작업이 진행 중일 때만",
@@ -13047,6 +13405,14 @@ TRANSLATIONS = {
         "{time} left": "남은 시간: {time}",
     },
     "lt": {
+        "Back": "Atgal",
+        "Next": "Toliau",
+        "Enter IP manually": "Įvesti IP rankiniu būdu",
+        "Name (optional)": "Pavadinimas (nebūtinas)",
+        "Find the IP address and CheckCode in the printer’s network settings, and the serial number in its device information or on its label.": "IP adresą ir CheckCode rasite tinklo nustatymuose, o serijos numerį – įrenginio informacijoje arba etiketėje.",
+        "For Creator 5 and 5 Pro, enable LAN-only mode and enter both CheckCode and serial number.": "Creator 5 ir 5 Pro įjunkite tik LAN režimą ir įveskite CheckCode bei serijos numerį.",
+        MONITOR_BIND_ERROR: "„FlashForge“ vietinis prievadas ({address}) yra naudojamas arba rezervuotas. Uždarykite visus „OrcaSlicer“ langus ir vėl paleiskite „OrcaSlicer“.",
+        "Taller print job card": "Aukštesnė spausdinimo užduoties kortelė",
         "Remove the print and close the completion dialog on the printer, if shown.": "Nuimkite spaudinį ir užverkite baigimo langą spausdintuve, jei jis rodomas.",
         "While this tab is open": "Kol šis skirtukas atvertas",
         "Only during an active print": "Tik vykstant spausdinimui",
@@ -13639,6 +14005,14 @@ TRANSLATIONS = {
         "{time} left": "Liko {time}",
     },
     "nl": {
+        "Back": "Terug",
+        "Next": "Volgende",
+        "Enter IP manually": "IP handmatig invoeren",
+        "Name (optional)": "Naam (optioneel)",
+        "Find the IP address and CheckCode in the printer’s network settings, and the serial number in its device information or on its label.": "Het IP-adres en de CheckCode staan bij de netwerkinstellingen, het serienummer bij de apparaatgegevens of op het label.",
+        "For Creator 5 and 5 Pro, enable LAN-only mode and enter both CheckCode and serial number.": "Schakel voor Creator 5 en 5 Pro de LAN-only-modus in en voer de CheckCode en het serienummer in.",
+        MONITOR_BIND_ERROR: "De lokale poort van FlashForge ({address}) is in gebruik of gereserveerd. Sluit alle vensters van OrcaSlicer en open OrcaSlicer opnieuw.",
+        "Taller print job card": "Hogere afdruktaakkaart",
         "Remove the print and close the completion dialog on the printer, if shown.": "Verwijder de afdruk en sluit het voltooiingsvenster op de printer als het wordt weergegeven.",
         "While this tab is open": "Zolang dit tabblad open is",
         "Only during an active print": "Alleen bij een actieve afdruktaak",
@@ -14231,6 +14605,14 @@ TRANSLATIONS = {
         "{time} left": "Nog {time}",
     },
     "pl": {
+        "Back": "Wstecz",
+        "Next": "Dalej",
+        "Enter IP manually": "Wpisz adres IP ręcznie",
+        "Name (optional)": "Nazwa (opcjonalna)",
+        "Find the IP address and CheckCode in the printer’s network settings, and the serial number in its device information or on its label.": "Adres IP i CheckCode znajdziesz w ustawieniach sieci, a numer seryjny w informacjach o urządzeniu lub na etykiecie.",
+        "For Creator 5 and 5 Pro, enable LAN-only mode and enter both CheckCode and serial number.": "W Creator 5 i 5 Pro włącz tryb tylko LAN i wpisz CheckCode oraz numer seryjny.",
+        MONITOR_BIND_ERROR: "Lokalny port FlashForge ({address}) jest zajęty lub zarezerwowany. Zamknij wszystkie okna OrcaSlicer i uruchom program ponownie.",
+        "Taller print job card": "Wyższa karta zadania druku",
         "Remove the print and close the completion dialog on the printer, if shown.": "Zdejmij wydruk i zamknij okno zakończenia na drukarce, jeśli jest widoczne.",
         "While this tab is open": "Gdy ta karta jest otwarta",
         "Only during an active print": "Tylko podczas aktywnego drukowania",
@@ -14823,6 +15205,14 @@ TRANSLATIONS = {
         "{time} left": "Pozostało {time}",
     },
     "pt-BR": {
+        "Back": "Voltar",
+        "Next": "Avançar",
+        "Enter IP manually": "Inserir IP manualmente",
+        "Name (optional)": "Nome (opcional)",
+        "Find the IP address and CheckCode in the printer’s network settings, and the serial number in its device information or on its label.": "O IP e o CheckCode estão nas configurações de rede. Veja o número de série nas informações do dispositivo ou na etiqueta.",
+        "For Creator 5 and 5 Pro, enable LAN-only mode and enter both CheckCode and serial number.": "Na Creator 5 e 5 Pro, ative o modo somente LAN e insira o CheckCode e o número de série.",
+        MONITOR_BIND_ERROR: "A porta local do FlashForge ({address}) está em uso ou reservada. Feche todas as janelas do OrcaSlicer e abra o programa novamente.",
+        "Taller print job card": "Cartão de impressão mais alto",
         "Remove the print and close the completion dialog on the printer, if shown.": "Retire a peça e feche o aviso de conclusão na impressora, se estiver visível.",
         "While this tab is open": "Enquanto esta aba estiver aberta",
         "Only during an active print": "Somente durante uma impressão ativa",
@@ -15415,6 +15805,14 @@ TRANSLATIONS = {
         "{time} left": "Tempo restante: {time}",
     },
     "ro": {
+        "Back": "Înapoi",
+        "Next": "Înainte",
+        "Enter IP manually": "Introdu IP-ul manual",
+        "Name (optional)": "Nume (opțional)",
+        "Find the IP address and CheckCode in the printer’s network settings, and the serial number in its device information or on its label.": "Găsești IP-ul și CheckCode-ul în setările de rețea, iar numărul de serie în informațiile imprimantei sau pe etichetă.",
+        "For Creator 5 and 5 Pro, enable LAN-only mode and enter both CheckCode and serial number.": "Pentru Creator 5 și 5 Pro, activează modul doar LAN și introdu atât CheckCode-ul, cât și numărul de serie.",
+        MONITOR_BIND_ERROR: "Portul local FlashForge ({address}) este ocupat sau rezervat. Închide toate ferestrele OrcaSlicer și redeschide aplicația.",
+        "Taller print job card": "Card de imprimare mai înalt",
         "Remove the print and close the completion dialog on the printer, if shown.": "Îndepărtează piesa și închide fereastra de finalizare de pe imprimantă, dacă apare.",
         "While this tab is open": "Cât timp această filă este deschisă",
         "Only during an active print": "Doar în timpul unei imprimări active",
@@ -16007,6 +16405,14 @@ TRANSLATIONS = {
         "{time} left": "Timp rămas: {time}",
     },
     "ru": {
+        "Back": "Назад",
+        "Next": "Далее",
+        "Enter IP manually": "Ввести IP вручную",
+        "Name (optional)": "Имя (необязательно)",
+        "Find the IP address and CheckCode in the printer’s network settings, and the serial number in its device information or on its label.": "IP-адрес и CheckCode указаны в настройках сети принтера, а серийный номер — в сведениях об устройстве или на наклейке.",
+        "For Creator 5 and 5 Pro, enable LAN-only mode and enter both CheckCode and serial number.": "Для Creator 5 и 5 Pro включите режим «Только LAN» и заполните CheckCode и серийный номер.",
+        MONITOR_BIND_ERROR: "Локальный порт FlashForge ({address}) занят или зарезервирован. Закройте все окна OrcaSlicer и запустите его снова.",
+        "Taller print job card": "Высокая карточка задания",
         "Remove the print and close the completion dialog on the printer, if shown.": "Снимите деталь со стола и закройте окно «Печать завершена» на экране принтера, если оно открыто.",
         "While this tab is open": "Пока открыта эта вкладка",
         "Only during an active print": "Только при активном задании",
@@ -16599,6 +17005,14 @@ TRANSLATIONS = {
         "{time} left": "Осталось {time}",
     },
     "sv": {
+        "Back": "Tillbaka",
+        "Next": "Nästa",
+        "Enter IP manually": "Ange IP manuellt",
+        "Name (optional)": "Namn (valfritt)",
+        "Find the IP address and CheckCode in the printer’s network settings, and the serial number in its device information or on its label.": "IP-adressen och CheckCode finns i nätverksinställningarna. Serienumret finns i enhetsinformationen eller på etiketten.",
+        "For Creator 5 and 5 Pro, enable LAN-only mode and enter both CheckCode and serial number.": "För Creator 5 och 5 Pro aktiverar du läget Endast LAN och anger både CheckCode och serienummer.",
+        MONITOR_BIND_ERROR: "Den lokala porten för FlashForge ({address}) används eller är reserverad. Stäng alla OrcaSlicer-fönster och starta OrcaSlicer igen.",
+        "Taller print job card": "Högre kort för utskriftsjobb",
         "Remove the print and close the completion dialog on the printer, if shown.": "Ta bort utskriften och stäng dialogrutan på skrivaren om den visas.",
         "While this tab is open": "Medan den här fliken är öppen",
         "Only during an active print": "Endast under en aktiv utskrift",
@@ -17191,6 +17605,14 @@ TRANSLATIONS = {
         "{time} left": "{time} kvar",
     },
     "th": {
+        "Back": "ย้อนกลับ",
+        "Next": "ถัดไป",
+        "Enter IP manually": "ป้อน IP ด้วยตนเอง",
+        "Name (optional)": "ชื่อ (ไม่บังคับ)",
+        "Find the IP address and CheckCode in the printer’s network settings, and the serial number in its device information or on its label.": "ดูที่อยู่ IP และ CheckCode ในการตั้งค่าเครือข่ายของเครื่องพิมพ์ และดูหมายเลขซีเรียลในข้อมูลอุปกรณ์หรือบนฉลาก",
+        "For Creator 5 and 5 Pro, enable LAN-only mode and enter both CheckCode and serial number.": "สำหรับ Creator 5 และ 5 Pro ให้เปิดโหมด LAN เท่านั้นและป้อนทั้ง CheckCode และหมายเลขซีเรียล",
+        MONITOR_BIND_ERROR: "พอร์ตภายในเครื่องของ FlashForge ({address}) ถูกใช้งานหรือจองไว้. ปิดหน้าต่าง OrcaSlicer ทั้งหมดแล้วเปิด OrcaSlicer อีกครั้ง",
+        "Taller print job card": "เพิ่มความสูงการ์ดงานพิมพ์",
         "Remove the print and close the completion dialog on the printer, if shown.": "นำชิ้นงานออกและปิดหน้าต่างแจ้งการพิมพ์เสร็จบนเครื่องพิมพ์หากปรากฏ",
         "While this tab is open": "ขณะที่เปิดแท็บนี้",
         "Only during an active print": "เฉพาะเมื่อมีงานพิมพ์ที่กำลังดำเนินการ",
@@ -17783,6 +18205,14 @@ TRANSLATIONS = {
         "{time} left": "เหลือ {time}",
     },
     "tr": {
+        "Back": "Geri",
+        "Next": "İleri",
+        "Enter IP manually": "IP adresini elle gir",
+        "Name (optional)": "Ad (isteğe bağlı)",
+        "Find the IP address and CheckCode in the printer’s network settings, and the serial number in its device information or on its label.": "IP adresi ve CheckCode ağ ayarlarında, seri numarası ise cihaz bilgilerinde veya etikette bulunur.",
+        "For Creator 5 and 5 Pro, enable LAN-only mode and enter both CheckCode and serial number.": "Creator 5 ve 5 Pro için yalnızca LAN modunu açın ve CheckCode ile seri numarasını girin.",
+        MONITOR_BIND_ERROR: "FlashForge’un yerel bağlantı noktası ({address}) kullanımda veya ayrılmış. Tüm OrcaSlicer pencerelerini kapatıp OrcaSlicer’ı yeniden açın.",
+        "Taller print job card": "Daha yüksek yazdırma işi kartı",
         "Remove the print and close the completion dialog on the printer, if shown.": "Baskıyı çıkarın ve görüntüleniyorsa yazıcıdaki tamamlanma penceresini kapatın.",
         "While this tab is open": "Bu sekme açıkken",
         "Only during an active print": "Yalnızca etkin bir baskı işi sırasında",
@@ -18375,6 +18805,14 @@ TRANSLATIONS = {
         "{time} left": "Kalan süre: {time}",
     },
     "uk": {
+        "Back": "Назад",
+        "Next": "Далі",
+        "Enter IP manually": "Ввести IP вручну",
+        "Name (optional)": "Назва (необов’язково)",
+        "Find the IP address and CheckCode in the printer’s network settings, and the serial number in its device information or on its label.": "IP-адреса й CheckCode є в налаштуваннях мережі принтера, а серійний номер — у відомостях про пристрій або на наліпці.",
+        "For Creator 5 and 5 Pro, enable LAN-only mode and enter both CheckCode and serial number.": "Для Creator 5 і 5 Pro увімкніть режим «Лише LAN» і введіть CheckCode та серійний номер.",
+        MONITOR_BIND_ERROR: "Локальний порт FlashForge ({address}) зайнятий або зарезервований. Закрийте всі вікна OrcaSlicer і запустіть його знову.",
+        "Taller print job card": "Вища картка завдання друку",
         "Remove the print and close the completion dialog on the printer, if shown.": "Зніміть деталь зі столу та закрийте вікно завершення друку на екрані принтера, якщо воно відкрите.",
         "While this tab is open": "Поки відкрита ця вкладка",
         "Only during an active print": "Лише під час активного завдання",
@@ -18967,6 +19405,14 @@ TRANSLATIONS = {
         "{time} left": "Залишилося {time}",
     },
     "vi": {
+        "Back": "Quay lại",
+        "Next": "Tiếp theo",
+        "Enter IP manually": "Nhập IP thủ công",
+        "Name (optional)": "Tên (không bắt buộc)",
+        "Find the IP address and CheckCode in the printer’s network settings, and the serial number in its device information or on its label.": "Xem địa chỉ IP và CheckCode trong cài đặt mạng. Xem số sê-ri trong thông tin thiết bị hoặc trên nhãn máy in.",
+        "For Creator 5 and 5 Pro, enable LAN-only mode and enter both CheckCode and serial number.": "Với Creator 5 và 5 Pro, bật chế độ chỉ LAN rồi nhập cả CheckCode và số sê-ri.",
+        MONITOR_BIND_ERROR: "Cổng cục bộ của FlashForge ({address}) đang được dùng hoặc đã được dành riêng. Hãy đóng tất cả cửa sổ OrcaSlicer rồi mở lại ứng dụng.",
+        "Taller print job card": "Thẻ lệnh in cao hơn",
         "Remove the print and close the completion dialog on the printer, if shown.": "Lấy bản in ra và đóng hộp thoại hoàn tất trên máy in nếu hộp thoại đang hiển thị.",
         "While this tab is open": "Khi thẻ này đang mở",
         "Only during an active print": "Chỉ khi có tác vụ in đang chạy",
@@ -19559,6 +20005,14 @@ TRANSLATIONS = {
         "{time} left": "Còn {time}",
     },
     "zh-CN": {
+        "Back": "上一步",
+        "Next": "下一步",
+        "Enter IP manually": "手动输入 IP",
+        "Name (optional)": "名称（可选）",
+        "Find the IP address and CheckCode in the printer’s network settings, and the serial number in its device information or on its label.": "在打印机的网络设置中查看 IP 地址和 CheckCode，在设备信息或机身标签上查看序列号。",
+        "For Creator 5 and 5 Pro, enable LAN-only mode and enter both CheckCode and serial number.": "对于 Creator 5 和 5 Pro，请启用仅局域网模式并填写 CheckCode 和序列号。",
+        MONITOR_BIND_ERROR: "FlashForge 的本地端口（{address}）已被占用或保留。请关闭所有 OrcaSlicer 窗口，然后重新打开 OrcaSlicer。",
+        "Taller print job card": "加高打印任务卡片",
         "Remove the print and close the completion dialog on the printer, if shown.": "取下打印件。如果打印机显示完成提示，请关闭提示。",
         "While this tab is open": "此选项卡打开时",
         "Only during an active print": "仅在有活动打印任务时",
@@ -20151,6 +20605,14 @@ TRANSLATIONS = {
         "{time} left": "剩余 {time}",
     },
     "zh-TW": {
+        "Back": "上一步",
+        "Next": "下一步",
+        "Enter IP manually": "手動輸入 IP",
+        "Name (optional)": "名稱（選填）",
+        "Find the IP address and CheckCode in the printer’s network settings, and the serial number in its device information or on its label.": "在印表機的網路設定中查看 IP 位址和 CheckCode，在裝置資訊或機身標籤上查看序號。",
+        "For Creator 5 and 5 Pro, enable LAN-only mode and enter both CheckCode and serial number.": "使用 Creator 5 和 5 Pro 時，請啟用僅區域網路模式並輸入 CheckCode 和序號。",
+        MONITOR_BIND_ERROR: "FlashForge 的本機連接埠（{address}）已被使用或保留。請關閉所有 OrcaSlicer 視窗，再重新開啟 OrcaSlicer。",
+        "Taller print job card": "加高列印工作卡片",
         "Remove the print and close the completion dialog on the printer, if shown.": "取下列印件。如果印表機顯示完成提示，請關閉提示。",
         "While this tab is open": "此分頁開啟時",
         "Only during an active print": "僅在有進行中的列印工作時",

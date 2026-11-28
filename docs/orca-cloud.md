@@ -1,4 +1,4 @@
-Follow your FlashForge prints inside OrcaSlicer. The FlashForge tab shows progress, time remaining, nozzle and bed temperatures, printer files and supported manual controls. It also supports cameras on compatible models. The plugin connects to your printer over the local network.
+Follow your FlashForge prints inside OrcaSlicer. The monitor shows progress, time remaining, nozzle and bed temperatures, printer files and supported manual controls. It also supports cameras on compatible models. The plugin connects to your printer over the local network.
 
 ## Monitor
 
@@ -20,7 +20,7 @@ See locally recorded print times and outcomes across configured and archived pri
 
 ## Settings
 
-Choose the theme and layout density in Appearance. Monitor, All printers, Printer Files and Print History each have their own settings page.
+Choose the theme and layout density in Appearance. In Monitor settings, choose the built-in Printer tab or a separate FlashForge tab. Restart OrcaSlicer to switch tabs. The taller Print job card is enabled by default and can be switched off.
 
 ![Monitor settings showing chart scales and temperature readings](orca-cloud/06-monitor-settings.png)
 
@@ -32,12 +32,12 @@ Supported idle printers show Home, XY and Z movement, filament controls or calib
 
 ## Connect a printer
 
-1. With the plugin enabled, open **FlashForge → Settings** in OrcaSlicer.
-2. Click **Add printer**, enter the printer’s IPv4 address and CheckCode, then click **Save**. Creator 5 and 5 Pro also require the serial number.
+1. Open the built-in **Printer** tab with a FlashForge printer profile selected. If no FlashForge profile is selected, run **FlashForge Device Tab** from Speed Dial. Choose the tab you want to use in the setup wizard.
+2. Find your printer or enter its IPv4 address, then check the connection and save. Creator 5 and 5 Pro require the serial number and CheckCode, with LAN-only mode enabled on the printer. Add more printers later in **Settings → Connection**.
 
 Your printer and computer need to be on the same local network. For basic monitoring of Adventurer 5M and 5M Pro, the address is enough. The CheckCode enables additional readings and supported controls.
 
-![Two steps to connect: open Settings, enter the printer details and save](orca-cloud/05-connect-printer.png)
+![Printer connection settings for adding more printers](orca-cloud/05-connect-printer.png)
 
 Screenshots use demonstration data. Requires OrcaSlicer 2.5.0 or newer on Windows x64.
 
